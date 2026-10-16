@@ -1,0 +1,366 @@
+"""配置加载：YAML 文件 + 环境变量覆盖 + 合理默认值。"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - PyYAML 缺失时给出明确指引
+    yaml = None  # type: ignore[assignment]
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+# --------------------------------------------------------------------------
+# 配置数据类
+# --------------------------------------------------------------------------
+@dataclass
+class LLMConfig:
+    provider: str = "mock"          # openai | deepseek | ollama | mock
+    base_url: str = "https://api.openai.com/v1"
+    api_key: str = ""
+    model: str = "gpt-4o-mini"
+    temperature: float = 0.1
+    max_tokens: int = 4096
+    timeout: int = 120
+    json_mode: bool = True
+
+    @property
+    def effective_base_url(self) -> str:
+        if self.provider == "deepseek" and "deepseek" not in self.base_url:
+            return "https://api.deepseek.com/v1"
+        if self.provider == "ollama" and self.base_url.startswith("https://api.openai"):
+            return "http://localhost:11434/v1"
+        return self.base_url.rstrip("/")
+
+    @property
+    def effective_model(self) -> str:
+        if self.provider == "deepseek" and self.model == "gpt-4o-mini":
+            return "deepseek-chat"
+        if self.provider == "ollama" and self.model == "gpt-4o-mini":
+            return "qwen2.5:7b"
+        return self.model
+
+
+@dataclass
+class SourceConfig:
+    enabled: bool = True
+    mailto: str = ""
+    api_key: str = ""
+
+
+@dataclass
+class SourcesConfig:
+    crossref: SourceConfig = field(default_factory=lambda: SourceConfig(mailto="your_email@example.com"))
+    openalex: SourceConfig = field(default_factory=lambda: SourceConfig(mailto="your_email@example.com"))
+    arxiv: SourceConfig = field(default_factory=SourceConfig)
+    semantic_scholar: SourceConfig = field(default_factory=lambda: SourceConfig(enabled=False))
+    unpaywall: SourceConfig = field(default_factory=lambda: SourceConfig(enabled=False))
+
+    def get(self, name: str) -> SourceConfig:
+        return getattr(self, name, SourceConfig(enabled=False))
+
+
+@dataclass
+class VerificationConfig:
+    verified_threshold: float = 0.92
+    likely_threshold: float = 0.82
+    require_year_match: bool = False
+    max_candidates: int = 5
+
+
+@dataclass
+class RetrievalConfig:
+    chunk_size: int = 900
+    chunk_overlap: int = 150
+    top_k: int = 8
+    min_score: float = 0.0
+
+
+@dataclass
+class QAConfig:
+    strict_citation_check: bool = True
+    refuse_when_no_evidence: bool = True
+
+
+@dataclass
+class RecommendConfig:
+    default_limit: int = 8
+    strategies: list[str] = field(default_factory=lambda: ["openalex_related", "keyword", "local"])
+    auto_import: bool = False
+
+
+@dataclass
+class ExportConfig:
+    notes_dir: str = "./notes"
+    formats: list[str] = field(default_factory=lambda: ["markdown"])
+
+
+@dataclass
+class ContextConfig:
+    """上下文管理配置。
+
+    参数取「校准值」而非「定律」—— 参考实现的经验起点，本项目实测后再标定。
+    """
+
+    window_tokens: int = 32000          # 模型上下文窗口
+    step_tokens: int = 30000            # 增长门控步长（绝对值，与窗口解耦）
+    retain_tokens: int | None = None    # 保留预算（绝对）；与 retain_ratio 互斥
+    retain_ratio: float | None = None   # 保留预算（窗口比例）；与 retain_tokens 互斥
+    nudge_ratio: float = 0.75           # 压力层：温和触发
+    emergency_ratio: float = 0.95       # 压力层：紧急触发 + 硬截断
+    output_reserve_tokens: int = 4096   # 输出预留
+    overflow_retries: int = 1           # 窗口溢出后的恢复重试上限
+    summary_max_ratio: float = 0.6      # 收缩验证：摘要不得超过被遮蔽内容的这个比例
+    recent_turns_protected: int = 5     # 最近 N 条消息受保护，不参与压缩
+    cjk_chars_per_token: float = 1.5    # CJK 估算系数（4 字符/token 对中文严重低估）
+    latin_chars_per_token: float = 4.0  # 拉丁文估算系数
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def effective_retain_tokens(self) -> int:
+        """保留预算的实际取值（token）。"""
+        if self.retain_tokens is not None:
+            return self.retain_tokens
+        if self.retain_ratio is not None:
+            return int(self.window_tokens * self.retain_ratio)
+        # 默认：保留 30% 窗口
+        return int(self.window_tokens * 0.30)
+
+    @property
+    def available_tokens(self) -> int:
+        return self.window_tokens - self.output_reserve_tokens
+
+
+@dataclass
+class MemoryConfig:
+    """记忆系统配置。一期只做显式写入。"""
+
+    resident_token_budget: int = 500    # 常驻层硬上限 —— 防止偏好记忆挤压检索片段预算
+    resident_max_items: int = 12        # 常驻条数上限
+    allow_implicit: bool = False        # 一期固定 False：不做隐式推断
+    retrieval_top_k: int = 5            # 按需层检索条数
+
+
+@dataclass
+class AppConfig:
+    name: str = "文献棱镜 LitPrism"
+    data_dir: str = "./data"
+    version: str = ""
+
+
+@dataclass
+class Config:
+    app: AppConfig = field(default_factory=AppConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    sources: SourcesConfig = field(default_factory=SourcesConfig)
+    verification: VerificationConfig = field(default_factory=VerificationConfig)
+    retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
+    qa: QAConfig = field(default_factory=QAConfig)
+    recommend: RecommendConfig = field(default_factory=RecommendConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    config_path: Path | None = None
+    # 载入期校验产生的警告（未知键等）—— 不阻断启动，但要在 UI 上提示一次
+    config_warnings: list[str] = field(default_factory=list)
+
+    # ---- 便捷属性 ----
+    @property
+    def data_path(self) -> Path:
+        p = Path(self.app.data_dir)
+        if not p.is_absolute():
+            p = (PROJECT_ROOT / p).resolve()
+        return p
+
+    @property
+    def db_path(self) -> Path:
+        return self.data_path / "litprism.db"
+
+    @property
+    def cache_path(self) -> Path:
+        return self.data_path / "cache"
+
+    @property
+    def notes_path(self) -> Path:
+        p = Path(self.export.notes_dir)
+        if not p.is_absolute():
+            p = (self.data_path / p).resolve()
+        return p
+
+    def ensure_dirs(self) -> None:
+        for d in (self.data_path, self.cache_path, self.notes_path):
+            d.mkdir(parents=True, exist_ok=True)
+
+
+# --------------------------------------------------------------------------
+# 加载逻辑
+# --------------------------------------------------------------------------
+def _merge_dict(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _merge_dict(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _from_dict(raw: dict) -> Config:
+    raw = raw or {}
+    cfg = Config()
+    if "app" in raw:
+        cfg.app = AppConfig(**{k: v for k, v in raw["app"].items() if k in AppConfig.__dataclass_fields__})
+    if "llm" in raw:
+        cfg.llm = LLMConfig(**{k: v for k, v in raw["llm"].items() if k in LLMConfig.__dataclass_fields__})
+    if "sources" in raw:
+        sc = SourcesConfig()
+        for name, sub in raw["sources"].items():
+            cur = sc.get(name)
+            for k, v in (sub or {}).items():
+                if hasattr(cur, k):
+                    setattr(cur, k, v)
+        cfg.sources = sc
+    for key, cls in (
+        ("verification", VerificationConfig),
+        ("retrieval", RetrievalConfig),
+        ("qa", QAConfig),
+        ("recommend", RecommendConfig),
+        ("export", ExportConfig),
+        ("context", ContextConfig),
+        ("memory", MemoryConfig),
+    ):
+        if key in raw:
+            sub = raw[key] or {}
+            known = {k: v for k, v in sub.items() if k in cls.__dataclass_fields__}
+            unknown = {k: v for k, v in sub.items() if k not in cls.__dataclass_fields__}
+            obj = cls(**known)
+            # 未知键不丢弃（保留在 extra 里）—— 便于 check_config 报告
+            if unknown and hasattr(obj, "extra"):
+                obj.extra.update(unknown)
+            setattr(cfg, key, obj)
+    return cfg
+
+
+def _apply_env(cfg: Config) -> Config:
+    env = os.environ
+    if env.get("LITPRISM_BASE_URL"):
+        cfg.llm.base_url = env["LITPRISM_BASE_URL"]
+    if env.get("LITPRISM_API_KEY"):
+        cfg.llm.api_key = env["LITPRISM_API_KEY"]
+    if env.get("LITPRISM_MODEL"):
+        cfg.llm.model = env["LITPRISM_MODEL"]
+    if env.get("LITPRISM_PROVIDER"):
+        cfg.llm.provider = env["LITPRISM_PROVIDER"]
+    if env.get("LITPRISM_DATA_DIR"):
+        cfg.app.data_dir = env["LITPRISM_DATA_DIR"]
+    mailto = env.get("LITPRISM_MAILTO")
+    if mailto:
+        cfg.sources.crossref.mailto = mailto
+        cfg.sources.openalex.mailto = mailto
+    if env.get("S2_API_KEY"):
+        cfg.sources.semantic_scholar.api_key = env["S2_API_KEY"]
+        cfg.sources.semantic_scholar.enabled = True
+
+    # 常见第三方 Key 自动探测，省去手填
+    if not cfg.llm.api_key:
+        for var, provider, url, model in (
+            ("OPENAI_API_KEY", "openai", "https://api.openai.com/v1", None),
+            ("DEEPSEEK_API_KEY", "deepseek", "https://api.deepseek.com/v1", "deepseek-chat"),
+            ("DASHSCOPE_API_KEY", "openai", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
+            ("MOONSHOT_API_KEY", "openai", "https://api.moonshot.cn/v1", "moonshot-v1-8k"),
+            ("ZHIPU_API_KEY", "openai", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
+        ):
+            if env.get(var):
+                cfg.llm.provider = provider
+                cfg.llm.api_key = env[var]
+                cfg.llm.base_url = url
+                if model:
+                    cfg.llm.model = model
+                break
+    return cfg
+
+
+def _validate(cfg: Config) -> None:
+    """载入期 fail-fast 校验。
+
+    **区分两类**（配置设计的核心判断）：
+
+    * **错误** → 抛异常。会让系统进入自相矛盾状态的组合必须当场拒绝，
+      而不是等到运行中才发现"压缩了还是超窗口"。
+    * **警告** → 收集到 ``cfg.config_warnings``。未知键、可选字段畸形，
+      静默丢弃 + 一次提示，不阻断启动。
+    """
+    from .invariants import ContextConfigView, check_config
+
+    view = ContextConfigView(
+        window_tokens=cfg.context.window_tokens,
+        step_tokens=cfg.context.step_tokens,
+        retain_tokens=cfg.context.retain_tokens,
+        retain_ratio=cfg.context.retain_ratio,
+        nudge_ratio=cfg.context.nudge_ratio,
+        emergency_ratio=cfg.context.emergency_ratio,
+        output_reserve_tokens=cfg.context.output_reserve_tokens,
+        overflow_retries=cfg.context.overflow_retries,
+        extra=cfg.context.extra,
+    )
+    result = check_config(view)
+    cfg.config_warnings = [str(v) for v in result.warnings]
+    if not result.ok:
+        detail = "\n  ".join(str(v) for v in result.errors)
+        raise ValueError(f"上下文管理配置不合法：\n  {detail}")
+
+    if cfg.memory.resident_token_budget <= 0:
+        raise ValueError(
+            f"memory.resident_token_budget 必须为正，收到 {cfg.memory.resident_token_budget}。"
+            "常驻记忆无上限增长会持续挤压检索片段的预算。"
+        )
+
+
+def load_config(path: str | Path | None = None) -> Config:
+    """加载配置。
+
+    查找顺序：显式路径 → 环境变量 LITPRISM_CONFIG → ./config/config.yaml
+    → ./config/config.example.yaml → 内置默认值。
+    """
+    candidates: list[Path] = []
+    if path:
+        candidates.append(Path(path))
+    if os.environ.get("LITPRISM_CONFIG"):
+        candidates.append(Path(os.environ["LITPRISM_CONFIG"]))
+    candidates += [
+        PROJECT_ROOT / "config" / "config.yaml",
+        Path.cwd() / "config" / "config.yaml",
+        PROJECT_ROOT / "config" / "config.example.yaml",
+    ]
+
+    raw: dict[str, Any] = {}
+    used: Path | None = None
+    for cand in candidates:
+        if cand.exists():
+            if yaml is None:
+                raise RuntimeError("缺少 PyYAML，请先执行：python -m pip install PyYAML")
+            with open(cand, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+            used = cand
+            break
+
+    cfg = _from_dict(raw)
+    cfg = _apply_env(cfg)
+    cfg.config_path = used
+    cfg.ensure_dirs()
+    _validate(cfg)
+    return cfg
+
+
+def config_to_dict(cfg: Config) -> dict:
+    d = asdict(cfg)
+    d.pop("config_path", None)
+    if d.get("llm", {}).get("api_key"):
+        d["llm"]["api_key"] = "***"
+    return d

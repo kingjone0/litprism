@@ -1,0 +1,21 @@
+# 文献棱镜 LitPrism — 论文知识解读 Agent
+# 运行环境：Python 3.10+（推荐 3.13）
+#
+# 安装：python -m pip install -r requirements.txt
+# 若默认源不可用，可加：-i https://pypi.org/simple/
+
+# ---- 必需 ----
+requests>=2.31.0          # 学术数据库 API 调用（Crossref / OpenAlex / arXiv / Semantic Scholar）
+PyYAML>=6.0               # 配置文件解析
+
+# ---- PDF 解析（二选一，至少装一个）----
+pymupdf>=1.24.0           # 首选：速度快、版面还原好
+# pypdf>=4.0              # 备选：纯 Python，无二进制依赖
+
+# ---- Web 界面（可选，只用 CLI 可以不装）----
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
+# ---- 增强能力（可选）----
+# sentence-transformers>=2.5.0   # 语义向量检索，未安装时自动降级为 BM25 词法检索
+# numpy>=1.26.0                  # TF-IDF 跨论文关联计算（未安装时降级为纯 Python 实现）

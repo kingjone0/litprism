@@ -1,0 +1,25 @@
+# 统一换行符：仓库内一律 LF，检出时由 git 按平台处理
+* text=auto
+
+*.py      text eol=lf
+*.md      text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.toml    text eol=lf
+*.json    text eol=lf
+*.html    text eol=lf
+*.css     text eol=lf
+*.js      text eol=lf
+*.sh      text eol=lf
+*.bat     text eol=crlf
+
+# 二进制
+*.pdf     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.webp    binary
+*.ico     binary
+*.db      binary
+*.exe     binary
+*.dll     binary

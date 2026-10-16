@@ -1,0 +1,114 @@
+# ============================================================
+# 文献棱镜 LitPrism 配置文件
+# 复制为 config.yaml 后按需修改：
+#   copy config\config.example.yaml config\config.yaml
+# 所有字段均可用环境变量覆盖（见每项后的 ENV 说明）
+# ============================================================
+
+app:
+  name: "文献棱镜 LitPrism"
+  # 本地知识库目录（数据库、缓存、导出文件都放这里）
+  data_dir: "./data"
+
+# ---------------- 大模型 ----------------
+llm:
+  # provider 可选：openai | deepseek | ollama | mock
+  #   openai   —— 任意 OpenAI 兼容端点（OpenAI、通义、智谱、Moonshot、vLLM 等）
+  #   deepseek —— DeepSeek 官方端点
+  #   ollama   —— 本地 Ollama，无需联网、无需 API Key
+  #   mock     —— 离线占位模型，不调用任何网络；用于无 Key 时跑通全流程 / 单元测试
+  provider: "mock"
+  base_url: "https://api.openai.com/v1"   # ENV: LITPRISM_BASE_URL
+  api_key: ""                             # ENV: LITPRISM_API_KEY（推荐用环境变量，不要写进文件）
+  model: "gpt-4o-mini"                    # ENV: LITPRISM_MODEL
+  temperature: 0.1        # 学术场景建议低温，减少发挥
+  max_tokens: 4096
+  timeout: 120
+  # 是否要求模型返回 JSON（部分端点不支持 response_format，此时自动降级为提示词约束 + 解析）
+  json_mode: true
+
+# ---------------- 学术数据源（真实性核验 + 外部检索）----------------
+# 核验是防幻觉的核心：任何"外部检索到的论文"都必须先在这里命中，才允许展示为真实文献
+sources:
+  crossref:
+    enabled: true
+    # Crossref 建议填写邮箱，进入"礼貌池"获得更稳定的速率
+    mailto: "your_email@example.com"      # ENV: LITPRISM_MAILTO
+  openalex:
+    enabled: true
+    mailto: "your_email@example.com"
+  arxiv:
+    enabled: true
+  semantic_scholar:
+    enabled: false                        # 需要免费 API Key，见 https://www.semanticscholar.org/product/api
+    api_key: ""                           # ENV: S2_API_KEY
+  unpaywall:
+    enabled: false
+    email: "your_email@example.com"
+
+verification:
+  # 标题相似度阈值（归一化后按字符级相似度计算，0~1）
+  verified_threshold: 0.92     # ≥ 该值且有年份/作者佐证 → 判定"已核验"
+  likely_threshold: 0.82       # ≥ 该值 → 判定"疑似匹配，需人工确认"
+  require_year_match: false    # 是否强制年份一致（新发表文献常滞后收录，默认不强制）
+  max_candidates: 5            # 每个数据源最多比对多少条候选
+
+# ---------------- 检索与问答 ----------------
+retrieval:
+  chunk_size: 900              # 分块目标字符数
+  chunk_overlap: 150           # 相邻块重叠字符数
+  top_k: 8                     # 问答默认召回块数
+  min_score: 0.0               # 低于该 BM25 得分的块丢弃
+
+qa:
+  # 引用强校验：回答里出现的 [P1 p.3] 之类引用，必须能在召回片段中找到对应来源，
+  # 否则标记为"疑似虚构引用"并在输出中提示（防幻觉的关键一环）
+  strict_citation_check: true
+  refuse_when_no_evidence: true   # 无依据时直接拒答，而不是让模型"合理推测"
+
+recommend:
+  default_limit: 8
+  # 推荐来源：local（本地库相似）/ openalex_related（同主题相关）/ citing（引用该文）/ keyword（关键词）
+  strategies: ["openalex_related", "keyword", "local"]
+  auto_import: false           # 是否自动把通过核验的推荐文献导入本地库
+
+export:
+  # 结构化解读导出目录（相对 data_dir）
+  notes_dir: "./notes"
+  formats: ["markdown"]        # 可选 markdown / json
+
+# ---------------- 上下文管理 ----------------
+# 说明：本项目采用「在新增量上动手」的压缩策略 —— 只压「上次压缩之后新增、
+# 且已被任务消费掉」的部分，而不是"阈值到了就重写历史"。
+# 下面的参数是**校准值**（经验起点），不是定律；实测后再按需调整。
+context:
+  window_tokens: 32000         # 模型上下文窗口（按实际所用模型填）
+  step_tokens: 30000           # 增长门控步长（绝对值，与窗口大小解耦）
+                               # 用绝对值而非百分比：否则窗口越大触发越晚，
+                               # 长会话在任何窗口档位下都该持续得到压缩
+
+  # 保留预算：retain_tokens 与 retain_ratio 互斥，只能给一个
+  # 不给则默认保留 30% 窗口
+  retain_tokens: null
+  retain_ratio: null
+
+  nudge_ratio: 0.75            # 压力层温和触发
+  emergency_ratio: 0.95        # 压力层紧急触发（含硬截断）
+  output_reserve_tokens: 4096  # 输出预留
+  overflow_retries: 1          # 窗口溢出后的恢复重试上限（0 会导致溢出后无恢复路径）
+  summary_max_ratio: 0.6       # 收缩验证：摘要不得超过被遮蔽内容的该比例
+  recent_turns_protected: 5    # 最近 N 条消息受保护，不参与压缩
+
+  # token 估算系数。注意：4 字符/token 对中文严重低估（可能低 2~4 倍），
+  # 本项中英混排场景尤其明显，UI 上会标注为"估算值"
+  cjk_chars_per_token: 1.5
+  latin_chars_per_token: 4.0
+
+# ---------------- 记忆系统 ----------------
+# 一期只做**显式**记忆（用户主动标记），不做隐式推断 ——
+# 隐式记忆容易记错、用户不知道系统记了什么、且一旦记错会持续污染后续输出。
+memory:
+  resident_token_budget: 500   # 常驻层硬上限。偏好记忆无上限增长会挤压检索片段预算
+  resident_max_items: 12       # 常驻条数上限
+  allow_implicit: false        # 一期固定 false
+  retrieval_top_k: 5           # 按需层检索条数

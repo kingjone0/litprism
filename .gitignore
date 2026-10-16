@@ -1,0 +1,52 @@
+# ============================================================
+# 文献棱镜 LitPrism .gitignore
+# ============================================================
+
+# ---- 运行时数据（知识库、缓存、导出笔记）----
+data/
+
+# ---- 用户配置：可能含 API Key，绝不入库 ----
+# 只提交 config.example.yaml
+config/config.yaml
+config/config.local.yaml
+
+# ---- 样例论文 PDF（约 9.4 MB，可从 arXiv 重新下载）----
+# 见 sample_papers/README.md
+sample_papers/*.pdf
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+
+# ---- 测试与工具 ----
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+tools/_ocr_out/
+
+# ---- Tauri / 前端构建产物（阶段 F 用）----
+src-tauri/target/
+node_modules/
+*.log
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
