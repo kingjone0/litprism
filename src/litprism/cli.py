@@ -676,6 +676,107 @@ def cmd_restore(ctx: Ctx, args) -> int:
     return 0
 
 
+def cmd_memory(ctx: Ctx, args) -> int:
+    from .memory.guards import format_result, validate_citations
+    from .memory.store import KIND_LABELS, MemoryStore, format_memories
+
+    store = MemoryStore(ctx.kb, ctx.cfg)
+
+    if args.action == "add":
+        if not args.text:
+            err("请提供记忆内容，例如：memory add \"回答要简短\" --kind style_preference")
+            return 1
+        # 类型校验交给 store 的守卫，好处是错误信息能说清「为什么」而不只是「不在选项里」
+        kind = args.kind if args.kind != "all" else "misc"
+        receipt = store.save(
+            args.text,
+            kind=kind,
+            key=args.key,
+            pinned=not args.no_pin,
+            priority=args.priority,
+        )
+        title("写入记忆")
+        if receipt.action == "rejected":
+            err(receipt.describe())
+            return 2
+        ok(receipt.describe())
+        m = store.get(receipt.memory_id)
+        if m:
+            print(f"  {m.render()}")
+        return 0
+
+    if args.action == "remove":
+        if not args.id:
+            err("请提供记忆 id")
+            return 1
+        title("删除记忆")
+        if store.delete(args.id):
+            ok(f"已移入回收站 {args.id}（可用 memory restore 找回）")
+            return 0
+        err(f"未找到记忆 {args.id}")
+        return 1
+
+    if args.action == "restore":
+        if not args.id:
+            err("请提供记忆 id")
+            return 1
+        ok(f"已恢复 {args.id}") if store.restore(args.id) else err("未找到")
+        return 0
+
+    if args.action == "search":
+        # 位置参数按顺序填 action → text → query，所以检索词可能落在 text 上
+        keyword = args.query or args.text or ""
+        title(f"检索记忆 · {keyword}")
+        hits = store.search(keyword, limit=args.limit)
+        print(format_memories(hits))
+        return 0
+
+    if args.action == "budget":
+        from .memory.strategy import LayeredStrategy
+
+        title("记忆预算")
+        strat = LayeredStrategy(ctx.cfg)
+        print(strat.budget_report(strat.assemble(store)))
+        print()
+        print("  常驻层准入标准：只有「几乎每轮都用得上」的才常驻。")
+        print("  拿不准的一律放按需层 —— 宁可多一次检索，不要每轮白付 token。")
+        return 0
+
+    # 默认：列出
+    title("记忆列表")
+    items = store.list(kind=args.kind if args.kind != "all" else None, limit=args.limit)
+    st = store.stats()
+    print(f"  共 {st['total']} 条（常驻 {st['pinned']}）")
+    if st["by_kind"]:
+        print("  分布：" + "、".join(f"{KIND_LABELS.get(k, k)} {v}" for k, v in st["by_kind"].items()))
+    print()
+    print(format_memories(items))
+    if not items:
+        print("\n  提示：一期只支持**显式**记忆 —— 用 `memory add` 主动添加。")
+        print("        不做隐式推断：隐式记忆容易记错，且用户不知道系统记了什么。")
+    return 0
+
+
+def cmd_turns(ctx: Ctx, args) -> int:
+    from .memory.view import TurnViewStore, format_views
+
+    conv = ctx.kb.resolve_conversation(args.conversation)
+    if not conv:
+        err("未找到会话。先用 `conv new` 创建。")
+        return 1
+    vs = TurnViewStore(ctx.kb)
+    views = vs.list(conv["id"], limit=args.limit)
+    title(f"不可变轮次视图 · {truncate(conv['title'], 40)}")
+    print(format_views(views))
+    if views:
+        st = vs.stats(conv["id"])
+        print()
+        print(f"  合计 {st['turns']} 轮，常驻 {st['resident_tokens']} token，按需 {st['retrieved_tokens']} token")
+        print("  说明：每轮检索到的记忆固化为不可变 View 并 pin 到该轮 ——")
+        print("        换来一致性、可审计（本轮读了什么）、可复现（重放得到同样上下文）。")
+    return 0
+
+
 def cmd_rules(ctx: Ctx, args) -> int:
     from .invariants import describe_rules
 
@@ -819,6 +920,28 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=cmd_restore)
 
     sub.add_parser("rules", help="列出压缩不变量与失败码").set_defaults(func=cmd_rules)
+
+    # ---- 记忆系统 ----
+    a = sub.add_parser("memory", help="记忆管理（一期只支持显式记忆）")
+    a.add_argument("action", nargs="?", default="list",
+                   choices=["list", "add", "remove", "restore", "search", "budget"])
+    a.add_argument("text", nargs="?", help="记忆内容（action=add）")
+    a.add_argument("query", nargs="?", help="检索词（action=search）")
+    a.add_argument("--id", help="记忆 id（action=remove/restore）")
+    a.add_argument(
+        "--kind", default="all",
+        help="记忆类型：research_interest / term_preference / style_preference / misc / all",
+    )
+    a.add_argument("--key", help="可选键，如术语原名")
+    a.add_argument("--no-pin", action="store_true", help="不常驻（默认常驻）")
+    a.add_argument("--priority", type=int, default=100, help="常驻层裁减优先级（小者先保）")
+    a.add_argument("--limit", type=int, default=100)
+    a.set_defaults(func=cmd_memory)
+
+    a = sub.add_parser("turns", help="查看不可变轮次视图（turn memory bar）")
+    a.add_argument("conversation", nargs="?", help="会话 id / 标题片段")
+    a.add_argument("--limit", type=int, default=20)
+    a.set_defaults(func=cmd_turns)
 
     a = sub.add_parser("serve", help="启动 Web 界面")
     a.add_argument("--host", default="127.0.0.1")
