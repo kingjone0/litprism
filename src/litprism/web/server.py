@@ -66,10 +66,15 @@ class SearchReq(BaseModel):
 
 
 def create_app(cfg: Config) -> FastAPI:
+    from fastapi.staticfiles import StaticFiles
+
     app = FastAPI(title="文献棱镜 LitPrism", version="1.0.0")
     kb = KnowledgeBase(cfg)
     llm = build_llm(cfg)
     verifier = PaperVerifier(cfg)
+
+    # 静态资源（app.css / app.js）
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     # ---------------------------------------------------------------- 页面
     @app.get("/", response_class=HTMLResponse)
@@ -271,6 +276,202 @@ def create_app(cfg: Config) -> FastAPI:
             p = kb.resolve_paper(paper)
             pid = p["id"] if p else None
         return {"items": kb.list_concepts(paper_id=pid, term=term, limit=limit)}
+
+    # ---------------------------------------------------------------- 会话
+    @app.get("/api/conversations")
+    def conversations(limit: int = 100):
+        return {"items": kb.list_conversations(limit=limit)}
+
+    @app.post("/api/conversations")
+    def create_conversation(req: dict):
+        cid = kb.add_conversation(req.get("title") or "新会话", scope=req.get("scope"))
+        return {"id": cid}
+
+    @app.get("/api/conversations/{conv_id}/messages")
+    def messages(conv_id: str):
+        conv = kb.resolve_conversation(conv_id)
+        if conv is None:
+            raise HTTPException(404, "会话不存在")
+        return {"conversation": conv, "items": kb.get_messages(conv["id"])}
+
+    # ---------------------------------------------------------------- 上下文
+    @app.get("/api/context/{conv_id}")
+    def context(conv_id: str):
+        from ..context.telemetry import Telemetry
+
+        conv = kb.resolve_conversation(conv_id)
+        if conv is None:
+            raise HTTPException(404, "会话不存在")
+        snap = Telemetry(kb, cfg).snapshot(conv["id"])
+        snap["conversation"] = {"id": conv["id"], "title": conv["title"]}
+        return snap
+
+    @app.post("/api/compact/{conv_id}")
+    def compact(conv_id: str, req: dict | None = None):
+        from ..context.policy import Policy
+        from ..context.seam import Seam
+        from ..context.summarizer import ExtractiveSummarizer, Summarizer
+        from ..context.telemetry import Telemetry
+
+        conv = kb.resolve_conversation(conv_id)
+        if conv is None:
+            raise HTTPException(404, "会话不存在")
+        dry = bool((req or {}).get("dry_run"))
+
+        meter = Telemetry(kb, cfg).meter
+        policy = Policy(cfg)
+        msgs = kb.get_messages(conv["id"])
+        meas = meter.measure(kb, conv["id"])
+        zones = policy.protected_zones(meas, msgs)
+        decision = policy.decide_trigger(
+            meas,
+            anchor_seq=int(conv.get("compact_anchor_seq") or 0),
+            messages=msgs,
+            protected=zones,
+            force="manual" if dry else None,
+        )
+        if not decision.should_compact:
+            return {"ok": False, "stage": "trigger", "reason": decision.reason}
+        sel = policy.select(meas, messages=msgs, aggressive=decision.emergency_truncate)
+        if not sel.ok:
+            return {"ok": False, "stage": "select", "reason": sel.noop_reason}
+        if dry:
+            return {
+                "ok": True, "dry_run": True,
+                "trigger": decision.trigger,
+                "range": sel.range_text,
+                "shadowed_refs": sel.shadowed_refs,
+                "shadowed_tokens": sel.shadowed_tokens,
+                "retained_tokens": sel.retained_tokens,
+            }
+
+        seam = Seam(kb, cfg)
+        tx_id, code = seam.begin(conv["id"], decision.trigger or "manual", sel)
+        if not tx_id:
+            return {"ok": False, "stage": "begin", "failure_code": code}
+        in_range = [m for m in msgs if sel.start_seq <= m["seq"] <= sel.end_seq]
+        summary = Summarizer(cfg, llm, backend=ExtractiveSummarizer()).summarize(
+            in_range, sel.shadowed_tokens
+        )
+        if not summary.ok:
+            seam.fail(tx_id, "summary", summary.error)
+            return {"ok": False, "stage": "summary", "reason": summary.error}
+        result = seam.commit(tx_id, summary)
+        return {
+            "ok": result.ok,
+            "block_id": result.block_id,
+            "replacement_ref": result.replacement_ref,
+            "failure_code": result.failure_code,
+            "ledger": result.ledger,
+        }
+
+    @app.get("/api/blocks/{conv_id}")
+    def blocks(conv_id: str):
+        from ..context.restore import Restorer
+
+        conv = kb.resolve_conversation(conv_id)
+        if conv is None:
+            raise HTTPException(404, "会话不存在")
+        return Restorer(kb, cfg).stats(conv["id"])
+
+    # ---------------------------------------------------------------- 记忆
+    @app.get("/api/memories")
+    def memories(kind: str | None = None):
+        from ..memory.store import MemoryStore
+
+        store = MemoryStore(kb, cfg)
+        return {"items": [m.to_dict() for m in store.list(kind=kind)], "stats": store.stats()}
+
+    @app.post("/api/memories")
+    def add_memory(req: dict):
+        from ..memory.store import MemoryStore
+
+        store = MemoryStore(kb, cfg)
+        receipt = store.save(
+            req.get("value") or "",
+            kind=req.get("kind") or "misc",
+            key=req.get("key"),
+            pinned=bool(req.get("pinned", True)),
+            priority=int(req.get("priority", 100)),
+        )
+        return {"action": receipt.action, "id": receipt.memory_id, "reason": receipt.reason}
+
+    @app.delete("/api/memories/{memory_id}")
+    def delete_memory(memory_id: str):
+        from ..memory.store import MemoryStore
+
+        return {"ok": MemoryStore(kb, cfg).delete(memory_id)}
+
+    @app.get("/api/turns/{conv_id}")
+    def turns(conv_id: str, limit: int = 20):
+        from ..memory.view import TurnViewStore
+
+        conv = kb.resolve_conversation(conv_id)
+        if conv is None:
+            raise HTTPException(404, "会话不存在")
+        vs = TurnViewStore(kb)
+        return {"items": [v.to_dict() for v in vs.list(conv["id"], limit=limit)], "stats": vs.stats(conv["id"])}
+
+    # ---------------------------------------------------------------- Skill
+    @app.get("/api/skills")
+    def skills():
+        from ..skills.registry import SkillRegistry
+
+        reg = SkillRegistry(cfg)
+        entries = reg.discover(force=True)
+        return {
+            "items": [e.to_dict() for e in entries],
+            "stats": reg.stats(),
+            "dir": str(reg.skills_dir),
+            "empty_text": reg.empty_state_text(),
+        }
+
+    # ---------------------------------------------------------------- 交付物
+    @app.get("/api/deliverables")
+    def deliverables(type: str | None = None, status: str | None = None):
+        from ..deliverables import DeliverableStore
+
+        store = DeliverableStore(kb)
+        return {"items": [d.to_dict() for d in store.list(type=type, status=status)], "stats": store.stats()}
+
+    @app.get("/api/deliverables/{did}")
+    def deliverable(did: str):
+        from ..deliverables import DeliverableStore
+
+        store = DeliverableStore(kb)
+        d = store.resolve(did)
+        if d is None:
+            raise HTTPException(404, "交付物不存在")
+        return {**d.to_dict(), "content": d.content}
+
+    # ---------------------------------------------------------------- 白名单
+    @app.get("/api/whitelist")
+    def whitelist():
+        from ..whitelist import Whitelist
+
+        wl = Whitelist(kb)
+        return {"items": [e.to_dict() for e in wl.list()], "stats": wl.stats()}
+
+    @app.post("/api/whitelist")
+    def add_whitelist(req: dict):
+        from ..whitelist import Whitelist, WhitelistError
+
+        try:
+            e = Whitelist(kb).add(
+                title=req.get("title") or "",
+                reason=req.get("reason") or "",
+                doi=req.get("doi"),
+                level_at_confirm=req.get("level_at_confirm") or "not_found",
+            )
+        except WhitelistError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return e.to_dict()
+
+    @app.delete("/api/whitelist/{entry_id}")
+    def remove_whitelist(entry_id: str):
+        from ..whitelist import Whitelist
+
+        return {"ok": Whitelist(kb).remove(entry_id)}
 
     @app.exception_handler(Exception)
     async def unhandled(_request, exc):  # pragma: no cover

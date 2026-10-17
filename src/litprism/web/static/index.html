@@ -1,472 +1,226 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>文献棱镜 LitPrism · 论文知识解读 Agent</title>
-<style>
-  :root{
-    --bg:#f6f7f9; --panel:#ffffff; --line:#e3e6ea; --text:#1f2328; --muted:#6b7280;
-    --brand:#1a5fb4; --brand-soft:#e8f0fb; --ok:#137a3f; --ok-soft:#e6f5ec;
-    --warn:#9a6700; --warn-soft:#fff8e1; --bad:#b3261e; --bad-soft:#fdecea;
-    --radius:10px; --mono:ui-monospace,"SF Mono",Consolas,"Cascadia Mono",monospace;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
-       background:var(--bg);color:var(--text)}
-  header{background:var(--panel);border-bottom:1px solid var(--line);padding:14px 22px;
-         display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:20}
-  header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.2px}
-  header .sub{color:var(--muted);font-size:12.5px}
-  header .spacer{flex:1}
-  .pill{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);background:#fafbfc;color:var(--muted)}
-  .pill.ok{background:var(--ok-soft);border-color:#bfe3cc;color:var(--ok)}
-  .pill.warn{background:var(--warn-soft);border-color:#f0dfa8;color:var(--warn)}
-  nav{display:flex;gap:4px;padding:10px 22px 0;background:var(--panel);border-bottom:1px solid var(--line);
-      position:sticky;top:57px;z-index:19;overflow-x:auto}
-  nav button{border:1px solid transparent;border-bottom:none;background:none;padding:8px 14px;border-radius:8px 8px 0 0;
-      cursor:pointer;font-size:13.5px;color:var(--muted);white-space:nowrap}
-  nav button:hover{background:#f2f4f7}
-  nav button.active{background:var(--bg);border-color:var(--line);color:var(--brand);font-weight:600}
-  main{padding:22px;max-width:1180px;margin:0 auto}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:16px}
-  .card h2{font-size:14.5px;margin:0 0 12px;font-weight:650}
-  .grid{display:grid;gap:12px}
-  .grid.c4{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
-  .stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
-  .stat b{display:block;font-size:24px;font-weight:650;color:var(--brand)}
-  .stat span{color:var(--muted);font-size:12.5px}
-  input,textarea,select{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;
-      font:inherit;background:#fff;color:var(--text)}
-  textarea{min-height:76px;resize:vertical}
-  button.act{background:var(--brand);color:#fff;border:none;padding:9px 18px;border-radius:8px;
-      cursor:pointer;font:inherit;font-weight:600}
-  button.act:hover{filter:brightness(1.08)}
-  button.act:disabled{opacity:.55;cursor:not-allowed}
-  button.ghost{background:#fff;color:var(--brand);border:1px solid #c7d8ef;padding:7px 13px;border-radius:8px;cursor:pointer;font:inherit}
-  button.ghost:hover{background:var(--brand-soft)}
-  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-  .row>.grow{flex:1;min-width:200px}
-  .item{border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:9px;background:#fff}
-  .item h3{margin:0 0 4px;font-size:13.8px;font-weight:600;line-height:1.5}
-  .item .meta{color:var(--muted);font-size:12.3px}
-  .tag{display:inline-block;font-size:11.5px;padding:1.5px 7px;border-radius:5px;margin-right:5px;
-       background:#eef1f5;color:#4b5563;font-family:var(--mono)}
-  .tag.v{background:var(--ok-soft);color:var(--ok)}
-  .tag.l{background:var(--warn-soft);color:var(--warn)}
-  .tag.n{background:var(--bad-soft);color:var(--bad)}
-  pre{background:#f8f9fb;border:1px solid var(--line);border-radius:8px;padding:12px;
-      overflow:auto;font-family:var(--mono);font-size:12.6px;white-space:pre-wrap;word-break:break-word}
-  .md{white-space:pre-wrap;word-break:break-word;line-height:1.75}
-  .md h1{font-size:16px}.md h2{font-size:14px;margin:14px 0 6px;color:var(--brand)}
-  .note{background:var(--brand-soft);border-left:3px solid var(--brand);padding:9px 13px;border-radius:0 8px 8px 0;
-        font-size:12.8px;color:#33415c;margin:10px 0}
-  .warnbox{background:var(--warn-soft);border-left:3px solid var(--warn);padding:9px 13px;border-radius:0 8px 8px 0;
-        font-size:12.8px;color:#6b5300;margin:10px 0}
-  .badbox{background:var(--bad-soft);border-left:3px solid var(--bad);padding:9px 13px;border-radius:0 8px 8px 0;
-        font-size:12.8px;color:#7a1c16;margin:10px 0}
-  .muted{color:var(--muted)}
-  .small{font-size:12.3px}
-  .hidden{display:none!important}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{border:1px solid var(--line);padding:7px 9px;text-align:left;vertical-align:top}
-  th{background:#f3f5f8;font-weight:600;font-size:12.5px}
-  .spin{display:inline-block;width:13px;height:13px;border:2px solid #cfd6e0;border-top-color:var(--brand);
-        border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:6px}
-  @keyframes sp{to{transform:rotate(360deg)}}
-  .excerpt{background:#f8f9fb;border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin:7px 0;font-size:12.8px}
-  .excerpt b{color:var(--brand)}
-</style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>文献棱镜 LitPrism</title>
+<link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header>
-  <h1>文献棱镜 <span class="muted" style="font-weight:400">LitPrism</span></h1>
-  <span class="sub">论文知识解读 Agent · 结构化解读 / 真实性核验 / 问答 / 对比 / 推荐</span>
-  <span class="spacer"></span>
-  <span class="pill" id="pill-llm">模型：…</span>
-  <span class="pill" id="pill-src">数据源：…</span>
-</header>
 
-<nav id="nav">
-  <button data-tab="overview" class="active">概览</button>
-  <button data-tab="library">论文库</button>
-  <button data-tab="ask">问答</button>
-  <button data-tab="compare">对比</button>
-  <button data-tab="recommend">推荐</button>
-  <button data-tab="verify">核验</button>
-  <button data-tab="relations">关联</button>
-</nav>
+<div class="app">
 
-<main>
-  <!-- ============ 概览 ============ -->
-  <section id="tab-overview">
-    <div class="grid c4" id="stats"></div>
-    <div class="card">
-      <h2>导入论文</h2>
-      <div class="note">支持 PDF / DOCX / HTML / TXT / MD / TeX。导入时会对论文做<strong>真实性核验</strong>（Crossref · OpenAlex · arXiv 多源交叉验证），
-      并自动生成结构化解读。</div>
-      <div class="row">
-        <input type="file" id="files" multiple accept=".pdf,.docx,.doc,.html,.htm,.txt,.md,.tex" style="flex:1" />
-        <label class="small"><input type="checkbox" id="up-verify" checked style="width:auto"> 核验真实性</label>
-        <label class="small"><input type="checkbox" id="up-analyze" checked style="width:auto"> 生成解读</label>
-        <button class="act" id="btn-upload">上传导入</button>
-      </div>
-      <div id="upload-out" class="small" style="margin-top:12px"></div>
+  <!-- ==================== 自绘标题栏 ==================== -->
+  <header class="titlebar">
+    <div class="dots">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
     </div>
-    <div class="card">
-      <h2>关于防幻觉设计</h2>
-      <div class="md small">本系统的每一条外部文献都经过权威数据库交叉核验，核验结论分四级：
-<strong>✅ 已核验</strong>（标题相似度 ≥ 0.92 或 DOI 精确命中）、<strong>⚠️ 疑似匹配</strong>（需人工确认）、
-<strong>❌ 未能核到</strong>（数据库无匹配，<u>绝不等于该文献不存在，但一律禁止当作真实文献引用</u>）、
-<strong>❔ 无法判定</strong>（数据源不可用，不会误判为"不存在"）。
-问答环节还有两道闸门：无召回直接拒答；回答产出后逐条校验 <span class="tag">[P1 p.3]</span> 引用是否指向真实片段。</div>
+    <div class="tb-title" id="tbTitle">文献棱镜 LitPrism</div>
+    <div class="tb-actions">
+      <button class="tb-btn" id="btnTheme" title="切换主题">◐</button>
+      <button class="tb-btn" id="btnInspector" title="显示/隐藏右侧面板">▤</button>
     </div>
-  </section>
+  </header>
 
-  <!-- ============ 论文库 ============ -->
-  <section id="tab-library" class="hidden">
-    <div class="card">
-      <div class="row">
-        <input class="grow" id="lib-q" placeholder="按标题 / 摘要 / 标签过滤…" />
-        <select id="lib-status" style="width:auto">
-          <option value="">全部状态</option>
-          <option value="verified">已核验</option>
-          <option value="unverified">未核验</option>
-        </select>
-        <button class="act" id="btn-lib">刷新</button>
+  <div class="main" id="main">
+
+    <!-- ==================== 左侧栏 ==================== -->
+    <aside class="sidebar">
+      <div class="brand" id="brand" title="关于">
+        <div class="brand-name">文献棱镜 LitPrism</div>
+        <div class="brand-version" id="brandVersion">v1.0.0</div>
       </div>
-    </div>
-    <div id="lib-out"></div>
-  </section>
 
-  <!-- ============ 问答 ============ -->
-  <section id="tab-ask" class="hidden">
-    <div class="card">
-      <h2>针对论文内容提问</h2>
-      <div class="note">回答只基于本地知识库中检索到的原文片段，每条结论都带 <span class="tag">[P1 p.3]</span> 来源标记；
-      系统会校验这些引用是否指向真实片段。材料不足时直接拒答。</div>
-      <textarea id="ask-q" placeholder="例如：这几篇论文在方法论上的主要差异是什么？/ 该论文的创新点是否有实验支撑？"></textarea>
-      <div class="row" style="margin-top:10px">
-        <input class="grow" id="ask-scope" placeholder="限定论文（可留空；填 id 或标题片段，多个用逗号分隔）" />
-        <button class="act" id="btn-ask">提问</button>
+      <div class="side-scroll">
+
+        <section class="side-section">
+          <button class="side-head" data-toggle="conv">
+            <span class="chev">▾</span> 对话 <span class="count" id="convCount"></span>
+          </button>
+          <div class="side-items" id="convList">
+            <button class="side-new" id="btnNewConv">＋ 新建对话</button>
+          </div>
+        </section>
+
+        <section class="side-section">
+          <button class="side-head" data-toggle="lib">
+            <span class="chev">▾</span> 知识库 <span class="count" id="libCount"></span>
+          </button>
+          <div class="side-items" id="libList"></div>
+        </section>
+
+        <section class="side-section">
+          <button class="side-head" data-toggle="skill">
+            <span class="chev">▾</span> Skill <span class="count" id="skillCount"></span>
+          </button>
+          <div class="side-items" id="skillList">
+            <div class="side-empty" id="skillEmpty">尚未添加 Skill</div>
+            <button class="side-item" data-view="skills">
+              <span class="ico">⚙</span><span class="label">管理 Skill</span>
+            </button>
+          </div>
+        </section>
+
       </div>
-    </div>
-    <div id="ask-out"></div>
-  </section>
 
-  <!-- ============ 对比 ============ -->
-  <section id="tab-compare" class="hidden">
-    <div class="card">
-      <h2>多篇论文对比</h2>
-      <textarea id="cmp-refs" placeholder="输入至少两篇论文的 id 或标题片段，每行一个"></textarea>
-      <div class="row" style="margin-top:10px">
-        <input class="grow" id="cmp-aspects" placeholder="重点维度（可选，逗号分隔，如：方法论,实验设计,结论强度）" />
-        <button class="act" id="btn-cmp">开始对比</button>
+      <div class="side-footer">
+        <button class="side-item" data-view="settings">
+          <span class="ico">⚙</span><span class="label">设置</span>
+        </button>
       </div>
-    </div>
-    <div id="cmp-out"></div>
-  </section>
+    </aside>
 
-  <!-- ============ 推荐 ============ -->
-  <section id="tab-recommend" class="hidden">
-    <div class="card">
-      <h2>文献推荐</h2>
-      <div class="note">候选文献全部来自 Crossref / OpenAlex / arXiv 的<strong>实时检索结果</strong>，
-      模型只负责写推荐理由、不能新增条目。可选择把通过核验的文献一键导入本地知识库。</div>
-      <div class="row">
-        <input class="grow" id="rec-topic" placeholder="研究方向关键词，如：神经辐射场 三维重建" />
-        <input class="grow" id="rec-paper" placeholder="或：种子论文（id / 标题片段）" />
+    <!-- ==================== 中间工作区 ==================== -->
+    <main class="work">
+      <div class="tabbar" id="tabbar"></div>
+      <div class="work-body" id="workBody">
+
+        <section class="pane" data-pane="library">
+          <div class="page-head">
+            <div class="row">
+              <div>
+                <div class="page-title">知识库</div>
+                <div class="page-sub" id="libSub">—</div>
+              </div>
+              <div class="spacer"></div>
+              <div class="search-box" style="width:260px">
+                <span class="ico">⌕</span>
+                <input id="libSearch" placeholder="搜索标题、作者…">
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="list" id="paperList"></div>
+          </div>
+        </section>
+
+        <section class="pane" data-pane="paper">
+          <div id="paperDetail"></div>
+        </section>
+
+        <section class="pane" data-pane="chat">
+          <div id="chatDetail"></div>
+        </section>
+
+        <section class="pane" data-pane="compare">
+          <div class="page-head">
+            <div class="page-title">多篇对比</div>
+            <div class="page-sub">按六个维度并列对比。某维度无信息时填「未提及」，不做优劣评选。</div>
+          </div>
+          <div class="card"><div class="card-body">
+            <div class="empty">
+              <div class="ico">⇄</div>
+              <div class="title">对比功能</div>
+              <div class="desc">在知识库中选中两篇以上论文后点击「对比」。<br>或使用命令 <code>litprism compare</code>。</div>
+            </div>
+          </div></div>
+        </section>
+
+        <section class="pane" data-pane="verify">
+          <div class="page-head">
+            <div class="page-title">真实性核验</div>
+            <div class="page-sub">多源交叉核验（Crossref / OpenAlex / arXiv）。未通过时可人工确认放行，但会留痕。</div>
+          </div>
+          <div class="card">
+            <div class="card-body">
+              <div class="row" style="gap:10px">
+                <input class="input" id="verifyInput" placeholder="输入论文标题或 DOI">
+                <button class="btn primary" id="btnVerify">核验</button>
+              </div>
+              <div style="margin-top:8px;font-size:11.5px;color:var(--muted)">
+                白名单命中的文献不走网络，直接返回「🔵人工确认」，并显示确认当时的自动判定。
+              </div>
+            </div>
+          </div>
+          <div id="verifyResult"></div>
+          <div class="card" style="margin-top:12px">
+            <div class="card-head">
+              <span class="card-title">人工确认白名单</span>
+              <span class="badge neutral" id="wlCount">0</span>
+            </div>
+            <div class="list" id="wlList"></div>
+          </div>
+        </section>
+
+        <section class="pane" data-pane="deliverables">
+          <div class="page-head">
+            <div class="row">
+              <div>
+                <div class="page-title">交付物</div>
+                <div class="page-sub">综述草稿 / 对比报告 / 阅读笔记 / 审稿意见。导出时一并带出引用来源。</div>
+              </div>
+              <div class="spacer"></div>
+              <button class="btn" id="btnExportAll">导出全部</button>
+            </div>
+          </div>
+          <div class="card"><div class="list" id="delivList"></div></div>
+        </section>
+
+        <section class="pane" data-pane="skills">
+          <div class="page-head">
+            <div class="row">
+              <div>
+                <div class="page-title">Skill</div>
+                <div class="page-sub">仅用于管理本地 Skill，不做技能市场。声明式提示词扩展，不含可执行代码。</div>
+              </div>
+              <div class="spacer"></div>
+              <button class="btn" id="btnSkillRefresh">⟳ 刷新列表</button>
+            </div>
+          </div>
+          <div class="search-box" style="margin-bottom:12px">
+            <span class="ico">⌕</span>
+            <input id="skillSearch" placeholder="搜索 Skill 名称或路径">
+          </div>
+          <div id="skillCards"></div>
+          <div class="card" style="margin-top:12px"><div class="card-body">
+            <div class="row" style="align-items:flex-start">
+              <div style="flex:1">
+                <div style="font-size:12px;font-weight:600;margin-bottom:4px">Skill 目录</div>
+                <div class="mono" id="skillDir" style="color:var(--muted);word-break:break-all">—</div>
+              </div>
+            </div>
+            <div class="hr"></div>
+            <div style="font-size:11.5px;color:var(--muted);line-height:1.7">
+              每个 Skill 是一个子目录，内含 <code class="mono">skill.yaml</code> 与
+              <code class="mono">prompt.md</code>。<br>
+              ⚠️ 一期只支持<strong>声明式</strong> Skill —— 目录内的可执行文件不会被加载或执行。
+            </div>
+          </div></div>
+        </section>
+
+        <section class="pane" data-pane="settings">
+          <div class="page-head">
+            <div class="page-title">设置</div>
+            <div class="page-sub">系统提示词为框架内置，不在此处暴露 —— 防止无意改坏防幻觉约束。</div>
+          </div>
+          <div class="settings">
+            <nav class="settings-nav" id="settingsNav"></nav>
+            <div id="settingsPanes"></div>
+          </div>
+        </section>
+
       </div>
-      <div class="row" style="margin-top:10px">
-        <label class="small"><input type="checkbox" id="rec-import" style="width:auto"> 导入核验通过的文献</label>
-        <button class="act" id="btn-rec">推荐</button>
+    </main>
+
+    <!-- ==================== 右侧检视面板 ==================== -->
+    <aside class="inspector">
+      <div class="insp-tabs" id="inspTabs">
+        <button class="insp-tab active" data-insp="context">上下文</button>
+        <button class="insp-tab" data-insp="graph">图谱</button>
+        <button class="insp-tab" data-insp="deliv">交付物</button>
       </div>
-    </div>
-    <div id="rec-out"></div>
-  </section>
-
-  <!-- ============ 核验 ============ -->
-  <section id="tab-verify" class="hidden">
-    <div class="card">
-      <h2>论文真实性核验</h2>
-      <div class="note">这是本系统的核心防线：任何被引用的外部文献都必须先在权威数据库中命中。
-      核验会同时查询 Crossref、OpenAlex、arXiv（可选 Semantic Scholar），并按标题相似度 + 作者/年份佐证给出判定。</div>
-      <div class="row">
-        <input class="grow" id="ver-title" placeholder="论文标题（越完整越准确）" />
-        <input id="ver-doi" placeholder="或 DOI" style="width:280px" />
-        <button class="act" id="btn-ver">核验</button>
+      <div class="insp-body">
+        <div class="insp-pane active" data-insp-pane="context" id="inspContext"></div>
+        <div class="insp-pane" data-insp-pane="graph" id="inspGraph"></div>
+        <div class="insp-pane" data-insp-pane="deliv" id="inspDeliv"></div>
       </div>
-    </div>
-    <div id="ver-out"></div>
-  </section>
+    </aside>
 
-  <!-- ============ 关联 ============ -->
-  <section id="tab-relations" class="hidden">
-    <div class="card">
-      <h2>跨论文关联分析</h2>
-      <div class="note">基于 TF-IDF 余弦相似度计算论文间的词法相似性，并给出共享术语作为线索。
-      这只是<strong>线索</strong>，用于发现可能相关的论文；实质性关系判断请用「对比」功能。</div>
-      <div class="row">
-        <input id="rel-th" type="number" step="0.02" value="0.18" style="width:120px" />
-        <button class="act" id="btn-rel">计算关联</button>
-      </div>
-    </div>
-    <div id="rel-out"></div>
-  </section>
-</main>
+  </div>
+</div>
 
-<script>
-const $ = s => document.querySelector(s);
-const esc = s => (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+<div class="toast-wrap" id="toasts"></div>
 
-async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: opts.body instanceof FormData ? {} : {'Content-Type': 'application/json'},
-    ...opts,
-    body: opts.body instanceof FormData ? opts.body : (opts.body ? JSON.stringify(opts.body) : undefined),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
-  return data;
-}
-const busy = (el, msg) => el.innerHTML = `<div class="card"><span class="spin"></span>${esc(msg)}</div>`;
-const fail = (el, e) => el.innerHTML = `<div class="card"><div class="badbox">出错：${esc(e.message || e)}</div></div>`;
-
-/* ---- 简易 Markdown 渲染（标题/表格/列表/加粗/引用）---- */
-function md(text) {
-  if (!text) return '';
-  const lines = text.split('\n');
-  let html = '', inTable = false, inList = false;
-  const inline = s => esc(s)
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`(.+?)`/g, '<code class="tag">$1</code>')
-    .replace(/\[(P\d+(?:\s*p\.\d+)?)\]/g, '<span class="tag v">[$1]</span>');
-  for (let raw of lines) {
-    const l = raw.trimEnd();
-    if (/^\|.*\|$/.test(l)) {
-      const cells = l.split('|').slice(1, -1).map(c => c.trim());
-      if (/^[\s\-:|]+$/.test(l)) continue;
-      if (!inTable) { html += '<table><thead><tr>' + cells.map(c => `<th>${inline(c)}</th>`).join('') + '</tr></thead><tbody>'; inTable = true; }
-      else html += '<tr>' + cells.map(c => `<td>${inline(c)}</td>`).join('') + '</tr>';
-      continue;
-    } else if (inTable) { html += '</tbody></table>'; inTable = false; }
-    if (/^#{1,3}\s/.test(l)) { const n = l.match(/^#+/)[0].length; html += `<h${Math.min(n+1,4)}>${inline(l.replace(/^#+\s/, ''))}</h${Math.min(n+1,4)}>`; }
-    else if (/^>\s?/.test(l)) html += `<div class="note">${inline(l.replace(/^>\s?/, ''))}</div>`;
-    else if (/^[-*]\s+/.test(l)) { if (!inList) { html += '<ul>'; inList = true; } html += `<li>${inline(l.replace(/^[-*]\s+/, ''))}</li>`; }
-    else { if (inList) { html += '</ul>'; inList = false; } html += l ? `<p>${inline(l)}</p>` : ''; }
-  }
-  if (inTable) html += '</tbody></table>';
-  if (inList) html += '</ul>';
-  return html;
-}
-
-/* ---- 标签页 ---- */
-document.querySelectorAll('#nav button').forEach(b => b.addEventListener('click', () => {
-  document.querySelectorAll('#nav button').forEach(x => x.classList.toggle('active', x === b));
-  document.querySelectorAll('main > section').forEach(s => s.classList.add('hidden'));
-  $('#tab-' + b.dataset.tab).classList.remove('hidden');
-}));
-
-/* ---- 状态 ---- */
-async function loadStatus() {
-  try {
-    const s = await api('/api/status');
-    const st = s.stats;
-    $('#pill-llm').textContent = '模型：' + s.llm.provider + (s.llm.mode === 'offline' ? '（离线）' : '');
-    $('#pill-llm').className = 'pill ' + (s.llm.mode === 'offline' ? 'warn' : 'ok');
-    $('#pill-src').textContent = '数据源：' + (s.sources.join(' · ') || '无');
-    $('#stats').innerHTML = [
-      ['论文', st.papers], ['文本块', st.chunks], ['已解读', st.analyses],
-      ['术语', st.concepts], ['关联', st.relations], ['核验记录', st.verifications],
-    ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
-  } catch (e) { console.error(e); }
-}
-
-/* ---- 上传 ---- */
-$('#btn-upload').onclick = async () => {
-  const files = $('#files').files;
-  if (!files.length) return alert('请先选择文件');
-  const fd = new FormData();
-  for (const f of files) fd.append('files', f);
-  const out = $('#upload-out');
-  busy(out, '正在解析、核验、生成解读…（含外部数据库查询，可能需要十几秒）');
-  try {
-    const r = await api(`/api/upload?analyze=${$('#up-analyze').checked}&verify=${$('#up-verify').checked}`, {method: 'POST', body: fd});
-    out.innerHTML = r.results.map(x => {
-      if (!x.ok) return `<div class="badbox">❌ ${esc(x.file)}：${esc(x.error)}</div>`;
-      const badge = {verified:'<span class="tag v">✅已核验</span>', likely:'<span class="tag l">⚠️疑似</span>',
-                     not_found:'<span class="tag n">❌未核到</span>', unchecked:'<span class="tag">❔未核验</span>',
-                     unverified:'<span class="tag">❔未核验</span>'}[x.verify_level] || '';
-      return `<div class="item"><h3>${esc(x.title)}</h3>
-        <div class="meta">${badge} ${x.pages} 页 · ${x.chunks} 个文本块 · <span class="tag">${esc(x.paper_id)}</span>
-        ${x.analyzed ? '· 已生成解读' : (x.analyze_error ? '· 解读失败：' + esc(x.analyze_error) : '')}</div>
-        ${(x.warnings||[]).map(w=>`<div class="warnbox">${esc(w)}</div>`).join('')}</div>`;
-    }).join('');
-    loadStatus(); loadLibrary();
-  } catch (e) { fail(out, e); }
-};
-
-/* ---- 论文库 ---- */
-async function loadLibrary() {
-  const out = $('#lib-out');
-  busy(out, '加载中…');
-  try {
-    const q = $('#lib-q').value, st = $('#lib-status').value;
-    const r = await api(`/api/papers?limit=300&q=${encodeURIComponent(q)}${st ? '&status_filter=' + st : ''}`);
-    if (!r.items.length) { out.innerHTML = '<div class="card muted">暂无论文，请先在「概览」页导入。</div>'; return; }
-    out.innerHTML = r.items.map(p => {
-      const badge = {verified:'<span class="tag v">✅已核验</span>', likely:'<span class="tag l">⚠️疑似</span>',
-                     not_found:'<span class="tag n">❌未核到</span>'}[p.verify_level] || '<span class="tag">❔未核验</span>';
-      return `<div class="card">
-        <h3 style="margin:0 0 5px;font-size:14.5px">${esc(p.title)}</h3>
-        <div class="meta small">${esc((p.authors||[]).slice(0,6).join('、')) || '作者未识别'} · ${p.year||'年份未知'} · ${esc(p.venue||'')}</div>
-        <div style="margin-top:7px">${badge} <span class="tag">${esc(p.id)}</span>
-          ${p.doi?`<span class="tag">DOI ${esc(p.doi)}</span>`:''}
-          ${(p.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
-        <div class="row" style="margin-top:10px">
-          <button class="ghost" onclick="showPaper('${p.id}')">查看结构化解读</button>
-          <button class="ghost" onclick="reanalyze('${p.id}')">重新解读</button>
-        </div>
-        <div id="detail-${p.id}"></div>
-      </div>`;
-    }).join('');
-  } catch (e) { fail(out, e); }
-}
-window.showPaper = async (id) => {
-  const el = $('#detail-' + id);
-  busy(el, '读取…');
-  try {
-    const r = await api('/api/paper/' + id);
-    el.innerHTML = `<div class="card" style="margin-top:12px">${r.markdown ? '<div class="md">' + md(r.markdown) + '</div>'
-      : '<div class="warnbox">尚未生成结构化解读，点击「重新解读」。</div>'}</div>`;
-  } catch (e) { fail(el, e); }
-};
-window.reanalyze = async (id) => {
-  const el = $('#detail-' + id);
-  busy(el, '正在调用模型解读…');
-  try {
-    const r = await api('/api/analyze/' + id + '?force=true', {method: 'POST'});
-    el.innerHTML = `<div class="card" style="margin-top:12px"><div class="md">${md(r.markdown)}</div></div>`;
-    loadStatus();
-  } catch (e) { fail(el, e); }
-};
-$('#btn-lib').onclick = loadLibrary;
-$('#lib-q').addEventListener('keydown', e => e.key === 'Enter' && loadLibrary());
-
-/* ---- 问答 ---- */
-$('#btn-ask').onclick = async () => {
-  const q = $('#ask-q').value.trim();
-  if (!q) return alert('请输入问题');
-  const out = $('#ask-out');
-  busy(out, '检索知识库并生成回答…');
-  try {
-    const scope = $('#ask-scope').value.split(',').map(s => s.trim()).filter(Boolean);
-    const r = await api('/api/ask', {method: 'POST', body: {question: q, paper_ids: scope.length ? scope : null}});
-    const confBadge = {high:'<span class="tag v">高</span>', medium:'<span class="tag l">中</span>',
-                       low:'<span class="tag n">低</span>', none:'<span class="tag n">无依据</span>',
-                       error:'<span class="tag n">错误</span>'}[r.confidence] || '';
-    out.innerHTML = `<div class="card">
-      <div class="md">${md(r.answer)}</div>
-      <div style="margin-top:14px" class="small">
-        置信度 ${confBadge} · 依据${r.insufficient_evidence ? '<strong style="color:#b3261e">不充分</strong>' : '充分'}
-        · 引用校验 ${r.citation_check_passed ? '<span class="tag v">通过</span>' : '<span class="tag n">未通过</span>'}
-      </div>
-      ${(r.citation_issues||[]).map(i=>`<div class="badbox">⚠️ ${esc(i)}</div>`).join('')}
-      ${(r.warnings||[]).map(w=>`<div class="warnbox">${esc(w)}</div>`).join('')}
-      ${(r.open_questions||[]).length ? `<div class="note"><strong>待进一步检索：</strong><br>${r.open_questions.map(esc).join('<br>')}</div>` : ''}
-      <h2 style="margin-top:16px">引用片段</h2>
-      ${(r.excerpts||[]).map(e=>`<div class="excerpt"><b>[${e.tag}]</b> ${esc(e.title)} <span class="muted">· p.${e.page ?? '-'} · ${esc(e.section||'')} · score ${e.score ?? '-'}</span><br>${esc(e.text)}</div>`).join('')}
-    </div>`;
-  } catch (e) { fail(out, e); }
-};
-
-/* ---- 对比 ---- */
-$('#btn-cmp').onclick = async () => {
-  const refs = $('#cmp-refs').value.split('\n').map(s => s.trim()).filter(Boolean);
-  if (refs.length < 2) return alert('至少需要两篇论文');
-  const out = $('#cmp-out');
-  busy(out, '正在对比…');
-  try {
-    const aspects = $('#cmp-aspects').value.split(',').map(s => s.trim()).filter(Boolean);
-    const r = await api('/api/compare', {method: 'POST', body: {refs, aspects: aspects.length ? aspects : null}});
-    out.innerHTML = `<div class="card"><div class="md">${md(r.markdown)}</div></div>`;
-  } catch (e) { fail(out, e); }
-};
-
-/* ---- 推荐 ---- */
-$('#btn-rec').onclick = async () => {
-  const topic = $('#rec-topic').value.trim(), paper = $('#rec-paper').value.trim();
-  if (!topic && !paper) return alert('请填写研究方向或种子论文');
-  const out = $('#rec-out');
-  busy(out, '检索权威数据库并核验…');
-  try {
-    const r = await api('/api/recommend', {method: 'POST', body: {
-      topic: topic || null, paper: paper || null, import_to_kb: $('#rec-import').checked}});
-    out.innerHTML = `<div class="card"><div class="md">${md(r.markdown)}</div></div>`;
-    loadStatus();
-  } catch (e) { fail(out, e); }
-};
-
-/* ---- 核验 ---- */
-$('#btn-ver').onclick = async () => {
-  const title = $('#ver-title').value.trim(), doi = $('#ver-doi').value.trim();
-  if (!title && !doi) return alert('请填写标题或 DOI');
-  const out = $('#ver-out');
-  busy(out, '查询 Crossref / OpenAlex / arXiv…');
-  try {
-    const r = await api('/api/verify', {method: 'POST', body: {title: title || null, doi: doi || null}});
-    const cls = {verified:'ok', likely:'warn', not_found:'bad', unchecked:''}[r.level] || '';
-    out.innerHTML = `<div class="card">
-      <div class="${cls==='ok'?'note':cls==='warn'?'warnbox':'badbox'}"><strong>${esc(r.message)}</strong></div>
-      <div class="small" style="margin-top:10px">
-        <span class="tag">判定 ${esc(r.level)}</span>
-        <span class="tag">置信度 ${(r.confidence||0).toFixed(3)}</span>
-        <span class="tag">存在 ${r.exists?'是':'否'}</span>
-        <span class="tag">响应源 ${esc((r.sources_ok||[]).join('/')||'无')}</span>
-        ${(r.sources_failed||[]).length?`<span class="tag n">失败 ${esc(r.sources_failed.join('/'))}</span>`:''}
-        <span class="tag">${r.elapsed_ms} ms</span>
-      </div>
-      ${(r.matches||[]).length ? `<h2 style="margin-top:16px">候选匹配</h2>` + r.matches.map(m=>`
-        <div class="item"><h3>${esc(m.title)}</h3>
-        <div class="meta">相似度 <strong>${m.similarity.toFixed(3)}</strong> · 来源 ${esc(m.source)} · ${esc((m.authors||[]).slice(0,5).join('、'))} · ${m.year||'-'} · ${esc(m.venue||'-')}</div>
-        ${m.doi?`<div class="meta">DOI: ${esc(m.doi)}</div>`:''}
-        ${m.url?`<div class="meta"><a href="${esc(m.url)}" target="_blank" rel="noreferrer">${esc(m.url)}</a></div>`:''}
-        <div class="row" style="margin-top:8px"><button class="ghost" onclick="importP('${esc(m.doi||'')}','${esc(m.title).replace(/'/g,'')}')">导入本地知识库</button></div>
-        </div>`).join('') : ''}
-      ${r.level==='not_found'?`<div class="warnbox">注意：<strong>「未能核到」不等于「该文献是编造的」</strong>——可能是新预印本、小众期刊或非英文文献尚未被收录。
-        但在任何情况下，都不得把未核验的文献当作真实文献引用。</div>`:''}
-    </div>`;
-  } catch (e) { fail(out, e); }
-};
-window.importP = async (doi, title) => {
-  try {
-    const r = await api('/api/import', {method: 'POST', body: {doi: doi || null, title: title || null}});
-    alert(`已导入：${r.title}\npaper_id = ${r.paper_id}` + (r.created ? '' : '\n（该文献此前已在库中，已更新核验信息）'));
-    loadStatus(); loadLibrary();
-  } catch (e) { alert('导入失败：' + e.message); }
-};
-
-/* ---- 关联 ---- */
-$('#btn-rel').onclick = async () => {
-  const out = $('#rel-out');
-  busy(out, '计算 TF-IDF 相似度…');
-  try {
-    const th = parseFloat($('#rel-th').value) || 0.18;
-    const r = await api('/api/relations?threshold=' + th);
-    out.innerHTML = `<div class="card">
-      <h2>相似论文对（${r.relations.length}）</h2>
-      ${r.relations.length ? r.relations.map(x=>`<div class="item">
-        <h3>${esc(x.title_a)} <span class="muted">⟷</span> ${esc(x.title_b)}</h3>
-        <div class="meta">相似度 <strong>${x.score.toFixed(3)}</strong> · ${esc(x.evidence)}</div></div>`).join('')
-        : '<div class="muted">没有达到阈值的相似论文对。可调低阈值，或先导入更多论文。</div>'}
-      ${r.clusters.length ? `<h2 style="margin-top:16px">研究主题簇</h2>` + r.clusters.map((g,i)=>
-        `<div class="item"><h3>簇 ${i+1}（${g.length} 篇）</h3><div class="meta">${g.map(esc).join(' ｜ ')}</div></div>`).join('') : ''}
-    </div>`;
-  } catch (e) { fail(out, e); }
-};
-
-/* ---- 启动 ---- */
-loadStatus(); loadLibrary();
-</script>
+<script src="/static/app.js"></script>
 </body>
 </html>
