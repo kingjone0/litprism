@@ -2,7 +2,7 @@
 
 > **给接手的 agent 看的第一份文档。**
 > 这里记录的是**实测过的现状**，不是设计意图。凡标「推断」的都是未验证的，请先验证再行动。
-> 最后更新：2026-10-17（研究工作台改造：523 项测试通过；本轮验证源码 sidecar 与无窗口前端，未重打 exe）
+> 最后更新：2026-10-17（研究工作台改造：523 项测试通过；已重新打包 sidecar，exe API 与重启持久化验收通过；F3 安装包待做）
 
 ---
 
@@ -97,6 +97,17 @@ curl -s --noproxy '*' -H "X-LitPrism-Token: $T" http://127.0.0.1:8899/api/status
 - 可复用前端验收：`node tools/check_workbench.cjs`（需可解析 `playwright/test` 和已安装 Chrome；
   无窗口、临时独立浏览器配置、拦截 API 使用示例数据；可设 `LITPRISM_UI_OUTPUT` 保存截图）。
 - 原有打包产物不会自动更新。需 `python packaging/build.py` 重新生成 sidecar，才会把本轮 Python 与静态资源带入桌面打包版。
+
+### 提交与重新打包（2026-10-17）
+
+- 工作台与多轮接线已提交：`225fa1b`（`codex-work`）。
+- 已使用指定 Python 执行 `packaging/build.py`；产物 `packaging/dist/litprism-sidecar.exe`，145,518,180 字节（138.8 MiB）。
+  SHA256：`0ea62000ae5d5879be988a23cbac382b554d01b784ad97aab18b263e63a4029b`。
+- exe 验收：真实 PID 握手、先确认 ping 访问日志可观测、鉴权 401/200；页面 200，四个 CSS/JS 文件与当前源码逐字匹配；
+  mock 模式空库问答明确拒答、新会话与消息重启后保留、用户配置与 SQLite 位于独立测试根；真实进程和启动器均回收，端口不再监听。
+- 测试数据根：`E:/codex-litprism-data/package-smoke-20261017-235652`，未使用日常知识库；未打开 GUI。
+- 本次只重新生成 sidecar，不是完整桌面安装包。下一阶段仍为 **F3：electron-builder + NSIS**。
+  当前 `package.json` 的 build/dev 命令及 `packaging/build.py` 的结束提示仍指向 Tauri，F3 需统一成 Electron 发布流程；不据该提示重新切回 Tauri。
 
 | 阶段 | 状态 | 证据 |
 |---|---|---|
