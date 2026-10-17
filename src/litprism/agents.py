@@ -7,14 +7,13 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 from .config import Config
 from .db import KnowledgeBase
-from .prompts import COMPARE_SYSTEM, QA_SYSTEM, RECOMMEND_SYSTEM
+from .prompts import QA_SYSTEM, RECOMMEND_SYSTEM
 from .search import citing_works, related_works, search_external, search_local
-from .textutil import parse_citations, title_similarity, truncate
+from .textutil import truncate
 from .verify import PaperVerifier
 from .whitelist import badge, is_citable
 
@@ -35,6 +34,8 @@ class QAAnswer:
     citation_check_passed: bool = True
     model: str = ""
     warnings: list[str] = field(default_factory=list)
+    provider_usage: dict | None = None
+    request_tokens: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +58,8 @@ class QAAnswer:
             "citation_check_passed": self.citation_check_passed,
             "model": self.model,
             "warnings": self.warnings,
+            'provider_usage': self.provider_usage,
+            'request_tokens': self.request_tokens,
         }
 
 
@@ -86,8 +89,11 @@ class QAAgent:
         from .context.meter import Meter
 
         dialogue = build_dialogue(self.kb, self.cfg, conversation_id, before_seq) if conversation_id else DialogueContext()
+        meter = Meter(self.cfg)
+        if meter.estimate_text(question) > self.cfg.context.available_tokens // 2:
+            return QAAnswer(question=question, answer='问题过长，请缩短后重试。', insufficient_evidence=True, confidence='none')
         top_k = top_k or self.cfg.retrieval.top_k
-        hits = search_local(self.kb, dialogue.query(question), top_k=top_k, paper_ids=paper_ids, llm=self.llm)
+        hits = search_local(self.kb, dialogue.query(question), top_k=top_k, paper_ids=paper_ids, llm=self.llm, citable_only=True)
         res = QAAnswer(question=question, model=getattr(self.llm, "name", "unknown"))
 
         if not hits:
@@ -98,6 +104,9 @@ class QAAgent:
                 "可能原因：① 尚未导入相关论文（可用 `add` 导入 PDF，或 `recommend` 检索并导入）；"
                 "② 问题用词与论文表述差异较大，可换用论文中的术语再问。"
             )
+            if conversation_id:
+                from .memory.view import TurnViewStore
+                TurnViewStore(self.kb).freeze(conversation_id, read_refs={'request': [], 'outcome': 'no_evidence', 'question': question})
             return res
 
         excerpts = []
@@ -151,26 +160,64 @@ class QAAgent:
         ]
 
         meter = Meter(self.cfg)
+        while sum(meter.estimate_message(m) for m in messages) + 8 > self.cfg.context.available_tokens:
+            if len(excerpts) <= 1:
+                res.answer = '当前上下文预算不足以容纳问题与原文证据，请缩小范围或增加窗口预算。'
+                res.insufficient_evidence = True
+                res.excerpts = []
+                res.confidence = 'none'
+                return res
+            excerpts.pop()
+            old_material = material
+            material = '\n\n---\n\n'.join(blocks[:len(excerpts)])
+            messages[-1]['content'] = messages[-1]['content'].replace('【片段】\n'+old_material, '【片段】\n'+material, 1)
         remaining = max(0, self.cfg.context.available_tokens - sum(meter.estimate_message(m) for m in messages) - 8)
         history, history_refs = dialogue.prompt(meter, remaining)
         if history:
             messages.insert(1, {"role": "user", "content": history})
+        from copy import deepcopy
+        attempts = []
+        error = None
+        for retry in range(self.cfg.context.overflow_retries + 1):
+            attempts.append(deepcopy(messages))
+            try:
+                data = self.llm.chat_json(messages, task='qa')
+                if not isinstance(data, dict):
+                    raise ValueError('模型没有返回 JSON 对象。')
+                error = None
+                break
+            except Exception as exc:
+                error = exc
+                overflow = any(word in str(exc).lower() for word in ('context_length', 'context window', 'maximum context', 'too many tokens'))
+                if not overflow or retry >= self.cfg.context.overflow_retries:
+                    break
+                if history:
+                    messages.pop(1)
+                    history, history_refs = '', []
+                elif len(excerpts) > 1:
+                    excerpts.pop()
+                    old_material = material
+                    material = '\n\n---\n\n'.join(blocks[:len(excerpts)])
+                    messages[-1]['content'] = messages[-1]['content'].replace('【片段】\n'+old_material, '【片段】\n'+material, 1)
+                else:
+                    break
+        res.request_tokens = sum(meter.estimate_message(m) for m in messages)
+        res.provider_usage = getattr(self.llm, 'last_usage', None) if error is None else None
         if conversation_id:
             from .memory.view import TurnViewStore
-
             TurnViewStore(self.kb).freeze(
                 conversation_id, dialogue.memory,
-                read_refs={**dialogue.memory.read_refs(), "history": history_refs,
-                           "retrieved": [e["chunk_id"] for e in excerpts if e.get("chunk_id")]},
+                read_refs={**dialogue.memory.read_refs(), 'history': history_refs,
+                           'retrieved': [e['chunk_id'] for e in excerpts if e.get('chunk_id')],
+                           'request': messages, 'request_attempts': attempts, 'model': res.model,
+                           'outcome': 'error' if error else 'submitted',
+                           'preferences': [m.to_dict() for m in dialogue.memory.resident]},
                 retrieved_tokens=meter.estimate_text(material),
             )
-
-        try:
-            data = self.llm.chat_json(messages, task="qa")
-        except Exception as e:  # noqa: BLE001
-            res.answer = f"（模型调用失败：{e}）"
-            res.confidence = "error"
-            res.warnings.append(str(e))
+        if error:
+            res.answer = f'模型调用失败：{error}'
+            res.confidence = 'error'
+            res.warnings.append(str(error))
             return res
 
         res.answer = str(data.get("answer") or "").strip()
@@ -179,8 +226,7 @@ class QAAgent:
         res.open_questions = list(data.get("open_questions") or [])
         res.evidence_map = list(data.get("evidence_map") or [])
 
-        if self.cfg.qa.strict_citation_check:
-            self._check_citations(res)
+        self._check_citations(res)
         # 偏好守卫与引用检查是独立约束，不能因关闭常规检查而绕过。
         from .memory.guards import detect_memory_as_fact, validate_citations
 
@@ -193,24 +239,9 @@ class QAAgent:
 
     def _check_citations(self, res: QAAnswer) -> None:
         """校验回答中的引用标记是否都能对应到真实片段。"""
-        valid = {e["tag"]: e for e in res.excerpts}
-        cited = parse_citations(res.answer)
-        if not cited:
-            if not res.insufficient_evidence and len(res.answer) > 40:
-                res.citation_issues.append("回答中没有任何来源标记，无法追溯依据。")
-                res.citation_check_passed = False
-            return
-        for tag, page in cited:
-            if tag not in valid:
-                res.citation_issues.append(f"引用了不存在的片段 [{tag}]（提供的片段只有 {'、'.join(valid)}）")
-                res.citation_check_passed = False
-                continue
-            real_page = valid[tag].get("page")
-            if page and real_page and str(page).strip() != str(real_page).strip():
-                res.citation_issues.append(
-                    f"[{tag}] 标注页码为 {page}，但该片段实际位于第 {real_page} 页"
-                )
-                res.citation_check_passed = False
+        from .evidence import citation_issues
+        res.citation_issues.extend(citation_issues(res.answer, res.excerpts, required=not res.insufficient_evidence))
+        res.citation_check_passed = not res.citation_issues
         if not res.citation_check_passed:
             res.warnings.append(
                 "⚠️ 引用校验未通过：回答中可能存在无法追溯或虚构的来源标记，请以原文片段为准。"
@@ -238,39 +269,51 @@ class CompareAgent:
         if len(papers) < 2:
             raise ValueError(f"需要至少 2 篇可识别的论文，当前识别到 {len(papers)} 篇；未找到：{missing}")
 
-        blocks = []
-        labels = {}
-        for i, p in enumerate(papers, 1):
-            tag = f"P{i}"
-            labels[tag] = p
-            analysis = self.kb.get_analysis(p["id"])
-            payload = (analysis or {}).get("payload") or {}
-            lines = [f"[{tag}] 《{p['title']}》" + (f"（{p['year']}）" if p.get("year") else "")]
-            lines.append(f"核验状态：{p.get('verify_level') or p.get('verify_status')}")
-            for key, label in (
-                ("research_question", "研究问题"), ("methodology", "方法论"),
-                ("experiment_design", "实验设计"), ("key_conclusions", "关键结论"),
-                ("innovations", "创新点"), ("limitations", "局限"),
-            ):
-                val = payload.get(key)
-                lines.append(f"{label}：{val if val else '（未提取，需先运行 analyze）'}")
-            if not payload:
-                # 没有结构化解读时退回摘要
-                lines.append(f"摘要：{truncate(p.get('abstract') or '（无摘要，建议先运行 analyze）', 1200)}")
-            blocks.append("\n".join(lines))
-
-        focus = ""
+        from .context.meter import Meter
+        from .evidence import citation_issues, require_citable
+        from .prompts import SYSTEM_ACADEMIC
+        meter = Meter(self.cfg)
+        excerpts, blocks = [], []
+        for index, paper in enumerate(papers, 1):
+            require_citable(paper.get('verify_level'))
+            chunks = self.kb.get_chunks(paper['id'])
+            if not chunks:
+                raise ValueError('论文没有可比较的原文证据，请先导入全文或摘要。')
+            selected = chunks[:6]
+            blocks.append(f"论文 D{index}：《{paper['title']}》")
+            for chunk in selected:
+                tag = f'P{len(excerpts)+1}'
+                excerpts.append(dict(chunk, tag=tag))
+                location = f"p.{chunk['page']}" if chunk['page'] is not None else '无页码'
+                blocks.append(f"[{tag}] D{index} {location}\n{chunk['text']}")
+        prompt = '\n\n'.join(blocks)
+        system = SYSTEM_ACADEMIC + "\n仅比较给定原文，不使用先前解读作为事实。维度缺信息写未提及。输出 JSON：summary, dimensions（每项 dimension, values，键为 D1/D2 等论文编号）, convergence, divergence, evidence_map。每个非空学术结论标注 [P# p.N]，P 是原文片段编号；无页码来源不写页码。"
         if aspects:
-            focus = "\n请特别关注以下维度：" + "、".join(aspects) + "\n"
-
-        messages = [
-            {"role": "system", "content": COMPARE_SYSTEM},
-            {"role": "user", "content": "请对比以下论文：\n\n" + "\n\n---\n\n".join(blocks) + focus},
-        ]
-        data = self.llm.chat_json(messages, task="compare")
-        data["_papers"] = [{"tag": f"P{i}", "id": p["id"], "title": p["title"]} for i, p in enumerate(papers, 1)]
+            prompt += '\n关注维度：' + '、'.join(aspects)
+        messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}]
+        if sum(meter.estimate_message(m) for m in messages) > self.cfg.context.available_tokens:
+            raise ValueError('对比原文超过上下文预算，请减少论文数量或分批对比。')
+        data = self.llm.chat_json(messages, task='compare')
+        texts = [str(data.get('summary') or '')]
+        for dimension in data.get('dimensions') or []:
+            texts.extend(str(v) for v in (dimension.get('values') or {}).values() if v and v != '未提及')
+        for key in ('convergence', 'divergence'):
+            texts.extend(str(v) for v in data.get(key) or [])
+        issues = []
+        for text in texts:
+            if text.strip():
+                issues.extend(citation_issues(text, excerpts))
+        for item in data.get('evidence_map') or []:
+            issues.extend(citation_issues(' '.join('['+str(v).strip('[]')+']' for v in item.get('sources') or []), excerpts))
+        data['_citation_check'] = {'passed': not issues, 'issues': issues}
+        data['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': e['paper_id'], 'page': e['page']} for e in excerpts]
+        data['_model'] = getattr(self.llm, 'name', 'unknown')
+        data['_papers'] = [{'tag': f'D{i}', 'id': p['id'], 'title': p['title']} for i, p in enumerate(papers, 1)]
+        if issues:
+            data = {k: v for k, v in data.items() if k.startswith('_')}
+            data['summary'] = '引用校验未通过，已阻止展示无法回溯的对比结论。'
         if missing:
-            data["_missing"] = missing
+            data['_missing'] = missing
         return data
 
 
@@ -357,7 +400,6 @@ class RecommendAgent:
         if not query:
             raise ValueError("请提供研究方向（topic）或一篇种子论文（paper_ref）")
 
-        known = {p["id"] for p in self.kb.list_papers(limit=2000)}
         known_keys = set()
         for p in self.kb.list_papers(limit=2000):
             from .textutil import normalize_doi, normalize_title
@@ -402,7 +444,7 @@ class RecommendAgent:
                     continue
                 seen_local.add(pid)
                 p = self.kb.get_paper(pid)
-                if not p:
+                if not p or not is_citable(p.get('verify_level')):
                     continue
                 candidates.append(
                     {

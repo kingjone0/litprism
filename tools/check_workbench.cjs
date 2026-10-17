@@ -61,6 +61,7 @@ const assert = require('node:assert/strict');
       await page.screenshot({ path: path.join(output, 'workbench-library.png') });
     }
     await page.locator('#btnNewConv').click();
+    await page.locator('#researchTask [type=submit]').click();
     await expect(page.locator('#chatInput')).toBeVisible();
     await page.locator('.starter').first().click();
     assert((await page.locator('#chatInput').inputValue()).length > 0);

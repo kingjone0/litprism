@@ -240,10 +240,14 @@ def enrich(comp: dict, kb: Any) -> dict:
         if p:
             for k in ("title", "verify_level", "verify_badge"):
                 out[k] = _paper_fields(p)[k]
+        payload = ((kb.get_analysis(p['id']) if p else None) or {}).get('payload') or {}
+        out['_mock'] = bool(payload.get('_mock'))
+        out['_model'] = payload.get('_model')
         fields = []
-        for f in (comp.get("fields") or [])[:20]:
-            if isinstance(f, dict):
-                fields.append({"key": str(f.get("key") or ""), "text": sanitize_text(f.get("text"))})
+        if p and _validated_analysis(kb, p['id']):
+            for key in ('research_question', 'methodology', 'experiment_design', 'key_conclusions', 'innovations', 'limitations'):
+                if payload.get(key):
+                    fields.append({'key': key, 'text': sanitize_text(payload[key])})
         out["fields"] = fields
 
     elif ctype == "comparison-table":
@@ -260,7 +264,7 @@ def enrich(comp: dict, kb: Any) -> dict:
                     {
                         "key": str(d.get("key") or ""),
                         "label": str(d.get("label") or d.get("key") or ""),
-                        "values": [sanitize_text(v, 600) for v in (d.get("values") or [])][:8],
+                        "values": [sanitize_text(_validated_analysis(kb, pid).get(str(d.get('key') or '')) or '未提及', 600) for pid in ids[:8]],
                     }
                 )
         out["dimensions"] = dims
@@ -304,6 +308,14 @@ def enrich(comp: dict, kb: Any) -> dict:
             out["kind"] = "note"
 
     return out
+
+
+def _validated_analysis(kb: Any, pid: str) -> dict:
+    paper = _get_paper(kb, pid)
+    if not paper or paper.get('verify_level') not in ('verified', 'manual_confirmed'):
+        return {}
+    payload = ((kb.get_analysis(pid) if kb else None) or {}).get('payload') or {}
+    return payload if (payload.get('_citation_check') or {}).get('passed') else {}
 
 
 def _get_paper(kb: Any, paper_id: Any) -> dict | None:

@@ -34,6 +34,11 @@ def env(tmp_path):
     cfg.app.data_dir = str(tmp_path)
     cfg.ensure_dirs()
     kb = KnowledgeBase(cfg, db_path=tmp_path / "t.db")
+    for pid, title, cid, page in [('p_1', 'Attention Is All You Need', 'c_a', 3), ('p_2', 'BERT', 'c_b', 7)]:
+        kb.add_paper(title=title, paper_id=pid, verify_level='verified')
+        kb.add_chunks(pid, [{'text': 'Evidence for export.', 'page': page}])
+        kb._con.execute('UPDATE chunks SET id=? WHERE paper_id=?', (cid, pid))
+    kb._con.commit()
     yield cfg, kb
     kb.close()
 
@@ -156,13 +161,13 @@ class TestExport:
         assert "p.3" in text
         assert "chunk:c_a" in text
 
-    def test_no_citations_still_exports(self, env, tmp_path):
+    def test_no_citations_cannot_export(self, env, tmp_path):
         cfg, kb = env
-        s = DeliverableStore(kb)
-        did = s.add(type="notes", title="笔记", content="x")
-        text = s.export(did, tmp_path / "n.md").read_text(encoding="utf-8")
-        assert "## 引用来源" not in text
-        assert "citations: 0" in text
+        store = DeliverableStore(kb)
+        did = store.add(type='notes', title='No evidence', content='x')
+        with pytest.raises(ValueError, match='引用来源'):
+            store.export(did, tmp_path / 'n.md')
+        assert not (tmp_path / 'n.md').exists()
 
     def test_json_export(self, env, tmp_path):
         cfg, kb = env
@@ -177,7 +182,7 @@ class TestExport:
     def test_export_promotes_draft_to_exported(self, env, tmp_path):
         cfg, kb = env
         s = DeliverableStore(kb)
-        did = s.add(type="notes", title="笔记", content="x")
+        did = s.add(type="notes", title="笔记", content="x", citations=CITES)
         s.export(did, tmp_path / "a.md")
         assert s.get(did).status == "exported"
 
@@ -185,7 +190,7 @@ class TestExport:
         """定稿状态更「重」，导出不该把它降级。"""
         cfg, kb = env
         s = DeliverableStore(kb)
-        did = s.add(type="notes", title="笔记", content="x", status="final")
+        did = s.add(type="notes", title="笔记", content="x", status="final", citations=CITES)
         s.export(did, tmp_path / "a.md")
         assert s.get(did).status == "final"
 
@@ -197,8 +202,8 @@ class TestExport:
     def test_export_all(self, env, tmp_path):
         cfg, kb = env
         s = DeliverableStore(kb)
-        s.add(type="review", title="综述 A", content="x")
-        s.add(type="notes", title="笔记 B", content="y")
+        s.add(type="review", title="综述 A", content="x", citations=CITES)
+        s.add(type="notes", title="笔记 B", content="y", citations=CITES)
         paths = s.export_all(tmp_path / "out")
         assert len(paths) == 2
         assert all(p.exists() for p in paths)

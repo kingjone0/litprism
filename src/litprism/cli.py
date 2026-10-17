@@ -173,15 +173,21 @@ def cmd_add(ctx: Ctx, args) -> int:
         # 核验（若有 DOI 或标题）
         verify_evidence: dict = {}
         level, status, conf = "unknown", "unverified", 0.0
-        if args.verify:
-            vr = ctx.verifier.verify(
-                title=doc.title, doi=doc.doi, authors=doc.authors, year=doc.year,
-                arxiv_id=doc.arxiv_id, log=True,
-            )
-            print(f"  核验：{vr.message}")
-            verify_evidence = vr.to_dict()
-            level, conf = vr.level, vr.confidence
-            status = "verified" if vr.level == "verified" else "unverified"
+        vr = ctx.verifier.verify(
+            title=doc.title, doi=doc.doi, authors=doc.authors, year=doc.year,
+            arxiv_id=doc.arxiv_id, log=True,
+        )
+        print(f"  核验：{vr.message}")
+        verify_evidence = vr.to_dict()
+        level, conf = vr.level, vr.confidence
+        status = "verified" if vr.level == "verified" else "unverified"
+
+        from .evidence import require_citable
+        try:
+            require_citable(level)
+        except ValueError as exc:
+            err(str(exc))
+            continue
 
         pid = ctx.kb.add_paper(
             title=doc.title, authors=doc.authors, year=doc.year, abstract=doc.abstract,

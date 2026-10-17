@@ -179,6 +179,7 @@ function refreshInspector() {
    ========================================================================== */
 const VIEW_TITLES = {
   library: '知识库', paper: '论文', chat: '对话', compare: '对比',
+  recommend: '发现文献', memories: '研究偏好', trash: '回收站',
   verify: '核验', deliverables: '交付物', skills: 'Skill', settings: '设置',
 };
 
@@ -204,6 +205,7 @@ function openView(view, opts = {}) {
   const loader = {
     library: loadLibrary, paper: loadPaperDetail, chat: loadChat,
     deliverables: loadDeliverables, skills: loadSkills, verify: loadVerify,
+    compare: loadComparison, memories: loadMemories, trash: loadTrash,
   }[view];
   if (loader) loader().catch(e => toast(e.message, true));
   refreshInspector();
@@ -297,11 +299,7 @@ async function loadSidebar() {
 }
 
 async function newConversation() {
-  try {
-    const r = await api('/api/conversations', { method: 'POST', body: { title: '新会话' } });
-    await loadSidebar();
-    openView('chat', { convId: r.id });
-  } catch (e) { toast(e.message, true); }
+  showConversationDialog();
 }
 
 /* ==========================================================================
@@ -309,12 +307,14 @@ async function newConversation() {
    ========================================================================== */
 async function loadLibrary() {
   const q = ($('#libSearch').value || '').toLowerCase();
-  const items = q
+  let items = q
     ? S.papers.filter(p =>
         (p.title || '').toLowerCase().includes(q) ||
         (p.display_title || '').toLowerCase().includes(q) ||
         (p.authors || []).some(a => (a || '').toLowerCase().includes(q)))
     : S.papers;
+  const group = $('#collectionFilter').value;
+  if (group) items = items.filter(p => p.collection_id === group);
 
   const st = S.status?.stats || {};
   $('#libSub').textContent =
@@ -330,15 +330,16 @@ async function loadLibrary() {
     box.innerHTML = `<div class="empty">
       <div class="empty-mark">${icon('library')}</div>
       <div class="title">${q ? '没有匹配的论文' : '知识库还是空的'}</div>
-      <div class="desc">${q ? '换个标题或作者关键词试试。' : '当前可通过命令 <code>litprism add &lt;论文.pdf&gt;</code> 导入文献。核验状态和原文来源会随文献保留。'}</div>
+      <div class="desc">${q ? '换个标题或作者关键词试试。' : '点击「导入文献」或拖入 PDF，完成核验后开始阅读。核验未通过时可查看原因并人工确认。'}</div>
     </div>`;
     return;
   }
 
   box.innerHTML = items.map(p => `
-    <button class="list-item" data-paper="${esc(p.id)}">
+    <div class="list-item">
+      <input type="checkbox" data-select-paper="${esc(p.id)}" aria-label="选择 ${esc(p.title)}" ${S.selectedPapers?.has(p.id) ? 'checked' : ''}>
       <span class="paper-mark">${icon('document')}</span>
-      <div class="list-main">
+      <button class="list-main paper-link" data-paper="${esc(p.id)}">
         <div class="list-title">${esc(p.display_title || p.title)}</div>
         <div class="list-sub">
           <span>${esc((p.authors || []).slice(0, 3).join('、') || '作者未知')}${(p.authors || []).length > 3 ? ' 等' : ''}</span>
@@ -346,11 +347,15 @@ async function loadLibrary() {
           ${p.venue ? `<span>${esc(p.venue)}</span>` : ''}
           ${badgeOf(p.verify_level)}
         </div>
-      </div>
+      </button>
       <span class="paper-open" aria-hidden="true">↗</span>
-    </button>`).join('');
+    </div>`).join('');
 
   $$('[data-paper]', box).forEach(b => b.onclick = () => openView('paper', { paperId: b.dataset.paper }));
+  $$('[data-select-paper]', box).forEach(cb => cb.onchange = () => {
+    if (cb.checked) S.selectedPapers.add(cb.dataset.selectPaper); else S.selectedPapers.delete(cb.dataset.selectPaper);
+    $('#btnCompareSelected').disabled = S.selectedPapers.size < 2;
+  });
 }
 
 /* ==========================================================================
@@ -369,6 +374,7 @@ async function loadPaperDetail() {
     const d = await api(`/api/paper/${encodeURIComponent(S.activePaper)}`);
     const p = d.paper || d;
     const a = d.analysis || {};
+    S.paperAnalysis = a;
     const concepts = d.concepts || [];
 
     box.innerHTML = `
@@ -401,7 +407,11 @@ async function loadPaperDetail() {
       </div>
 
       <div data-ppane="analysis">
-        ${a.research_question ? `
+        ${a._mock ? '<div class="lui-degraded">离线占位模型（mock）：仅演示流程，不构成真实学术解读。配置模型后请重新解读。</div>' : ''}
+        ${a._model ? `<div class="source-intro">生成模型：${esc(a._model)}</div>` : ''}
+        ${a._citation_check?.passed === false ? `<div class="lui-degraded">部分解读字段缺少可回溯证据，已留空：${esc((a._citation_check.issues || []).join('；'))}</div>` : ''}
+        ${a.research_question && !a._citation_check ? '<div class="lui-degraded">旧版解读尚未经过字段级引用检查，请重新解读。</div>' : ''}
+        ${a._model || a.research_question ? `
           <div class="card"><div class="card-body">
             ${analysisSection('研究问题', a.research_question)}
             ${analysisSection('方法', a.methodology)}
@@ -467,7 +477,7 @@ async function loadPaperDetail() {
     $('#btnReanalyze').onclick = async () => {
       try {
         toast('正在解读…');
-        await api(`/api/analyze/${encodeURIComponent(S.activePaper)}`, { method: 'POST' });
+        await api(`/api/analyze/${encodeURIComponent(S.activePaper)}?force=true`, { method: 'POST' });
         toast('解读完成');
         loadPaperDetail();
       } catch (e) { toast(e.message, true); }
@@ -505,10 +515,14 @@ async function loadPaperText(pid) {
 }
 
 function analysisSection(label, text) {
-  if (!text) return '';
+  const field = { '研究问题': 'research_question', '方法': 'methodology', '实验设计': 'experiment_design',
+    '主要结论': 'key_conclusions', '创新点': 'innovations', '局限': 'limitations' }[label];
+  const refs = (S.paperAnalysis?.field_evidence || {})[field] || [];
+  if (!text) return `<div class="source-intro">${esc(label)}：原文依据不足，已留空。</div>`;
   return `<div style="margin-bottom:16px">
     <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:5px">${label}</div>
     <div class="reading-text">${esc(text)}</div>
+    ${refs.length ? `<div class="source-intro">依据：${refs.map(r => '[' + esc(r) + ']').join(' ')} · 可在「证据与详情」查看原文</div>` : ''}
   </div>`;
 }
 
@@ -722,7 +736,7 @@ function renderMessage(m, fresh = false) {
         <div class="chat-bubble ${isUser ? 'user' : ''}">${body}</div>
         ${checkWarn}
         <div style="margin-top:4px;font-size:10.5px;color:var(--muted);text-align:${isUser ? 'right' : 'left'}">
-          ${isUser ? '你' : '文献棱镜'}${m.created_at ? ' · ' + esc(m.created_at.slice(0, 16).replace('T', ' ')) : ''}
+          ${isUser ? '你' : '文献棱镜'}${m.model ? ' · ' + esc(m.model) : ''}${m.created_at ? ' · ' + esc(m.created_at.slice(0, 16).replace('T', ' ')) : ''}
         </div>
       </div>
     </div>`;
@@ -782,13 +796,9 @@ async function loadDeliverables() {
   $$('[data-dexport]', box).forEach(b => b.onclick = async () => {
     const item = S.deliverables.find(x => x.id === b.dataset.dexport);
     const name = item?.title || 'deliverable';
-    const dir = (S.status?.config?.export?.notes_dir || './notes').replace(/^\.\//, '');
     try {
-      const p = await api(`/api/deliverables/${encodeURIComponent(b.dataset.dexport)}/export`, {
-        method: 'POST',
-        body: { path: `${dir}/deliverables/${name}.md` },
-      });
-      toast(`已导出到 ${p.path}`);
+      await downloadApi(`/api/deliverables/${encodeURIComponent(b.dataset.dexport)}/download`, `${name}.md`);
+      toast('已生成带引用来源的下载文件');
     } catch (e) { toast(e.message, true); }
   });
 }
@@ -796,21 +806,9 @@ async function loadDeliverables() {
 async function showDeliverable(id) {
   try {
     const d = await api(`/api/deliverables/${encodeURIComponent(id)}`);
-    const w = window.open('', '_blank');
-    const cites = (d.citations || []).map((c, i) =>
-      `${i + 1}. ${c.paper_title || c.paper_id || ''} · p.${c.page ?? '?'}${c.tag ? ' · [' + c.tag + ']' : ''}`).join('\n');
-    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
-      <title>${esc(d.title)}</title>
-      <style>body{font-family:-apple-system,"Microsoft YaHei",sans-serif;max-width:760px;margin:40px auto;padding:0 24px;line-height:1.8;color:#23211e}
-      h1{font-size:22px}pre{white-space:pre-wrap;font-family:inherit;font-size:14px}
-      .meta{color:#86807a;font-size:12px;margin-bottom:24px;padding-bottom:12px;border-bottom:1px solid #e6e3de}
-      .cites{margin-top:32px;padding-top:16px;border-top:1px solid #e6e3de;font-size:12.5px;color:#55504a;white-space:pre-wrap}</style>
-      </head><body>
-      <h1>${esc(d.title)}</h1>
-      <div class="meta">${esc(d.type_label)} · ${esc(d.status_label)} · ${d.word_count} 字${d.citation_count ? ' · ' + d.citation_count + ' 条引用' : ''}</div>
-      <pre>${esc(d.content)}</pre>
-      ${cites ? `<div class="cites"><strong>引用来源</strong>\n${esc(cites)}</div>` : ''}
-      </body></html>`);
+    const cites = (d.citations || []).map(c => `<p>${esc(c.paper_title || c.paper_id)} · ${c.page == null ? '无页码' : 'p.'+esc(c.page)}</p>`).join('');
+    workflowDialog(d.title, `<p class="source-intro">${esc(d.model || '模型未记录')} · ${esc(d.status_label)}</p><div class="reading-report">${LitUI.md(d.content || '')}</div><h3>引用来源</h3>${cites || '<p>无来源，禁止导出。</p>'}`, null);
+
   } catch (e) { toast(e.message, true); }
 }
 
@@ -856,12 +854,14 @@ async function loadSkills() {
             <span class="badge accent">本机</span>
           </div>
           ${k.description ? `<div class="skill-desc">${esc(k.description)}</div>` : ''}
+          <button class="btn sm" data-run-skill="${esc(k.id)}" ${k.ok ? '' : 'disabled'}>运行技能</button>
           <div class="skill-path">📁 ${esc(k.path || '')}</div>
           ${issues.length ? `<div class="skill-issues">${issues.map(i =>
             `<div class="skill-issue ${i.startsWith('✗') ? 'err' : 'warn'}">${esc(i)}</div>`).join('')}</div>` : ''}
         </div>
       </div>`;
   }).join('');
+  $$('[data-run-skill]', box).forEach(b => b.onclick = () => showSkillRun(S.skills.find(k => k.id === b.dataset.runSkill)));
 }
 
 function showNewSkill() {
@@ -1718,6 +1718,7 @@ async function loadInspectorContext() {
               <span class="spacer"></span>
               <span class="muted">${b.shadowed_tokens}→${b.summary_tokens}</span></div>
             <div class="muted" style="margin-top:2px">${esc(b.topic || '')} · 句柄 ${b.handles}</div>
+            <button class="btn sm" data-restore-block="${esc(b.id)}">查看历史与原文</button>
           </div>`).join('')}` : ''}
 
       ${(d.ledger || []).length ? `
@@ -1728,8 +1729,23 @@ async function loadInspectorContext() {
           <div class="metric"><span class="k">${esc(e.trigger)}</span>
             <span class="v">省 ${fmtNum(e.saved_per_turn)}/轮</span></div>`).join('')}` : ''}
 
+      ${d.last_request ? `<div class="insp-note">最近请求模型：${esc(d.last_request.model)}<br>完整输入估算：${fmtNum(d.last_request.estimated_input)} token${d.last_request.provider_usage ? '<details><summary>提供方原始用量</summary><pre>'+esc(JSON.stringify(d.last_request.provider_usage, null, 2))+'</pre></details>' : '<br>提供方未返回实际用量'}</div>` : ''}
+      <button class="btn sm" id="btnTurnReads">查看每轮读取快照</button>
       ${d.note ? `<div class="insp-note">${esc(d.note)}</div>` : ''}
     `;
+    $('#btnTurnReads').onclick = async () => {
+      try {
+        const views = await api('/api/turns/' + encodeURIComponent(S.activeConv));
+        workflowDialog('每轮上下文快照', (views.items || []).map(v => `<details><summary>轮次 ${v.turn_seq} · ${esc(v.bar || '')}</summary><pre class="reading-text">${esc(JSON.stringify(v.read_refs, null, 2))}</pre></details>`).join('') || '<p>尚无读取记录。</p>', null);
+      } catch (error) { toast(error.message, true); }
+    };
+    $$('[data-restore-block]', box).forEach(b => b.onclick = async () => {
+      try {
+        const r = await api('/api/restore/' + encodeURIComponent(b.dataset.restoreBlock));
+        workflowDialog('压缩前的历史与原文', `<p class="source-intro">只读恢复查看，不重新注入模型上下文。</p>${r.messages.map(m => `<details><summary>${esc(m.ref)} · ${esc(m.role)}</summary><div class="reading-text">${esc(m.content)}</div></details>`).join('')}
+          ${r.citations.map(c => `<div class="source-excerpt"><strong>${esc(c.paper_title || c.paper_id)} · ${c.page == null ? '无页码' : 'p.'+esc(c.page)}</strong><p>${esc(c.text)}</p></div>`).join('')}`, null);
+      } catch (error) { toast(error.message, true); }
+    });
   } catch (e) {
     box.innerHTML = `<div class="empty" style="padding:24px 8px"><div class="desc">${esc(e.message)}</div></div>`;
   }
@@ -1739,9 +1755,10 @@ async function loadInspectorSources() {
   const box = $('#inspSources');
   const view = S.activeView;
   const paperId = S.activePaper;
-  if (view === 'chat') {
-    box.innerHTML = S.sources.length
-      ? `<p class="source-intro">最近一次回答检索到的原文片段。页码与内容均取自知识库；不表示每个片段都被回答引用。</p>${LitUI.renderSegments(S.sources)}`
+  if (view === 'chat' || view === 'compare') {
+    const sources = view === 'compare' ? (S.compareSources || []) : S.sources;
+    box.innerHTML = sources.length
+      ? `<p class="source-intro">本次任务检索到的原文片段。页码与内容均取自知识库；不表示每个片段都被结论引用。</p>${LitUI.renderSegments(sources)}`
       : '<div class="empty"><div class="title">本轮暂无原文来源</div><div class="desc">有检索依据的回答会在这里显示原文片段。历史对话和用户偏好不会成为引用来源。</div></div>';
     LitUI.bind(box);
     return;

@@ -327,6 +327,8 @@ class FakeLLM:
 class TestRunner:
     def _setup(self, env, **over):
         cfg, kb, skills_dir = env
+        pid = kb.add_paper(title='Seed Evidence', verify_level='verified')
+        kb.add_chunks(pid, [{'text':'注意力 稀疏注意力 a x evidence.', 'page':1}])
         make_skill(skills_dir, "demo", **over)
         reg = SkillRegistry(cfg, skills_dir)
         reg.discover()
@@ -379,7 +381,7 @@ class TestRunner:
     def test_citation_check_passes_with_valid_tag(self, env):
         cfg, kb, reg = self._setup(env)
         # 先塞一条能被检索到的分块，让 excerpts 非空
-        pid = kb.add_paper(title="Attention Paper")
+        pid = kb.add_paper(title="Attention Paper", verify_level="verified")
         kb.add_chunks(pid, [{"text": "注意力机制的核心是缩放点积。", "page": 1, "section": "方法"}])
         r = SkillRunner(kb, cfg, llm=FakeLLM("结论 [P1 p.1]。"), registry=reg).run(
             "demo", {"topic": "注意力机制"}
@@ -390,18 +392,18 @@ class TestRunner:
 
     def test_citation_check_flags_wrong_page(self, env):
         cfg, kb, reg = self._setup(env)
-        pid = kb.add_paper(title="Attention Paper")
+        pid = kb.add_paper(title="Attention Paper", verify_level="verified")
         kb.add_chunks(pid, [{"text": "注意力机制的核心是缩放点积。", "page": 1, "section": "方法"}])
         r = SkillRunner(kb, cfg, llm=FakeLLM("结论 [P1 p.99]。"), registry=reg).run(
             "demo", {"topic": "注意力机制"}
         )
-        assert r.ok
+        assert not r.ok
         assert not r.citation_check.passed
         assert any("99" in i for i in r.citation_check.issues)
 
     def test_citation_check_flags_missing_tags(self, env):
         cfg, kb, reg = self._setup(env)
-        pid = kb.add_paper(title="Attention Paper")
+        pid = kb.add_paper(title="Attention Paper", verify_level="verified")
         kb.add_chunks(pid, [{"text": "注意力机制的核心是缩放点积。", "page": 1, "section": "方法"}])
         r = SkillRunner(kb, cfg, llm=FakeLLM("结论 [P9 p.1]。"), registry=reg).run(
             "demo", {"topic": "注意力机制"}
@@ -411,7 +413,7 @@ class TestRunner:
 
     def test_uncited_answer_flagged(self, env):
         cfg, kb, reg = self._setup(env)
-        pid = kb.add_paper(title="Attention Paper")
+        pid = kb.add_paper(title="Attention Paper", verify_level="verified")
         kb.add_chunks(pid, [{"text": "注意力机制的核心是缩放点积。", "page": 1, "section": "方法"}])
         r = SkillRunner(kb, cfg, llm=FakeLLM("这是一个完全没有引用标记的回答。"), registry=reg).run(
             "demo", {"topic": "注意力机制"}
@@ -455,7 +457,7 @@ class TestRunner:
 
     def test_format_result(self, env):
         cfg, kb, reg = self._setup(env)
-        r = SkillRunner(kb, cfg, llm=FakeLLM("x"), registry=reg).run("demo", {"topic": "a"})
+        r = SkillRunner(kb, cfg, llm=FakeLLM("结论 [P1 p.1]"), registry=reg).run("demo", {"topic": "a"})
         assert "执行完成" in format_result(r)
         assert "执行失败" in format_result(
             type(r)(ok=False, skill_id="x", error="boom")

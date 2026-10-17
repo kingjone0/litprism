@@ -279,6 +279,7 @@ class DeliverableStore:
         d = self.get(did)
         if d is None:
             raise ValueError(f"交付物 {did} 不存在")
+        self.validate_export(d)
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         if fmt == "json":
@@ -293,7 +294,24 @@ class DeliverableStore:
             self.update(did, status="exported")
         return p
 
+    def validate_export(self, d: Deliverable) -> None:
+        from .evidence import citation_issues, stored_excerpts
+        if not isinstance(d.source_scope, dict):
+            raise ValueError('引用校验记录格式错误。')
+        if not isinstance(d.citations, list) or not d.citations:
+            raise ValueError("没有引用来源，禁止导出学术交付物。")
+        excerpts = stored_excerpts(self.kb, d.citations)
+        issues = citation_issues(d.content, excerpts, required=False)
+        if (d.source_scope.get('citation_check') or {}).get('passed') is False:
+            issues.append('生成时的引用校验未通过。')
+        if issues:
+            raise ValueError('引用校验未通过：' + '；'.join(issues))
+        d.citations = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': e['paper_id'],
+                        'paper_title': e['paper_title'], 'page': e['page']} for e in excerpts]
+
     def export_all(self, out_dir: str | Path, *, fmt: str = "md") -> list[Path]:
+        for d in self.list(limit=1000):
+            self.validate_export(d)
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         paths: list[Path] = []

@@ -137,7 +137,7 @@ class LitPrismTools:
 
             if not (query or "").strip():
                 return _err("query 不能为空")
-            hits = search_local(self.kb, query, top_k=max(1, int(top_k)))
+            hits = search_local(self.kb, query, top_k=max(1, int(top_k)), paper_ids=[paper_id] if paper_id else None, citable_only=True)
             if paper_id:
                 hits = [h for h in hits if h.get("paper_id") == paper_id]
             items = [
@@ -247,12 +247,10 @@ class LitPrismTools:
                 return _err("未配置模型，无法回答。请先在配置里设置 llm。")
             from ..agents import QAAgent
 
-            ans = QAAgent(self.kb, self.cfg, self.llm).answer(question, top_k=max(1, int(top_k)))
-            return _ok(
-                answer=ans.answer,
-                citations=ans.citations,
-                citation_check=ans.check.to_dict() if hasattr(ans, "check") else {},
-            )
+            ans = QAAgent(self.kb, self.cfg, self.llm).ask(question, top_k=max(1, int(top_k)))
+            return _ok(**ans.to_dict(), citations=[{
+                'tag': e['tag'], 'chunk_id': e.get('chunk_id'), 'paper_id': e['paper_id'], 'page': e['page'],
+            } for e in ans.excerpts], citation_check={'passed': ans.citation_check_passed, 'issues': ans.citation_issues})
         except Exception as e:  # noqa: BLE001
             return _err(f"回答失败：{type(e).__name__}: {e}")
 

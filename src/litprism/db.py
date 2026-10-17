@@ -116,6 +116,9 @@ class KnowledgeBase:
                 url=url,
                 arxiv_id=arxiv_id,
             )
+            if verify_level in ('verified', 'manual_confirmed'):
+                with self.tx() as con:
+                    con.execute('UPDATE papers SET deleted_at=NULL WHERE id=?', (existing,))
             return existing
 
         pid = paper_id or _new_id("p_")
@@ -182,7 +185,7 @@ class KnowledgeBase:
             con.execute(f"UPDATE papers SET {', '.join(sets)} WHERE id = ?", vals)
 
     def get_paper(self, paper_id: str) -> dict | None:
-        row = self._con.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
+        row = self._con.execute("SELECT * FROM papers WHERE id = ? AND deleted_at IS NULL", (paper_id,)).fetchone()
         return self._row_to_paper(row) if row else None
 
     def resolve_paper(self, ref: str) -> dict | None:
@@ -194,17 +197,17 @@ class KnowledgeBase:
         if p:
             return p
         rows = self._con.execute(
-            "SELECT * FROM papers WHERE id LIKE ? LIMIT 5", (f"{ref}%",)
+            "SELECT * FROM papers WHERE id LIKE ? AND deleted_at IS NULL LIMIT 5", (f"{ref}%",)
         ).fetchall()
         if len(rows) == 1:
             return self._row_to_paper(rows[0])
         row = self._con.execute(
-            "SELECT * FROM papers WHERE lower(doi) = lower(?) LIMIT 1", (ref,)
+            "SELECT * FROM papers WHERE lower(doi) = lower(?) AND deleted_at IS NULL LIMIT 1", (ref,)
         ).fetchone()
         if row:
             return self._row_to_paper(row)
         row = self._con.execute(
-            "SELECT * FROM papers WHERE title LIKE ? LIMIT 1", (f"%{ref}%",)
+            "SELECT * FROM papers WHERE title LIKE ? AND deleted_at IS NULL LIMIT 1", (f"%{ref}%",)
         ).fetchone()
         return self._row_to_paper(row) if row else None
 
@@ -212,7 +215,7 @@ class KnowledgeBase:
         self, *, status: str | None = None, query: str | None = None, limit: int = 200
     ) -> list[dict]:
         sql = "SELECT * FROM papers"
-        conds, vals = [], []
+        conds, vals = ['deleted_at IS NULL'], []
         if status:
             conds.append("verify_status = ?")
             vals.append(status)
@@ -328,7 +331,7 @@ class KnowledgeBase:
             "       bm25(chunks_fts) AS raw_score",
             "FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid",
             "JOIN papers p ON p.id = c.paper_id",
-            "WHERE chunks_fts MATCH ?",
+            "WHERE chunks_fts MATCH ? AND p.deleted_at IS NULL",
         ]
         vals: list[Any] = [match]
         if paper_ids:
@@ -356,7 +359,7 @@ class KnowledgeBase:
         vals: list[Any] = [f"%{t}%" for t in terms]
         sql = (
             "SELECT c.id, c.paper_id, c.page, c.section, c.text, p.title AS paper_title,"
-            " p.year AS paper_year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE " + conds
+            " p.year AS paper_year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL AND (" + conds + ")"
         )
         if paper_ids:
             sql += f" AND c.paper_id IN ({','.join('?' * len(paper_ids))})"
@@ -591,7 +594,7 @@ class KnowledgeBase:
     def get_messages(self, conversation_id: str, *, limit: int | None = None) -> list[dict]:
         sql = (
             "SELECT seq, ref, role, content, citations, citation_check, kind, shadowed_refs,"
-            " block_id, created_at FROM messages WHERE conversation_id = ? ORDER BY seq"
+            " block_id, meta, created_at FROM messages WHERE conversation_id = ? ORDER BY seq"
         )
         vals: list[Any] = [conversation_id]
         if limit:
@@ -609,20 +612,20 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     def stats(self) -> dict:
         con = self._con
-        total = con.execute("SELECT COUNT(*) n FROM papers").fetchone()["n"]
+        total = con.execute("SELECT COUNT(*) n FROM papers WHERE deleted_at IS NULL").fetchone()["n"]
         by_status = {
             r["verify_status"]: r["n"]
-            for r in con.execute("SELECT verify_status, COUNT(*) n FROM papers GROUP BY verify_status")
+            for r in con.execute("SELECT verify_status, COUNT(*) n FROM papers WHERE deleted_at IS NULL GROUP BY verify_status")
         }
         by_level = {
             r["verify_level"]: r["n"]
-            for r in con.execute("SELECT verify_level, COUNT(*) n FROM papers GROUP BY verify_level")
+            for r in con.execute("SELECT verify_level, COUNT(*) n FROM papers WHERE deleted_at IS NULL GROUP BY verify_level")
         }
         return {
             "papers": total,
-            "chunks": con.execute("SELECT COUNT(*) n FROM chunks").fetchone()["n"],
-            "analyses": con.execute("SELECT COUNT(*) n FROM analyses").fetchone()["n"],
-            "concepts": con.execute("SELECT COUNT(*) n FROM concepts").fetchone()["n"],
+            "chunks": con.execute("SELECT COUNT(*) n FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
+            "analyses": con.execute("SELECT COUNT(*) n FROM analyses a JOIN papers p ON p.id=a.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
+            "concepts": con.execute("SELECT COUNT(*) n FROM concepts c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
             "relations": con.execute("SELECT COUNT(*) n FROM relations").fetchone()["n"],
             "verifications": con.execute("SELECT COUNT(*) n FROM verify_log").fetchone()["n"],
             "by_verify_status": by_status,

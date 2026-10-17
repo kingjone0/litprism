@@ -29,6 +29,10 @@ class LLMError(RuntimeError):
     pass
 
 
+class ContextWindowError(LLMError):
+    pass
+
+
 # ---------------------------------------------------------------------------
 # JSON 解析：容忍模型输出的 ```json 代码块、前后废话、尾随逗号
 # ---------------------------------------------------------------------------
@@ -68,12 +72,14 @@ class OpenAICompatClient:
         self.model = cfg.effective_model
         self.name = f"{cfg.provider}:{self.model}"
 
-    def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None) -> str:
+    def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None,
+             temperature: float | None = None, max_tokens: int | None = None) -> str:
+        self.last_usage = None
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.cfg.temperature,
-            "max_tokens": self.cfg.max_tokens,
+            "temperature": self.cfg.temperature if temperature is None else temperature,
+            "max_tokens": self.cfg.max_tokens if max_tokens is None else max_tokens,
         }
         if json_mode and self.cfg.json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -92,13 +98,18 @@ class OpenAICompatClient:
                     timeout=self.cfg.timeout,
                 )
                 if resp.status_code >= 400:
+                    if any(w in resp.text.lower() for w in ('context_length', 'maximum context', 'too many tokens')):
+                        raise ContextWindowError('context_length_exceeded')
                     # 端点不支持 response_format 时自动降级重试
                     if resp.status_code in (400, 404, 422) and "response_format" in payload:
                         payload.pop("response_format", None)
                         continue
                     raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}")
                 data = resp.json()
+                self.last_usage = data.get('usage')
                 return data["choices"][0]["message"]["content"] or ""
+            except ContextWindowError:
+                raise
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 if attempt < 2:
@@ -161,7 +172,16 @@ class MockClient:
     def _user_blob(messages: list[dict]) -> str:
         return "\n".join(m.get("content", "") for m in messages if m.get("role") == "user")
 
-    def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None) -> str:
+    def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None, **kwargs) -> str:
+        if task == 'skill':
+            blob = self._user_blob(messages)
+            match = re.search(r'\[(P\d+)\][^\n]*?(?:第 (\d+) 页)?[^\n]*\n([^\n]+)', blob)
+            if not match:
+                return '[mock 离线模式] 没有可演示的原文片段。'
+            header = blob[match.start():].split('\n', 1)[0]
+            page = re.search(r'第 (\d+) 页', header)
+            ref = '['+match.group(1)+(f' p.{page.group(1)}' if page else '')+']'
+            return '[mock 离线模式 · 仅展示原文，不执行语义任务]\n\n'+match.group(3)+' '+ref
         return json.dumps(self._dispatch(messages, task), ensure_ascii=False)
 
     def chat_json(self, messages: list[dict], *, task: str | None = None) -> dict:
@@ -308,6 +328,15 @@ class MockClient:
 
     def _compare(self, blob: str) -> dict:
         """离线对比：直接解析提示词里已给出的结构化字段，拼成对比矩阵。"""
+        if re.search(r'^论文 D\d+：', blob, re.M):
+            snippets = re.findall(r'^\[(P\d+)\] (D\d+) (p\.\d+|无页码)\n([^\n]+)', blob, re.M)
+            values = {}
+            for tag, doc, page, text in snippets:
+                values.setdefault(doc, truncate(text, 220)+' ['+tag+(' '+page if page != '无页码' else '')+']')
+            first = snippets[0] if snippets else None
+            ref = (' ['+first[0]+(' '+first[2] if first[2] != '无页码' else '')+']') if first else ''
+            return {'summary': '[mock 离线模式] 以下仅对照原文片段，不构成语义比较。'+ref,
+                    'dimensions': [{'dimension': '原文摘录', 'values': values}], '_mock': True}
         papers: dict[str, dict] = {}
         cur: dict | None = None
         for line in blob.split("\n"):
@@ -373,7 +402,12 @@ class AnthropicClient:
         self.model = cfg.model
         self.name = f"anthropic:{self.model}"
 
-    def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None) -> str:
+    def chat_json(self, messages: list[dict], *, task: str | None = None) -> dict:
+        return OpenAICompatClient.chat_json(self, messages, task=task)
+
+    def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None,
+             temperature: float | None = None, max_tokens: int | None = None) -> str:
+        self.last_usage = None
         system_parts = [m["content"] for m in messages if m.get("role") == "system"]
         convo = [
             {"role": m["role"], "content": m["content"]}
@@ -382,8 +416,8 @@ class AnthropicClient:
         ]
         payload: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": self.cfg.max_tokens,
-            "temperature": self.cfg.temperature,
+            "max_tokens": self.cfg.max_tokens if max_tokens is None else max_tokens,
+            "temperature": self.cfg.temperature if temperature is None else temperature,
             "messages": convo,
         }
         if system_parts:
@@ -403,10 +437,15 @@ class AnthropicClient:
                     timeout=self.cfg.timeout,
                 )
                 if resp.status_code >= 400:
+                    if any(w in resp.text.lower() for w in ('context_length', 'maximum context', 'too many tokens')):
+                        raise ContextWindowError('context_length_exceeded')
                     raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}")
                 data = resp.json()
+                self.last_usage = data.get('usage')
                 blocks = data.get("content") or []
                 return "".join(b.get("text") or "" for b in blocks if b.get("type") == "text")
+            except ContextWindowError:
+                raise
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 if attempt < 2:

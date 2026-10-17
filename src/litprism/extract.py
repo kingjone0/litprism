@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .config import Config
 from .db import KnowledgeBase
-from .llm import LLMError
 from .prompts import CONCEPTS_SYSTEM, EXTRACT_SYSTEM
 from .textutil import truncate
 from .whitelist import label
@@ -31,8 +30,9 @@ def paper_context(kb: KnowledgeBase, paper: dict, budget: int = 24000) -> str:
     """为 LLM 拼装论文上下文：按章节重要性取原文，超预算时按比例截断。"""
     chunks = kb.get_chunks(paper["id"])
     by_sec: dict[str, list[str]] = {}
-    for c in chunks:
-        by_sec.setdefault(c.get("section") or "正文", []).append(c["text"])
+    for i, c in enumerate(chunks, 1):
+        head = f"[P{i}] chunk_id={c['id']} " + (f"p.{c['page']}" if c['page'] is not None else '无页码')
+        by_sec.setdefault(c.get("section") or "正文", []).append(head+'\n'+c["text"])
 
     parts: list[str] = [f"【标题】{paper['title']}"]
     if paper.get("authors"):
@@ -64,6 +64,8 @@ def analyze_paper(
     paper = kb.get_paper(paper_id)
     if not paper:
         raise ValueError(f"未找到论文：{paper_id}")
+    from .evidence import citation_issues, require_citable
+    require_citable(paper.get('verify_level'))
     if not force:
         cached = kb.get_analysis(paper_id)
         if cached and cached.get("payload"):
@@ -74,10 +76,40 @@ def analyze_paper(
         raise ValueError(f"论文 {paper_id} 正文过少，无法解读（可能是扫描版 PDF，需先 OCR）")
 
     messages = [
-        {"role": "system", "content": EXTRACT_SYSTEM},
+        {"role": "system", "content": EXTRACT_SYSTEM + '\n每个非空解读字段必须在 field_evidence 中提供来源标记列表，例如 {"methodology":["P1 p.3"]}。只用本次给定的 P 编号和页码；没有依据的字段留空。'},
         {"role": "user", "content": f"请解析下面这篇论文：\n\n{ctx}"},
     ]
+    from .context.meter import Meter
+    if sum(Meter(cfg).estimate_message(m) for m in messages) > cfg.context.available_tokens:
+        raise ValueError('解读原文超过上下文预算，请调整窗口或分块。')
     data = llm.chat_json(messages, task="extract")
+    chunks = kb.get_chunks(paper_id)
+    excerpts = [dict(c, tag=f'P{i}') for i, c in enumerate(chunks, 1)
+                if f"chunk_id={c['id']} " in ctx]
+    issues = []
+    evidence = data.get('field_evidence') or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    for field, _ in _FIELDS:
+        value = str(data.get(field) or '').strip()
+        if not value:
+            continue
+        refs = evidence.get(field) or []
+        if isinstance(refs, str):
+            refs = [refs]
+        if data.get('_mock'):
+            refs = [e['tag'] + (f" p.{e['page']}" if e['page'] is not None else '')
+                    for e in excerpts if any(part.strip()[:50] in e['text'] for part in value.split('\n') if len(part.strip()) >= 15)]
+        cited = value + '\n' + ' '.join('['+str(r).strip('[]')+']' for r in refs)
+        errors = citation_issues(cited, excerpts)
+        if errors:
+            data[field] = ''
+            issues.extend(f'{field}: {error}' for error in errors)
+        else:
+            evidence[field] = refs
+    data['field_evidence'] = evidence
+    data['_citation_check'] = {'passed': not issues, 'issues': issues}
+    data['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': paper_id, 'page': e['page']} for e in excerpts]
     data.setdefault("keywords", [])
     data["_model"] = getattr(llm, "name", "unknown")
 
@@ -86,11 +118,12 @@ def analyze_paper(
     if with_concepts:
         try:
             cm = [
-                {"role": "system", "content": CONCEPTS_SYSTEM},
+                {"role": "system", "content": CONCEPTS_SYSTEM + '\n每条 definition 必须带本次原文的 [P# p.N] 引用；无页码不写页码。没有原文依据时不要生成该术语。'},
                 {"role": "user", "content": f"论文标题：{paper['title']}\n\n{ctx}"},
             ]
             cdata = llm.chat_json(cm, task="concepts")
-            concepts = cdata.get("concepts") or []
+            concepts = [c for c in cdata.get('concepts') or []
+                        if not citation_issues(str(c.get('definition') or ''), excerpts)]
             if concepts:
                 # 覆盖式更新：先清旧
                 with kb.tx() as con:
@@ -148,10 +181,13 @@ def format_analysis(paper: dict, analysis: dict, *, include_concepts: bool = Tru
     lines.append(f"**核验状态**：{_verify_badge(paper)}")
     lines.append("")
 
-    for key, label in _FIELDS:
+    for key, field_label in _FIELDS:
         val = (analysis.get(key) or "").strip()
-        lines.append(f"## {label}")
+        lines.append(f"## {field_label}")
         lines.append(val if val else "（原文未明确给出，已留空）")
+        refs = (analysis.get('field_evidence') or {}).get(key) or []
+        if refs:
+            lines.append('依据：' + ' '.join('['+str(r).strip('[]')+']' for r in refs))
         lines.append("")
 
     kw = analysis.get("keywords") or []
@@ -176,6 +212,8 @@ def format_analysis(paper: dict, analysis: dict, *, include_concepts: bool = Tru
         lines.append("---")
         lines.append("> ⚠️ 本次解读由**离线占位模型（mock）**按关键词启发式生成，"
                      "仅用于演示流程，不构成对该论文的学术解读。配置真实模型后请用 `analyze --force` 重跑。")
+    if (analysis.get('_citation_check') or {}).get('passed') is False:
+        lines.append('> 引用校验未全部通过，缺少依据的字段已留空。')
     return "\n".join(lines)
 
 
@@ -209,6 +247,11 @@ def export_notes(kb: KnowledgeBase, cfg: Config, paper_id: str | None = None) ->
         if not analysis:
             continue
         analysis = dict(analysis.get("payload") or analysis)
+        from .deliverables import Deliverable, DeliverableStore
+        if not (analysis.get('_citation_check') or {}).get('passed'):
+            raise ValueError('解读未通过引用校验，请重新解读后导出。')
+        DeliverableStore(kb).validate_export(Deliverable(id='', type='notes', title=p['title'],
+            content=format_analysis(p, analysis), citations=analysis.get('_citations') or []))
         analysis["concepts"] = kb.list_concepts(p["id"])
         md = format_analysis(p, analysis)
         safe = "".join(ch if ch.isalnum() or ch in " -_（）()" else "_" for ch in p["title"])[:80].strip()

@@ -28,8 +28,12 @@ class DialogueContext:
         if not re.search(r"这(?:篇|些|个|种)|它(?:们)?|上述|前面|刚才|继续|那(?:篇|些|个)|\b(it|they|those|these|above)\b", question, re.I):
             return question
         for msg in reversed(self.history):
-            if msg["role"] == "user" and msg["kind"] != "compact-checkpoint":
+            if (msg["role"] == "user" and msg["kind"] != "compact-checkpoint"
+                    and not re.search(r'它|上述|前面|刚才|继续|\b(it|they|those|these|above)\b', msg['content'], re.I)):
                 return f"{msg['content'][:600]}\n{question}"
+        checkpoints = [m for m in self.history if m['kind'] == 'compact-checkpoint']
+        if checkpoints:
+            return f"{checkpoints[-1]['content'][:600]}\n{question}"
         return question
 
     def prompt(self, meter: Meter, budget: int) -> tuple[str, list[str]]:

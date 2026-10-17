@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -21,7 +22,6 @@ from ..ingest import SUPPORTED_EXT, chunk_document, load_document
 from ..llm import build_llm, llm_status
 from ..relations import cluster, compute_relations, field_map
 from ..search import import_record, search_external, search_local
-from ..textutil import truncate
 from ..verify import PaperVerifier
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -70,8 +70,26 @@ def create_app(cfg: Config) -> FastAPI:
 
     app = FastAPI(title="文献棱镜 LitPrism", version="1.0.0")
     kb = KnowledgeBase(cfg)
-    llm = build_llm(cfg)
-    verifier = PaperVerifier(cfg)
+    from ..whitelist import Whitelist
+    verifier = PaperVerifier(cfg, Whitelist(kb))
+
+    def task_llm():
+        from urllib.parse import urlparse
+
+        from ..llm import build_llm_for
+        from ..providers import ProviderStore
+
+        store = ProviderStore(kb, cfg.data_path)
+        active, model_id = store.get_active()
+        if active is None:
+            return build_llm(cfg)
+        key = store.secrets.get(active.api_key_ref)
+        if not model_id:
+            raise HTTPException(400, "当前提供商没有选定模型。")
+        if not key and urlparse(active.base_url).hostname not in ('localhost', '127.0.0.1', '::1'):
+            raise HTTPException(400, "当前提供商的密钥未配置或无法解密，请检查设置。")
+        return build_llm_for(cfg, base_url=active.base_url, api_key=key or '', model=model_id, protocol=active.protocol,
+                             max_tokens=min(cfg.llm.max_tokens, cfg.context.output_reserve_tokens))
 
     # 静态资源（app.css / app.js）
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -133,14 +151,26 @@ def create_app(cfg: Config) -> FastAPI:
     @app.patch("/api/paper/{paper_id}")
     def rename_paper(paper_id: str, req: dict):
         """改显示名。只动 ``display_title``，原始题录标题保持不变。"""
+        if 'collection_id' in req:
+            cid = req['collection_id']
+            if cid and not kb._con.execute('SELECT id FROM collections WHERE id=? AND deleted_at IS NULL', (cid,)).fetchone():
+                raise HTTPException(400, '分组不存在')
+            if not kb.get_paper(paper_id):
+                raise HTTPException(404, '未找到论文')
+            with kb.tx() as con:
+                con.execute('UPDATE papers SET collection_id=? WHERE id=?', (cid or None, paper_id))
+            return {'ok': True}
         if not kb.rename_paper(paper_id, req.get("display_title") or ""):
             raise HTTPException(404, "未找到论文")
         return {"ok": True}
 
     @app.delete("/api/paper/{paper_id}")
     def delete_paper(paper_id: str):
-        if not kb.delete_paper(paper_id):
+        if not kb.get_paper(paper_id):
             raise HTTPException(404, "未找到论文")
+        from datetime import datetime
+        with kb.tx() as con:
+            con.execute('UPDATE papers SET deleted_at=? WHERE id=?', (datetime.now().isoformat(), paper_id))
         return {"ok": True}
 
     @app.get("/api/paper/{paper_id}/text")
@@ -183,29 +213,23 @@ def create_app(cfg: Config) -> FastAPI:
         if not p:
             raise HTTPException(404, "未找到论文")
         try:
-            data = analyze_paper(kb, cfg, llm, p["id"], force=force)
+            data = analyze_paper(kb, cfg, task_llm(), p["id"], force=force)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(500, str(e)) from e
         return {"analysis": data, "markdown": format_analysis(p, dict(data))}
 
-    @app.delete("/api/paper/{paper_id}")
-    def delete_paper(paper_id: str):
-        p = kb.resolve_paper(paper_id)
-        if not p:
-            raise HTTPException(404, "未找到论文")
-        return {"deleted": kb.delete_paper(p["id"])}
-
     # ---------------------------------------------------------------- 导入
     @app.post("/api/upload")
-    async def upload(files: list[UploadFile] = File(...), analyze: bool = True, verify: bool = True):
+    async def upload(files: Annotated[list[UploadFile], File()], analyze: bool = True, verify: bool = True):
         results = []
         for f in files:
             suffix = Path(f.filename or "").suffix.lower()
             if suffix not in SUPPORTED_EXT:
                 results.append({"file": f.filename, "ok": False, "error": f"不支持的格式 {suffix}"})
                 continue
-            tmp = Path(tempfile.gettempdir()) / f"litprism_{abs(hash(f.filename))}{suffix}"
-            tmp.write_bytes(await f.read())
+            with tempfile.NamedTemporaryFile(prefix='litprism_', suffix=suffix, delete=False) as upload_file:
+                upload_file.write(await f.read())
+                tmp = Path(upload_file.name)
             try:
                 doc = load_document(tmp)
                 try:
@@ -214,14 +238,21 @@ def create_app(cfg: Config) -> FastAPI:
                 except Exception:
                     pass
                 v_level, v_conf, v_status, v_ev = "unknown", 0.0, "unverified", {}
-                if verify:
-                    vr = verifier.verify(
-                        title=doc.title, doi=doc.doi, authors=doc.authors,
-                        year=doc.year, arxiv_id=doc.arxiv_id, log=True,
-                    )
-                    v_level, v_conf = vr.level, vr.confidence
-                    v_status = "verified" if vr.level == "verified" else "unverified"
-                    v_ev = vr.to_dict()
+                vr = verifier.verify(
+                    title=doc.title, doi=doc.doi, authors=doc.authors,
+                    year=doc.year, arxiv_id=doc.arxiv_id, log=True,
+                )
+                v_level, v_conf = vr.level, vr.confidence
+                v_status = "verified" if vr.level == "verified" else "unverified"
+                v_ev = vr.to_dict()
+
+                from ..evidence import require_citable
+                try:
+                    require_citable(v_level)
+                except ValueError as exc:
+                    results.append({"file": f.filename, "ok": False, "error": str(exc),
+                                    "title": doc.title, "doi": doc.doi, "verification": v_ev})
+                    continue
                 pid = kb.add_paper(
                     title=doc.title, authors=doc.authors, year=doc.year, abstract=doc.abstract,
                     doi=doc.doi, arxiv_id=doc.arxiv_id, source="local_pdf", origin=f.filename,
@@ -239,7 +270,7 @@ def create_app(cfg: Config) -> FastAPI:
                 }
                 if analyze:
                     try:
-                        analyze_paper(kb, cfg, llm, pid, force=True)
+                        analyze_paper(kb, cfg, task_llm(), pid, force=True)
                         entry["analyzed"] = True
                     except Exception as e:  # noqa: BLE001
                         entry["analyzed"] = False
@@ -257,14 +288,14 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- 问答
     @app.post("/api/ask")
     def ask(req: AskReq):
-        agent = QAAgent(kb, cfg, llm)
+        agent = QAAgent(kb, cfg, task_llm())
         ans = agent.ask(req.question, paper_ids=req.paper_ids, top_k=req.top_k)
         return ans.to_dict()
 
     # ---------------------------------------------------------------- 检索
     @app.post("/api/search")
     def search(req: SearchReq):
-        local = search_local(kb, req.query, top_k=req.limit, llm=llm)
+        local = search_local(kb, req.query, top_k=req.limit, llm=task_llm(), citable_only=True)
         out = {"local": local, "external": []}
         if req.external:
             recs = search_external(cfg, verifier, req.query, limit=req.limit)
@@ -274,17 +305,17 @@ def create_app(cfg: Config) -> FastAPI:
     # ---------------------------------------------------------------- 对比
     @app.post("/api/compare")
     def compare(req: CompareReq):
-        agent = CompareAgent(kb, cfg, llm)
+        agent = CompareAgent(kb, cfg, task_llm())
         try:
             data = agent.compare(req.refs, aspects=req.aspects)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, str(e)) from e
-        return {"data": data, "markdown": render_comparison(data)}
+        return {"data": data, "markdown": render_comparison(data), 'sources': citation_sources(data.get('_citations'))}
 
     # ---------------------------------------------------------------- 推荐
     @app.post("/api/recommend")
     def recommend(req: RecommendReq):
-        agent = RecommendAgent(kb, cfg, llm, verifier)
+        agent = RecommendAgent(kb, cfg, task_llm(), verifier)
         try:
             data = agent.recommend(
                 topic=req.topic, paper_ref=req.paper, limit=req.limit, import_to_kb=req.import_to_kb
@@ -302,9 +333,10 @@ def create_app(cfg: Config) -> FastAPI:
     @app.post("/api/import")
     def import_paper(req: ImportReq):
         vr = verifier.verify(title=req.title or "", doi=req.doi, log=True)
-        if not vr.exists or not vr.best_match:
+        if not vr.exists or (not vr.best_match and not vr.manual):
             raise HTTPException(409, f"未通过核验，拒绝导入。{vr.message}")
-        b = vr.best_match
+        from ..verify import SourceRecord
+        b = vr.best_match or SourceRecord(source='whitelist', title=req.title or req.doi or '', doi=req.doi)
         pid, created = import_record(
             kb,
             {
@@ -378,6 +410,7 @@ def create_app(cfg: Config) -> FastAPI:
         # 每条消息附带 segments（组件已由框架注入核验状态与页码）
         for m in items:
             m["segments"] = genui_process(m.get("content") or "", kb).segments
+            m['model'] = (json.loads(m.get('meta') or '{}')).get('model')
         latest = next((m for m in reversed(items) if m["role"] == "assistant"), {})
         return {"conversation": conv, "items": items, "sources": citation_sources(latest.get("citations"))}
 
@@ -401,28 +434,21 @@ def create_app(cfg: Config) -> FastAPI:
 
         user_msg = kb.append_message(conv["id"], "user", question)
 
-        # 优先用「设置里选中的模型」；没配就退回配置文件的默认
-        chat_llm = llm
-        try:
-            from ..llm import build_llm_for
-            from ..providers import ProviderStore
-
-            store = ProviderStore(kb, cfg.data_path)
-            active, model_id = store.get_active()
-            if active and model_id:
-                key = store.secrets.get(active.api_key_ref)
-                if key or active.base_url.startswith("http://localhost"):
-                    chat_llm = build_llm_for(
-                        cfg, base_url=active.base_url, api_key=key or "",
-                        model=model_id, protocol=active.protocol,
-                    )
-        except Exception:  # noqa: BLE001 - 提供商配置有问题时退回默认模型
-            chat_llm = llm
+        chat_llm = task_llm()
+        scope = conv.get('scope') or {}
+        if isinstance(scope, str):
+            scope = json.loads(scope)
+        paper_ids = scope.get('paper_ids')
+        if scope.get('collection_id'):
+            paper_ids = [r['id'] for r in kb._con.execute(
+                'SELECT id FROM papers WHERE collection_id=? AND deleted_at IS NULL', (scope['collection_id'],),
+            )]
 
         try:
             ans = QAAgent(kb, cfg, chat_llm).ask(
                 question, top_k=int(req.get("top_k") or 8),
                 conversation_id=conv["id"], before_seq=user_msg["seq"],
+                paper_ids=paper_ids,
             )
         except Exception as e:  # noqa: BLE001
             kb.append_message(
@@ -463,7 +489,12 @@ def create_app(cfg: Config) -> FastAPI:
         asst = kb.append_message(
             conv["id"], "assistant", content,
             citations=cites, citation_check=check_dict,
+            meta={'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens},
         )
+        last_request = {'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens}
+        with kb.tx() as con:
+            con.execute("INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        ('last_request:'+conv['id'], json.dumps(last_request)))
 
         proc = genui_process(content, kb)
 
@@ -516,12 +547,13 @@ def create_app(cfg: Config) -> FastAPI:
 
         return {
             "user": user_msg,
-            "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict},
+            "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict, 'model': ans.model},
             "confidence": getattr(ans, "confidence", None),
             "insufficient_evidence": bool(getattr(ans, "insufficient_evidence", False)),
             "sources": citation_sources(cites),
             "issues": proc.issues,
             "auto_compact": auto_compact,
+            "model": ans.model,
         }
 
     # ---------------------------------------------------------------- 上下文
@@ -534,6 +566,8 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(404, "会话不存在")
         snap = Telemetry(kb, cfg).snapshot(conv["id"])
         snap["conversation"] = {"id": conv["id"], "title": conv["title"]}
+        last = kb._con.execute('SELECT value FROM meta WHERE key=?', ('last_request:'+conv['id'],)).fetchone()
+        snap['last_request'] = json.loads(last['value']) if last else None
         return snap
 
     @app.post("/api/compact/{conv_id}")
@@ -580,7 +614,7 @@ def create_app(cfg: Config) -> FastAPI:
         if not tx_id:
             return {"ok": False, "stage": "begin", "failure_code": code}
         in_range = [m for m in msgs if sel.start_seq <= m["seq"] <= sel.end_seq]
-        summary = Summarizer(cfg, llm, backend=ExtractiveSummarizer()).summarize(
+        summary = Summarizer(cfg, task_llm(), backend=ExtractiveSummarizer()).summarize(
             in_range, sel.shadowed_tokens
         )
         if not summary.ok:
@@ -697,7 +731,7 @@ def create_app(cfg: Config) -> FastAPI:
             "output": {"type": "answer", "citation_required": True},
         }
         prompt = (
-            f"围绕「{{{{topic}}}}」整理要点。\n\n"
+            "围绕「{{topic}}」整理要点。\n\n"
             "要求：\n"
             "1. 只依据给定的原文片段作答，片段里没有的信息不要写入。\n"
             "2. 每条结论后标注来源，格式为 [P<编号> p.<页码>]。\n"
@@ -721,7 +755,7 @@ def create_app(cfg: Config) -> FastAPI:
             encoding="utf-8",
         )
 
-        entries = reg.reload()
+        reg.reload()
         entry = reg.get(sid)
         return {
             "ok": True,
@@ -791,11 +825,13 @@ def create_app(cfg: Config) -> FastAPI:
         from ..whitelist import Whitelist, WhitelistError
 
         try:
+            latest = verifier.verify(title=req.get('title') or '', doi=req.get('doi'))
             e = Whitelist(kb).add(
                 title=req.get("title") or "",
                 reason=req.get("reason") or "",
                 doi=req.get("doi"),
-                level_at_confirm=req.get("level_at_confirm") or "not_found",
+                level_at_confirm=latest.level,
+                verify_evidence=latest.to_dict(),
             )
         except WhitelistError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -909,6 +945,8 @@ def create_app(cfg: Config) -> FastAPI:
     async def unhandled(_request, exc):  # pragma: no cover
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
+    from .workflows import register_workflows
+    register_workflows(app, kb, cfg, task_llm)
     return app
 
 

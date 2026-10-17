@@ -43,6 +43,8 @@ def env(tmp_path):
     kb.add_chunks(pid, [{"text": "注意力机制的核心是缩放点积注意力。", "page": 5, "section": "方法"}])
     chunk = kb._con.execute("SELECT id FROM chunks WHERE paper_id = ?", (pid,)).fetchone()["id"]
 
+    kb.save_analysis(pid, {'methodology': '数据库方法 [P1 p.5]', '_citation_check': {'passed': True}})
+
     pid2 = kb.add_paper(
         title="Fabricated Paper", year=2024,
         verify_status="not_found", verify_level="not_found",
@@ -177,7 +179,7 @@ class TestInjection:
             kb,
         )
         assert out["title"] == "Attention Is All You Need"
-        assert out["fields"][0]["text"] == "Transformer"
+        assert out["fields"][0]["text"] == "数据库方法 [P1 p.5]"
 
     def test_paper_list_enriches_each(self, env):
         _, kb, pid, pid2, _ = env
@@ -194,7 +196,7 @@ class TestInjection:
             kb,
         )
         assert out["papers"][0]["title"] == "Attention Is All You Need"
-        assert out["dimensions"][0]["values"] == ["Transformer", "未提及"]
+        assert out["dimensions"][0]["values"] == ["数据库方法 [P1 p.5]", "未提及"]
 
     def test_verify_result_from_db(self, env):
         _, kb, pid, _, _ = env

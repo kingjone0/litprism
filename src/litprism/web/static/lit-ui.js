@@ -136,6 +136,8 @@ const LitUI = (() => {
           ${badge(c.verify_level, c.verify_badge)}
         </div>
         <div class="lui-body lui-analysis">
+          ${c._mock ? '<div class="lui-degraded">离线占位解读，仅用于演示。</div>' : ''}
+          ${c._model ? `<div class="muted">模型：${esc(c._model)}</div>` : ''}
           ${(c.fields || []).map(f => `
             <div class="lui-field">
               <div class="lui-field-label">${esc(LABELS[f.key] || f.key)}</div>

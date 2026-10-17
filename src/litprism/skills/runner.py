@@ -149,6 +149,13 @@ class SkillRunner:
             )
 
         # ---- ⑤ 调用模型 ----
+        from ..context.meter import Meter
+        cost = sum(Meter(self.cfg).estimate_message(x) for x in [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}])
+        if cost > self.cfg.context.available_tokens:
+            return SkillRunResult(ok=False, skill_id=m.id, error='Skill 输入和原文超过上下文预算，请缩小范围。')
+        if m.citation_required and not excerpts:
+            return SkillRunResult(ok=False, skill_id=m.id, error="没有可引用的原文片段，拒绝生成。", prefetched=prefetched,
+                                  citation_check=CitationCheck(passed=False, issues=['没有原文证据。']))
         try:
             answer = self._call_llm(m, system, user)
         except Exception as e:  # noqa: BLE001
@@ -165,7 +172,7 @@ class SkillRunner:
 
         # ---- ⑦ 落库 ----
         result = SkillRunResult(
-            ok=True,
+            ok=check.passed,
             skill_id=m.id,
             skill_version=m.version,
             answer=answer,
@@ -173,7 +180,7 @@ class SkillRunner:
             citation_check=check,
             prefetched=prefetched,
         )
-        if m.output_type == "deliverable":
+        if m.output_type == "deliverable" and check.passed:
             result.deliverable_id = self._save_deliverable(m, inputs, answer, check, excerpts)
         if m.citation_required and not check.passed:
             result.warnings.append(
@@ -218,7 +225,7 @@ class SkillRunner:
             top_k = int(args.get("top_k") or 8)
             if not query:
                 return []
-            return search_local(self.kb, query, top_k=top_k)
+            return search_local(self.kb, query, top_k=top_k, citable_only=True)
 
         if cap == "search_papers":
             query = str(args.get("query") or "")
@@ -350,7 +357,7 @@ class SkillRunner:
         if m.model.get("temperature") is not None:
             kwargs["temperature"] = float(m.model["temperature"])
         if m.model.get("max_tokens") is not None:
-            kwargs["max_tokens"] = int(m.model["max_tokens"])
+            kwargs["max_tokens"] = min(int(m.model["max_tokens"]), self.cfg.context.output_reserve_tokens)
         if hasattr(self.llm, "chat"):
             return self.llm.chat(messages, task="skill", **kwargs)
         raise RuntimeError("llm 对象缺少 chat 方法")
@@ -360,41 +367,9 @@ class SkillRunner:
     # ------------------------------------------------------------------
     def _check_citations(self, answer: str, excerpts: list[dict]) -> CitationCheck:
         """框架执行的引用回溯校验。规则与问答同一套。"""
-        check = CitationCheck()
-        cited = parse_citations(answer)
-        check.cited_tags = [t for t, _ in cited]
-
-        if not excerpts:
-            if cited:
-                check.issues.append("回答引用了来源，但本次没有检索到任何片段。")
-            check.passed = not check.issues
-            return check
-
-        valid = {e["tag"].upper(): e for e in excerpts}
-        if not cited:
-            check.issues.append(
-                "回答中没有任何来源标记，无法追溯依据（该 Skill 要求带引用）。"
-            )
-            check.passed = False
-            return check
-
-        for tag, page in cited:
-            tag_u = tag.upper()
-            if tag_u not in valid:
-                check.issues.append(
-                    f"引用了不存在的片段 [{tag}]（本次只提供了 "
-                    f"{'、'.join(sorted(valid))}）。"
-                )
-                continue
-            if page:
-                actual = valid[tag_u].get("page")
-                if actual is not None and str(actual) != str(page):
-                    check.issues.append(
-                        f"[{tag}] 标注页码为 {page}，但该片段实际位于第 {actual} 页。"
-                    )
-
-        check.passed = not check.issues
-        return check
+        from ..evidence import citation_issues
+        issues = citation_issues(answer, excerpts)
+        return CitationCheck(passed=not issues, issues=issues, cited_tags=[t for t, _ in parse_citations(answer)])
 
     # ------------------------------------------------------------------
     def _save_deliverable(
@@ -416,7 +391,7 @@ class SkillRunner:
                     m.deliverable_type,
                     _derive_title(m, inputs),
                     m.id,
-                    json.dumps(inputs, ensure_ascii=False),
+                    json.dumps({**inputs, 'citation_check': check.to_dict(), 'model': getattr(self.llm, 'name', 'unknown')}, ensure_ascii=False),
                     answer,
                     json.dumps(
                         [{"tag": e["tag"], "paper_id": e.get("paper_id"),
@@ -424,7 +399,7 @@ class SkillRunner:
                         ensure_ascii=False,
                     ),
                     "draft",
-                    m.model.get("name"),
+                    getattr(self.llm, 'name', m.model.get('name')),
                     now,
                     now,
                 ),

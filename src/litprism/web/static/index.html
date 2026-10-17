@@ -35,6 +35,7 @@
       <nav class="workspace-nav" aria-label="研究工具">
         <button class="side-item" data-view="library"><span data-icon="library"></span><span class="label">知识库</span><span class="count" id="libCount"></span></button>
         <button class="side-item" data-view="verify"><span data-icon="shield"></span><span class="label">真实性核验</span></button>
+        <button class="side-item" data-view="recommend"><span data-icon="search"></span><span class="label">发现文献</span></button>
         <button class="side-item" data-view="deliverables"><span data-icon="document"></span><span class="label">研究产出</span></button>
       </nav>
 
@@ -58,6 +59,8 @@
       </div>
 
       <div class="side-footer">
+        <button class="side-item" data-view="memories"><span data-icon="chat"></span><span class="label">研究偏好</span></button>
+        <button class="side-item" data-view="trash"><span data-icon="document"></span><span class="label">文献回收站</span></button>
         <button class="side-item" data-view="skills"><span data-icon="skills"></span><span class="label">研究技能</span><span class="count" id="skillCount"></span></button>
         <button class="side-item" data-view="settings">
           <span data-icon="settings"></span><span class="label">设置</span>
@@ -85,6 +88,17 @@
               </div>
             </div>
           </div>
+          <div class="row wrap library-tools">
+            <button class="btn primary" id="btnImport">导入文献</button>
+            <input type="file" id="importFiles" accept=".pdf,.docx,.html,.htm,.txt,.md,.tex" multiple hidden>
+            <select class="select" id="collectionFilter" aria-label="按分组筛选"><option value="">全部分组</option></select>
+            <button class="btn" id="btnCollection">管理分组</button>
+            <span class="spacer"></span>
+            <button class="btn" id="btnMovePapers">移动到分组</button>
+            <button class="btn" id="btnCompareSelected" disabled>对比所选</button>
+            <button class="btn" id="btnPaperExport">导出文献</button>
+          </div>
+          <div id="importResults" aria-live="polite"></div>
           <div class="library-summary" id="libSummary"></div>
           <div class="section-heading"><h2>全部文献</h2><span>核验状态随文献保留</span></div>
           <div class="card library-card">
@@ -105,13 +119,24 @@
             <div class="page-title">多篇对比</div>
             <div class="page-sub">按六个维度并列对比。某维度无信息时填「未提及」，不做优劣评选。</div>
           </div>
-          <div class="card"><div class="card-body">
-            <div class="empty">
-              <div class="ico">⇄</div>
-              <div class="title">对比功能</div>
-              <div class="desc">在知识库中选中两篇以上论文后点击「对比」。<br>或使用命令 <code>litprism compare</code>。</div>
-            </div>
-          </div></div>
+          <div id="comparisonResult"></div>
+        </section>
+
+        <section class="pane" data-pane="recommend">
+          <div class="page-head"><h1 class="page-title">发现文献</h1><p class="page-sub">检索学术数据库；模型只解释候选，不新增论文。导入前再次核验。</p></div>
+          <form class="row" id="recommendForm"><input class="input" id="recommendTopic" placeholder="输入研究方向或关键词" required aria-label="研究方向"><button class="btn primary">检索推荐</button></form>
+          <div id="recommendResults"></div>
+        </section>
+
+        <section class="pane" data-pane="memories">
+          <div class="page-head"><h1 class="page-title">研究偏好</h1><p class="page-sub">只保存方向、术语和表达偏好。论文事实必须走核验知识库。</p></div>
+          <button class="btn primary" id="btnAddMemory">添加偏好</button>
+          <div id="memoryList"></div>
+        </section>
+
+        <section class="pane" data-pane="trash">
+          <div class="page-head"><h1 class="page-title">文献回收站</h1><p class="page-sub">删除后保留原文与引用，恢复前不参与检索。至少保留 30 天，不自动永久删除。</p></div>
+          <div id="trashList"></div>
         </section>
 
         <section class="pane" data-pane="verify">
@@ -238,5 +263,6 @@
 
 <script src="/static/lit-ui.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/workflows.js"></script>
 </body>
 </html>

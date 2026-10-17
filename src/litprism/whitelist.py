@@ -204,6 +204,12 @@ class Whitelist:
                     entry.reason, entry.confirmed_at, entry.confirmed_by,
                 ),
             )
+        # 旧库中已存在的待核验资料也必须与确认状态同步，原自动判定保存在白名单。
+        for paper in self.kb.list_papers(limit=100000):
+            matched = self.find(doi=paper.get('doi'), title=paper.get('title'))
+            if matched and matched.id == entry.id and paper.get('verify_level') != 'verified':
+                self.kb.update_paper(paper['id'], verify_level='manual_confirmed', verify_status='manual_confirmed',
+                                     verify_evidence={**entry.verify_evidence, 'original_level': lv, 'whitelist_id': entry.id})
         return entry
 
     # ------------------------------------------------------------------
@@ -246,6 +252,12 @@ class Whitelist:
         return [_row_to_entry(r) for r in rows]
 
     def remove(self, entry_id: str) -> bool:
+        entry = self.get(entry_id)
+        if entry:
+            for paper in self.kb.list_papers(limit=100000):
+                if (paper.get('verify_evidence') or {}).get('whitelist_id') == entry_id:
+                    self.kb.update_paper(paper['id'], verify_level=entry.level_at_confirm,
+                                         verify_status=entry.level_at_confirm, verify_evidence=entry.verify_evidence)
         with self.kb.tx() as con:
             cur = con.execute("DELETE FROM whitelist WHERE id = ?", (entry_id,))
         return cur.rowcount > 0

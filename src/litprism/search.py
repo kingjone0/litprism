@@ -23,16 +23,28 @@ def search_local(
     paper_ids: list[str] | None = None,
     llm=None,
     expand: bool = True,
+    citable_only: bool = False,
 ) -> list[dict]:
     """BM25 全文检索本地知识库，返回带论文标题与页码的片段。
 
     默认开启跨语言查询扩展（中↔英），否则中文提问无法命中英文文献。
     """
+    if paper_ids is not None and not paper_ids:
+        return []
+    if citable_only:
+        allowed = [r['id'] for r in kb._con.execute(
+            "SELECT id FROM papers WHERE verify_level IN ('verified','manual_confirmed') AND deleted_at IS NULL"
+        ) if paper_ids is None or r['id'] in paper_ids]
+        if not allowed:
+            return []
+        paper_ids = allowed
     if not expand:
-        return kb.search_chunks(query, paper_ids=paper_ids, top_k=top_k)
+        hits = kb.search_chunks(query, paper_ids=paper_ids, top_k=top_k)
+        return [h for h in hits if h['score'] >= kb.cfg.retrieval.min_score]
     terms = expand_query(query, llm)
     match = build_or_fts_query(terms)
-    return kb.search_match(match, paper_ids=paper_ids, top_k=top_k, fallback_terms=terms)
+    hits = kb.search_match(match, paper_ids=paper_ids, top_k=top_k, fallback_terms=terms)
+    return [h for h in hits if h['score'] >= kb.cfg.retrieval.min_score]
 
 
 def search_local_papers(kb: KnowledgeBase, query: str, limit: int = 10) -> list[dict]:
@@ -282,5 +294,5 @@ def import_record(
     # 摘要可检索化：把标题+摘要作为一个块写入，保证外部文献也能被问答检索到
     if fetch_abstract and (record.get("abstract") or record.get("title")):
         body = f"{record.get('title','')}\n\n{record.get('abstract') or ''}".strip()
-        kb.add_chunks(pid, [{"text": body, "page": 1, "section": "题录与摘要"}])
+        kb.add_chunks(pid, [{"text": body, "page": None, "section": "题录与摘要"}])
     return pid, created
