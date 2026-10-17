@@ -370,6 +370,39 @@ PAPERS_V2_COLUMNS: list[tuple[str, str]] = [
     ("deleted_at", "deleted_at TEXT"),         # 回收站（软删除）
 ]
 
+# ---------------------------------------------------------------------------
+# v3 —— 模型提供商与模型目录
+# ---------------------------------------------------------------------------
+SCHEMA_V3 = """
+-- 提供商的模型目录：用户从「获取可用模型」拉取后勾选保留的条目。
+-- 与 providers.chat_model 的关系：chat_model 是当前选中的那一个，
+-- 本表是"可选项清单"。
+CREATE TABLE IF NOT EXISTS provider_models (
+    id           TEXT PRIMARY KEY,
+    provider_id  TEXT NOT NULL,
+    model_id     TEXT NOT NULL,
+    display_name TEXT,
+    enabled      INTEGER DEFAULT 1,   -- 是否暴露给 chat 的模型选择器
+    sort_order   INTEGER DEFAULT 0,
+    created_at   TEXT,
+    UNIQUE (provider_id, model_id),
+    FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_pmodels_provider ON provider_models(provider_id, sort_order);
+"""
+
+PROVIDERS_V3_COLUMNS: list[tuple[str, str]] = [
+    ("protocol", "protocol TEXT DEFAULT 'openai'"),   # openai | anthropic
+]
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA_V3)
+    if _table_exists(conn, "providers"):
+        for col, ddl in PROVIDERS_V3_COLUMNS:
+            if not _column_exists(conn, "providers", col):
+                conn.execute(f"ALTER TABLE providers ADD COLUMN {ddl}")
+
 
 # ---------------------------------------------------------------------------
 # 迁移框架
@@ -411,6 +444,7 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
+    Migration(3, "模型目录 provider_models + providers.protocol", _migrate_v3),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

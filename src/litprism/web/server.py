@@ -289,10 +289,106 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.get("/api/conversations/{conv_id}/messages")
     def messages(conv_id: str):
+        from ..genui import process as genui_process
+
         conv = kb.resolve_conversation(conv_id)
         if conv is None:
             raise HTTPException(404, "会话不存在")
-        return {"conversation": conv, "items": kb.get_messages(conv["id"])}
+        items = kb.get_messages(conv["id"])
+        # 每条消息附带 segments（组件已由框架注入核验状态与页码）
+        for m in items:
+            m["segments"] = genui_process(m.get("content") or "", kb).segments
+        return {"conversation": conv, "items": items}
+
+    @app.post("/api/chat/{conv_id}")
+    def chat(conv_id: str, req: dict):
+        """问答：写入用户消息 → 调模型 → 写入回答（含引用校验）→ 返回 segments。
+
+        若模型的回答里没有 ``lit-ui`` 围栏，**框架会自动附加一个 citation-list** ——
+        引用片段的页码与原文本来就来自数据库，不该指望模型自己列。
+        这样用户看到的来源永远是权威值，而且「不列来源」这件事在结构上不可能发生。
+        """
+        from ..genui import parse_fences
+        from ..genui import process as genui_process
+
+        conv = kb.resolve_conversation(conv_id)
+        if conv is None:
+            raise HTTPException(404, "会话不存在")
+        question = (req.get("question") or "").strip()
+        if not question:
+            raise HTTPException(400, "问题不能为空")
+
+        user_msg = kb.append_message(conv["id"], "user", question)
+
+        # 优先用「设置里选中的模型」；没配就退回配置文件的默认
+        chat_llm = llm
+        try:
+            from ..llm import build_llm_for
+            from ..providers import ProviderStore
+
+            store = ProviderStore(kb, cfg.data_path)
+            active, model_id = store.get_active()
+            if active and model_id:
+                key = store.secrets.get(active.api_key_ref)
+                if key or active.base_url.startswith("http://localhost"):
+                    chat_llm = build_llm_for(
+                        cfg, base_url=active.base_url, api_key=key or "",
+                        model=model_id, protocol=active.protocol,
+                    )
+        except Exception:  # noqa: BLE001 - 提供商配置有问题时退回默认模型
+            chat_llm = llm
+
+        try:
+            ans = QAAgent(kb, cfg, chat_llm).ask(question, top_k=int(req.get("top_k") or 8))
+        except Exception as e:  # noqa: BLE001
+            kb.append_message(
+                conv["id"], "assistant",
+                f"回答失败：{type(e).__name__}: {e}",
+                meta={"error": True},
+            )
+            raise HTTPException(500, f"回答失败：{e}") from e
+
+        excerpts = getattr(ans, "excerpts", []) or []
+        cites = [
+            {
+                "tag": e.get("tag"), "chunk_id": e.get("chunk_id"),
+                "paper_id": e.get("paper_id"), "page": e.get("page"),
+                "section": e.get("section"),
+            }
+            for e in excerpts
+        ]
+        check_dict = {
+            "passed": bool(getattr(ans, "citation_check_passed", True)),
+            "issues": list(getattr(ans, "citation_issues", []) or []),
+        }
+
+        content = ans.answer
+        # 模型没输出结构化围栏时，框架补一个引用片段组件
+        if excerpts and not parse_fences(content):
+            chunk_ids = [e["chunk_id"] for e in excerpts if e.get("chunk_id")]
+            if chunk_ids:
+                content += (
+                    "\n\n```lit-ui\n"
+                    + json.dumps(
+                        {"v": 1, "type": "citation-list", "chunk_ids": chunk_ids},
+                        ensure_ascii=False,
+                    )
+                    + "\n```"
+                )
+
+        asst = kb.append_message(
+            conv["id"], "assistant", content,
+            citations=cites, citation_check=check_dict,
+        )
+
+        proc = genui_process(content, kb)
+        return {
+            "user": user_msg,
+            "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict},
+            "confidence": getattr(ans, "confidence", None),
+            "insufficient_evidence": bool(getattr(ans, "insufficient_evidence", False)),
+            "issues": proc.issues,
+        }
 
     # ---------------------------------------------------------------- 上下文
     @app.get("/api/context/{conv_id}")
@@ -472,6 +568,101 @@ def create_app(cfg: Config) -> FastAPI:
         from ..whitelist import Whitelist
 
         return {"ok": Whitelist(kb).remove(entry_id)}
+
+    # ---------------------------------------------------------------- 模型提供商
+    def _provider_store():
+        from ..providers import ProviderStore
+
+        return ProviderStore(kb, cfg.data_path)
+
+    @app.get("/api/providers")
+    def providers():
+        from ..providers import PROTOCOLS, dump_presets
+
+        store = _provider_store()
+        active, active_model = store.get_active()
+        return {
+            "items": [p.to_dict() for p in store.list()],
+            "presets": dump_presets(),
+            "protocols": [{"key": k, "label": v} for k, v in PROTOCOLS.items()],
+            "active": {"provider_id": active.id if active else None, "model": active_model},
+            "secrets": store.secrets.describe(),
+        }
+
+    @app.post("/api/providers")
+    def create_provider(req: dict):
+        from ..providers import ProviderError
+
+        try:
+            p = _provider_store().create(
+                name=req.get("name") or "",
+                base_url=req.get("base_url") or "",
+                api_key=req.get("api_key") or "",
+                protocol=req.get("protocol") or "openai",
+                chat_model=req.get("chat_model"),
+                preset=req.get("preset"),
+            )
+        except ProviderError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return p.to_dict()
+
+    @app.put("/api/providers/{pid}")
+    def update_provider(pid: str, req: dict):
+        from ..providers import ProviderError
+
+        try:
+            p = _provider_store().update(
+                pid,
+                name=req.get("name"),
+                base_url=req.get("base_url"),
+                api_key=req.get("api_key") or None,
+                protocol=req.get("protocol"),
+                chat_model=req.get("chat_model"),
+                multimodal=req.get("multimodal"),
+            )
+        except ProviderError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return p.to_dict()
+
+    @app.delete("/api/providers/{pid}")
+    def delete_provider(pid: str):
+        return {"ok": _provider_store().delete(pid)}
+
+    @app.post("/api/providers/{pid}/fetch-models")
+    def fetch_models(pid: str):
+        from ..providers import ProviderError
+
+        try:
+            return {"ok": True, "items": _provider_store().fetch_models(pid)}
+        except ProviderError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/providers/{pid}/models")
+    def set_models(pid: str, req: dict):
+        n = _provider_store().set_models(pid, req.get("models") or [])
+        return {"ok": True, "count": n}
+
+    @app.post("/api/providers/{pid}/test")
+    def test_provider(pid: str):
+        return _provider_store().test(pid)
+
+    @app.post("/api/providers/{pid}/active")
+    def set_active(pid: str, req: dict):
+        model_id = req.get("model_id") or ""
+        if not model_id:
+            raise HTTPException(400, "model_id 不能为空")
+        ok_ = _provider_store().set_active_model(pid, model_id)
+        return {"ok": ok_}
+
+    @app.get("/api/models")
+    def models():
+        """chat 的模型选择器数据。"""
+        store = _provider_store()
+        active, active_model = store.get_active()
+        return {
+            "items": store.chat_options(),
+            "active": {"provider_id": active.id if active else None, "model": active_model},
+        }
 
     @app.exception_handler(Exception)
     async def unhandled(_request, exc):  # pragma: no cover

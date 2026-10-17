@@ -5,6 +5,12 @@
 # ---- 运行时数据（知识库、缓存、导出笔记）----
 data/
 
+# ---- 密钥库：加密后的 API Key 与主密钥，绝不入库 ----
+data/secrets.json
+data/.secrets.key
+secrets.json
+.secrets.key
+
 # ---- 用户配置：可能含 API Key，绝不入库 ----
 # 只提交 config.example.yaml
 config/config.yaml

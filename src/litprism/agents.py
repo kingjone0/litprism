@@ -46,7 +46,8 @@ class QAAnswer:
             "evidence_map": self.evidence_map,
             "excerpts": [
                 {
-                    "tag": e["tag"], "paper_id": e["paper_id"], "title": e["title"],
+                    "tag": e["tag"], "chunk_id": e.get("chunk_id"),
+                    "paper_id": e["paper_id"], "title": e["title"],
                     "page": e["page"], "section": e["section"], "score": e["score"],
                     "text": truncate(e["text"], 700),
                 }
@@ -98,6 +99,7 @@ class QAAgent:
             excerpts.append(
                 {
                     "tag": f"P{i}",
+                    "chunk_id": h.get("id"),
                     "paper_id": h["paper_id"],
                     "title": h.get("paper_title") or "",
                     "year": h.get("paper_year"),

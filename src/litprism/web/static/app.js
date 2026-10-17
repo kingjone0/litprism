@@ -106,9 +106,14 @@ function openView(view, opts = {}) {
   const loader = {
     library: loadLibrary, paper: loadPaperDetail, chat: loadChat,
     deliverables: loadDeliverables, skills: loadSkills, verify: loadVerify,
-    settings: loadSettings,
   }[view];
   if (loader) loader().catch(e => toast(e.message, true));
+}
+
+/* 侧边栏入口：设置走弹窗，其余切工作区视图 */
+function enterView(view) {
+  if (view === 'settings') { openSettings('general'); return; }
+  openView(view);
 }
 
 function renderTabs() {
@@ -187,7 +192,7 @@ async function loadSidebar() {
       </button>`).join('');
   }
   $('#skillCount').textContent = S.skills.length || '';
-  $$('.side-item[data-view]').forEach(b => b.onclick = () => openView(b.dataset.view));
+  $$('.side-item[data-view]').forEach(b => b.onclick = () => enterView(b.dataset.view));
 }
 
 async function newConversation() {
@@ -345,26 +350,51 @@ async function loadChat() {
     $('#tbTitle').textContent = d.conversation.title || '对话';
 
     box.innerHTML = `
-      <div style="max-width:780px;margin:0 auto;padding:20px 24px 40px">
+      <div style="max-width:820px;margin:0 auto;padding:20px 24px 120px">
         <div class="page-head">
           <div class="page-title">${esc(d.conversation.title)}</div>
-          <div class="page-sub">${msgs.length} 条消息 · 锚点 ${String(d.conversation.compact_anchor_seq || 0).padStart(5, '0')}</div>
+          <div class="page-sub">${msgs.length} 条消息 · 压缩锚点 ${String(d.conversation.compact_anchor_seq || 0).padStart(5, '0')}</div>
         </div>
-        ${msgs.length ? msgs.map(renderMessage).join('') : `
-          <div class="empty"><div class="ico">✎</div>
-            <div class="title">这个会话还没有消息</div>
-            <div class="desc">对话界面将在接入问答链路后可用。当前可先用 CLI：<code>litprism ask "问题"</code></div>
-          </div>`}
-        <div class="card" style="margin-top:16px"><div class="card-body">
-          <div class="row" style="gap:8px">
-            <input class="input" id="chatInput" placeholder="基于知识库提问（待接入）" disabled>
-            <button class="btn primary" disabled>发送</button>
-          </div>
-          <div style="margin-top:8px;font-size:11.5px;color:var(--muted)">
-            每条回答都会做引用回溯校验；无法追溯的结论会被标注。
-          </div>
-        </div></div>
+        <div id="chatStream">
+          ${msgs.length ? msgs.map(renderMessage).join('') : `
+            <div class="empty"><div class="ico">✎</div>
+              <div class="title">开始提问</div>
+              <div class="desc">基于知识库提问，每条结论都会附原文来源并做回溯校验。<br>
+                无法追溯到片段的结论会被标注，而不是悄悄补全。</div>
+            </div>`}
+        </div>
+        <div id="chatCompose" style="margin-top:16px">
+          <div class="card"><div class="card-body">
+            <div class="row" style="gap:8px;margin-bottom:9px">
+              <span class="muted" style="font-size:11.5px">模型</span>
+              <select class="select" id="chatModel"
+                style="width:auto;min-width:210px;font-size:12px;padding:4px 9px"></select>
+              <span style="flex:1"></span>
+              <button class="btn sm ghost" id="btnChatSettings">模型设置</button>
+            </div>
+            <div class="row" style="gap:8px;align-items:flex-end">
+              <textarea class="textarea" id="chatInput" rows="2"
+                placeholder="基于知识库提问…（Ctrl+Enter 发送）"></textarea>
+              <button class="btn primary" id="btnSend">发送</button>
+            </div>
+            <div style="margin-top:8px;font-size:11.5px;color:var(--muted)">
+              回答只依据检索到的原文片段；无依据时会直接说明「未找到依据」，不会用常识补全。
+            </div>
+          </div></div>
+        </div>
       </div>`;
+
+    LitUI.bind(box);
+    loadModels();
+
+    const input = $('#chatInput');
+    const send = () => askQuestion();
+    $('#btnSend').onclick = send;
+    $('#btnChatSettings').onclick = () => openSettings('model');
+    input.onkeydown = e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); send(); }
+    };
+    input.focus();
 
     loadInspectorContext();
   } catch (e) {
@@ -372,28 +402,84 @@ async function loadChat() {
   }
 }
 
-function renderMessage(m) {
+async function askQuestion() {
+  const input = $('#chatInput');
+  const q = (input?.value || '').trim();
+  if (!q || !S.activeConv) return;
+
+  const stream = $('#chatStream');
+  const empty = stream.querySelector('.empty');
+  if (empty) empty.remove();
+
+  // 乐观插入用户消息
+  stream.insertAdjacentHTML('beforeend', `
+    <div class="chat-turn" style="margin-bottom:14px;display:flex;gap:10px;flex-direction:row-reverse">
+      <div class="chat-avatar" style="background:var(--accent);color:#fff">我</div>
+      <div style="flex:1;min-width:0;max-width:88%">
+        <div class="chat-bubble user">${esc(q)}</div>
+      </div>
+    </div>`);
+  stream.insertAdjacentHTML('beforeend', `
+    <div id="pending" style="margin-bottom:14px;display:flex;gap:10px">
+      <div class="chat-avatar">AI</div>
+      <div style="flex:1;min-width:0;max-width:88%">
+        <div class="lui" style="padding:12px"><div class="skeleton" style="width:70%;margin-bottom:6px"></div>
+        <div class="skeleton" style="width:45%"></div></div>
+      </div>
+    </div>`);
+  input.value = '';
+  $('#btnSend').disabled = true;
+  stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
+
+  try {
+    const r = await api(`/api/chat/${encodeURIComponent(S.activeConv)}`, {
+      method: 'POST', body: { question: q },
+    });
+    $('#pending')?.remove();
+    stream.insertAdjacentHTML('beforeend', renderMessage(r.assistant, true));
+    LitUI.bind(stream);
+    loadInspectorContext();
+    loadSidebar();
+  } catch (e) {
+    $('#pending')?.remove();
+    stream.insertAdjacentHTML('beforeend', `
+      <div class="lui-degraded">回答失败：${esc(e.message)}</div>`);
+    toast(e.message, true);
+  } finally {
+    $('#btnSend').disabled = false;
+    $('#chatInput')?.focus();
+  }
+}
+
+function renderMessage(m, fresh = false) {
   const isUser = m.role === 'user';
   const isCheckpoint = m.kind === 'compact-checkpoint';
+  const check = m.citation_check || {};
+
+  // 组件段优先；没有 segments 时退回纯文本
+  let body;
+  if (!isUser && Array.isArray(m.segments) && m.segments.length) {
+    body = LitUI.renderSegments(m.segments);
+  } else if (isCheckpoint) {
+    body = `<div style="font-family:var(--mono);font-size:11.5px;color:var(--text-2);white-space:pre-wrap">${esc(short(m.content, 400))}</div>`;
+  } else {
+    body = LitUI.md(m.content || '');
+  }
+
+  const checkWarn = (!isUser && check && check.passed === false)
+    ? `<div class="lui-degraded" style="margin-top:8px">
+         ⚠️ 引用校验未通过${(check.issues || []).length ? '：' + esc(check.issues.join('；')) : ''}
+       </div>` : '';
+
   return `
-    <div style="margin-bottom:14px;display:flex;gap:10px;flex-direction:${isUser ? 'row-reverse' : 'row'}">
-      <div style="flex:none;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;
-                  font-size:11px;font-weight:600;
-                  background:${isUser ? 'var(--accent)' : 'var(--panel-3)'};
-                  color:${isUser ? '#fff' : 'var(--text-2)'}">
-        ${isUser ? '我' : 'AI'}
-      </div>
+    <div class="chat-turn" style="margin-bottom:14px;display:flex;gap:10px;flex-direction:${isUser ? 'row-reverse' : 'row'}">
+      <div class="chat-avatar" style="${isUser ? 'background:var(--accent);color:#fff' : ''}">${isUser ? '我' : 'AI'}</div>
       <div style="flex:1;min-width:0;max-width:88%">
         ${isCheckpoint ? `<div class="badge accent" style="margin-bottom:6px">压缩检查点</div>` : ''}
-        <div style="background:${isUser ? 'var(--accent-soft)' : 'var(--panel)'};
-                    border:1px solid ${isUser ? 'var(--accent-line)' : 'var(--border)'};
-                    border-radius:var(--radius);padding:10px 13px;
-                    font-size:13px;line-height:1.72;white-space:pre-wrap;
-                    ${isCheckpoint ? 'font-family:var(--mono);font-size:11.5px;color:var(--text-2)' : ''}">
-          ${esc(short(m.content, isCheckpoint ? 400 : 4000))}
-        </div>
+        <div class="chat-bubble ${isUser ? 'user' : ''}">${body}</div>
+        ${checkWarn}
         <div style="margin-top:4px;font-size:10.5px;color:var(--muted);text-align:${isUser ? 'right' : 'left'}">
-          ${esc(m.ref)} · ${esc((m.created_at || '').slice(0, 16).replace('T', ' '))}
+          ${esc(m.ref || '')} · ${esc((m.created_at || '').slice(0, 16).replace('T', ' '))}
         </div>
       </div>
     </div>`;
@@ -576,36 +662,75 @@ async function doVerify() {
 }
 
 /* ==========================================================================
-   设置
+   设置弹窗
    ========================================================================== */
 const SETTINGS_SECTIONS = [
-  { key: 'general',  label: '通用' },
-  { key: 'model',    label: '模型' },
-  { key: 'sources',  label: '数据源' },
-  { key: 'verify',   label: '核验与白名单' },
-  { key: 'retrieval',label: '检索' },
-  { key: 'export',   label: '导出' },
-  { key: 'about',    label: '关于' },
+  { key: 'general',   label: '通用设置',    ico: '◐' },
+  { key: 'model',     label: '模型',        ico: '◈' },
+  { key: 'sources',   label: '数据源',      ico: '⇄' },
+  { key: 'verify',    label: '核验与白名单', ico: '✓' },
+  { key: 'retrieval', label: '检索',        ico: '⌕' },
+  { key: 'export',    label: '导出',        ico: '⇩' },
+  { key: 'about',     label: '关于',        ico: 'ℹ' },
 ];
 
-async function loadSettings() {
-  if (!S.status) S.status = await api('/api/status');
-  const c = S.status.config || {};
-  const nav = $('#settingsNav');
-  const panes = $('#settingsPanes');
+S.providers = [];
+S.presets = [];
+S.protocols = [];
+S.models = [];
+S.activeModel = { provider_id: null, model: null };
+S.secretsInfo = {};
 
-  nav.innerHTML = SETTINGS_SECTIONS.map((s, i) =>
-    `<button class="${i === 0 ? 'active' : ''}" data-set="${s.key}">${s.label}</button>`).join('');
+function openSettings(key = 'general') {
+  $('#settingsModal').classList.add('open');
+  renderSettingsNav();
+  renderSettingsPane(key);
+}
 
-  panes.innerHTML = SETTINGS_SECTIONS.map((s, i) => `
-    <div class="settings-pane ${i === 0 ? 'active' : ''}" data-setpane="${s.key}">
-      <div class="card"><div class="card-body">${settingsBody(s.key, c)}</div></div>
-    </div>`).join('');
+function closeSettings() {
+  $('#settingsModal').classList.remove('open');
+}
 
-  $$('[data-set]', nav).forEach(b => b.onclick = () => {
-    $$('[data-set]', nav).forEach(x => x.classList.toggle('active', x === b));
-    $$('[data-setpane]').forEach(p => p.classList.toggle('active', p.dataset.setpane === b.dataset.set));
+function renderSettingsNav() {
+  $('#settingsNav').innerHTML = SETTINGS_SECTIONS.map((s, i) => `
+    <button class="${i === 0 ? 'active' : ''}" data-set="${s.key}">
+      <span style="opacity:.7;font-size:12px">${s.ico}</span> ${s.label}
+    </button>`).join('');
+  $$('#settingsNav [data-set]').forEach(b => b.onclick = () => {
+    $$('#settingsNav [data-set]').forEach(x => x.classList.toggle('active', x === b));
+    renderSettingsPane(b.dataset.set);
   });
+}
+
+async function renderSettingsPane(key) {
+  const box = $('#settingsPanes');
+  if (!S.status) {
+    try { S.status = await api('/api/status'); } catch { S.status = {}; }
+  }
+  const c = S.status.config || {};
+
+  if (key === 'model') {
+    box.innerHTML = `<div id="pvArea">
+      <div class="skeleton" style="width:40%;margin-bottom:12px"></div>
+      <div class="skeleton" style="width:80%"></div></div>`;
+    await loadProviders();
+    return;
+  }
+
+  box.innerHTML = `<div class="card"><div class="card-body">${settingsBody(key, c)}</div></div>`;
+
+  if (key === 'general') {
+    const sel = $('#setTheme');
+    if (sel) sel.onchange = () => {
+      S.theme = sel.value;
+      localStorage.setItem('litprism-theme', S.theme);
+      applyTheme();
+    };
+  }
+  if (key === 'verify') {
+    const b = $('#setGoWhitelist');
+    if (b) b.onclick = () => { closeSettings(); openView('verify'); };
+  }
 }
 
 function row(name, desc, control) {
@@ -627,15 +752,6 @@ function settingsBody(key, c) {
             <option value="dark"${S.theme === 'dark' ? ' selected' : ''}>深色</option>
           </select>`) +
         row('语言', '界面语言（一期仅简体中文）。', `<input class="input" value="简体中文" disabled>`);
-
-    case 'model':
-      return row('提供商', '当前生效的大模型。API Key 加密存储，不写入配置文件。',
-          `<div style="font-size:12.5px">${esc(llm.provider || '—')} / ${esc(llm.model || '—')}</div>
-           <div style="margin-top:4px">${llm.mode === 'offline'
-             ? '<span class="badge warn">离线占位</span>'
-             : '<span class="badge ok">已连接</span>'}</div>`) +
-        row('温度 / 最大输出', '按任务类型分别设置；解读类任务用低温度以保证稳定。',
-          `<div class="mono" style="font-size:11.5px">temperature: ${c.qa?.temperature ?? '—'} · max_tokens: ${c.qa?.max_tokens ?? '—'}</div>`);
 
     case 'sources':
       return Object.entries(c.sources || {}).map(([k, v]) =>
@@ -667,12 +783,12 @@ function settingsBody(key, c) {
 
     case 'about':
       return row('版本', '应用与数据库 schema 版本。',
-          `<div class="mono" style="font-size:12px">v1.0.0</div>`) +
+          `<div class="mono" style="font-size:12px">v1.0.0 · schema v3</div>`) +
         row('知识库', '当前库内数据量。',
           `<div class="mono" style="font-size:11.5px">
             ${S.status?.stats?.papers ?? 0} 篇论文 · ${fmtNum(S.status?.stats?.chunks)} 块
           </div>`) +
-        row('MCP 服务', '一期只做对外 Server，不接入外部 MCP 服务。默认只读。',
+        row('MCP 服务', '一期只做对外 Server。默认只读，随应用启动按配置决定是否拉起。',
           `<div class="row" style="gap:6px">
             <span class="badge ${c.mcp?.readonly ? 'ok' : 'warn'}">${c.mcp?.readonly ? '只读' : '读写'}</span>
             <span class="badge neutral">${c.mcp?.enabled ? '随应用启动' : '未启用'}</span>
@@ -681,6 +797,344 @@ function settingsBody(key, c) {
           `<span class="badge neutral">不可更改</span>`);
   }
   return '';
+}
+
+/* ==========================================================================
+   模型提供商
+   ========================================================================== */
+async function loadProviders() {
+  const d = await api('/api/providers');
+  S.providers = d.items || [];
+  S.presets = d.presets || [];
+  S.protocols = d.protocols || [];
+  S.activeModel = d.active || { provider_id: null, model: null };
+  S.secretsInfo = d.secrets || {};
+  renderProviders();
+}
+
+function renderProviders() {
+  const area = $('#pvArea');
+  if (!area) return;
+
+  const activePid = S.activeModel.provider_id;
+  const cards = S.providers.map(p => {
+    const dotCls = p.status === 'ok' ? 'ok' : p.status === 'failed' ? 'failed' : 'unconfigured';
+    const enabled = (p.models || []).filter(m => m.enabled).length;
+    const isActive = p.id === activePid;
+    return `
+      <div class="pv-card" data-pv="${esc(p.id)}">
+        <div class="pv-head" data-pv-toggle="${esc(p.id)}">
+          <span class="pv-name">${esc(p.name)}</span>
+          <span class="pv-tag">${esc(p.is_custom ? '自定义' : '预设')}</span>
+          <span class="pv-dot ${dotCls}" title="${esc(p.status_label)}"></span>
+          ${isActive ? '<span class="badge accent">当前使用</span>' : ''}
+          <span style="flex:1"></span>
+          <span class="muted" style="font-size:11px">${enabled}/${(p.models || []).length} 模型</span>
+          <div class="pv-actions">
+            <button class="btn sm" data-pv-edit="${esc(p.id)}">编辑</button>
+            <button class="btn sm danger" data-pv-del="${esc(p.id)}">删除</button>
+          </div>
+        </div>
+        <div class="pv-body">${providerEditor(p)}</div>
+      </div>`;
+  }).join('');
+
+  area.innerHTML = `
+    <div class="row" style="margin-bottom:12px">
+      <div>
+        <div style="font-size:13px;font-weight:600">模型提供商</div>
+        <div class="muted" style="font-size:11.5px;margin-top:2px">
+          API Key 加密存储（${esc(S.secretsInfo.backend || '—')}），不写入配置文件。
+        </div>
+      </div>
+      <span style="flex:1"></span>
+      <button class="btn sm primary" id="btnAddProvider">＋ 添加提供商</button>
+    </div>
+    <div id="pvList">${cards || `<div class="empty" style="padding:30px">
+      <div class="title">尚未配置模型提供商</div>
+      <div class="desc">添加一个后，可从提供商拉取模型列表，并选择哪些暴露到对话。</div>
+    </div>`}</div>
+    ${S.secretsInfo.backend === 'weak'
+      ? `<div class="pv-note" style="border-color:var(--warn);color:var(--warn)">${esc(S.secretsInfo.note)}</div>`
+      : `<div class="pv-note">${esc(S.secretsInfo.note || '')}</div>`}
+  `;
+
+  $$('#pvList [data-pv-toggle]').forEach(h => h.onclick = e => {
+    if (e.target.closest('[data-pv-edit],[data-pv-del]')) return;
+    h.closest('.pv-card').classList.toggle('expanded');
+  });
+  $$('#pvList [data-pv-edit]').forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    b.closest('.pv-card').classList.add('expanded');
+  });
+  $$('#pvList [data-pv-del]').forEach(b => b.onclick = async e => {
+    e.stopPropagation();
+    if (!confirm('删除该提供商？已保存的 API Key 会一并清除。')) return;
+    try {
+      await api(`/api/providers/${encodeURIComponent(b.dataset.pvDel)}`, { method: 'DELETE' });
+      toast('已删除');
+      await loadProviders();
+      await loadModels();
+    } catch (err) { toast(err.message, true); }
+  });
+  const addBtn = $('#btnAddProvider');
+  if (addBtn) addBtn.onclick = showAddProvider;
+  bindProviderEditors();
+}
+
+function providerEditor(p) {
+  const modelRows = (p.models || []).map(m => `
+    <div class="pm-row">
+      <input class="input" data-pm-id placeholder="模型 ID，如 gpt-4o" value="${esc(m.model_id)}">
+      <input class="input" data-pm-name placeholder="显示名称" value="${esc(m.display_name)}">
+      <button class="icon-btn ${m.enabled ? 'on' : ''}" data-pm-toggle
+        title="${m.enabled ? '已暴露给对话' : '未暴露给对话'}">${m.enabled ? '◉' : '○'}</button>
+      <button class="icon-btn" data-pm-del title="删除">🗑</button>
+    </div>`).join('');
+
+  return `
+    <div class="field" style="margin-top:10px">
+      <label>API 密钥</label>
+      <input class="input" type="password" data-pv-key
+        placeholder="${p.has_key ? `已配置（${esc(p.api_key_mask)}），输入新值可替换` : '输入 API Key'}">
+      <div class="hint">留空表示不修改。Key 加密后存入本地密钥库，不写入 config.yaml。</div>
+    </div>
+    <div class="field">
+      <label>显示名称</label>
+      <input class="input" data-pv-name value="${esc(p.name)}">
+    </div>
+    <div class="field">
+      <label>API 地址</label>
+      <input class="input" data-pv-url value="${esc(p.base_url)}">
+    </div>
+    <div class="field">
+      <label>API 协议</label>
+      <select class="select" data-pv-protocol>
+        ${S.protocols.map(x => `<option value="${esc(x.key)}"${x.key === p.protocol ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="pm-head">
+      模型目录
+      <span class="spacer"></span>
+      <button data-pv-reset>恢复默认模型</button>
+      <button data-pv-fetch>获取可用模型</button>
+    </div>
+    <div class="hint" style="margin:-4px 0 8px;font-size:11px">
+      ◉ 表示该模型会出现在对话的模型选择器里，点击圆圈切换。
+    </div>
+    <div data-pv-models>${modelRows || '<div class="pm-empty">尚未配置模型。点「获取可用模型」从提供商拉取，或手动添加。</div>'}</div>
+    <div class="row" style="margin-top:10px;gap:8px">
+      <button class="btn sm" data-pv-addmodel>＋ 添加一行</button>
+      <span style="flex:1"></span>
+      <button class="btn sm" data-pv-test>测试连接</button>
+      <button class="btn sm primary" data-pv-save>保存</button>
+    </div>
+    ${p.status_note ? `<div class="pv-note">${esc(p.status_note)}</div>` : ''}
+  `;
+}
+
+function bindProviderEditors() {
+  $$('#pvList .pv-card').forEach(card => {
+    const pid = card.dataset.pv;
+    const q = sel => card.querySelector(sel);
+
+    const bindRows = () => {
+      card.querySelectorAll('[data-pm-toggle]').forEach(b => b.onclick = () => {
+        b.classList.toggle('on');
+        const on = b.classList.contains('on');
+        b.textContent = on ? '◉' : '○';
+        b.title = on ? '已暴露给对话' : '未暴露给对话';
+      });
+      card.querySelectorAll('[data-pm-del]').forEach(b => b.onclick = () => {
+        b.closest('[data-pm-row]')?.remove();
+        b.closest('.pm-row')?.remove();
+      });
+    };
+    bindRows();
+
+    q('[data-pv-addmodel]')?.addEventListener('click', () => {
+      const box = q('[data-pv-models]');
+      box.querySelector('.pm-empty')?.remove();
+      const div = document.createElement('div');
+      div.className = 'pm-row';
+      div.innerHTML = `
+        <input class="input" data-pm-id placeholder="模型 ID">
+        <input class="input" data-pm-name placeholder="显示名称">
+        <button class="icon-btn on" data-pm-toggle title="已暴露给对话">◉</button>
+        <button class="icon-btn" data-pm-del title="删除">🗑</button>`;
+      box.appendChild(div);
+      bindRows();
+    });
+
+    q('[data-pv-fetch]')?.addEventListener('click', async () => {
+      const btn = q('[data-pv-fetch]');
+      const old = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '拉取中…';
+      try {
+        const r = await api(`/api/providers/${encodeURIComponent(pid)}/fetch-models`, { method: 'POST' });
+        const box = q('[data-pv-models]');
+        box.innerHTML = '';
+        (r.items || []).forEach(m => {
+          const div = document.createElement('div');
+          div.className = 'pm-row';
+          div.innerHTML = `
+            <input class="input" data-pm-id value="${esc(m.model_id)}">
+            <input class="input" data-pm-name value="${esc(m.display_name || m.model_id)}">
+            <button class="icon-btn on" data-pm-toggle title="已暴露给对话">◉</button>
+            <button class="icon-btn" data-pm-del title="删除">🗑</button>`;
+          box.appendChild(div);
+        });
+        bindRows();
+        toast(`拉取到 ${r.items.length} 个模型，确认后点「保存」`);
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    });
+
+    q('[data-pv-reset]')?.addEventListener('click', () => {
+      const box = q('[data-pv-models]');
+      box.innerHTML = '<div class="pm-empty">已清空，可重新添加或拉取</div>';
+    });
+
+    q('[data-pv-test]')?.addEventListener('click', async () => {
+      try {
+        const r = await api(`/api/providers/${encodeURIComponent(pid)}/test`, { method: 'POST' });
+        toast(r.ok ? `连接正常：${r.message}` : `连接失败：${r.message}`, !r.ok);
+        if (r.ok) loadProviders();
+      } catch (e) { toast(e.message, true); }
+    });
+
+    q('[data-pv-save]')?.addEventListener('click', async () => {
+      const models = [...card.querySelectorAll('.pm-row')].map(row => ({
+        model_id: row.querySelector('[data-pm-id]').value.trim(),
+        display_name: row.querySelector('[data-pm-name]').value.trim(),
+        enabled: row.querySelector('[data-pm-toggle]').classList.contains('on'),
+      })).filter(m => m.model_id);
+
+      try {
+        await api(`/api/providers/${encodeURIComponent(pid)}`, {
+          method: 'PUT',
+          body: {
+            name: q('[data-pv-name]').value,
+            base_url: q('[data-pv-url]').value,
+            protocol: q('[data-pv-protocol]').value,
+            api_key: q('[data-pv-key]').value || null,
+          },
+        });
+        await api(`/api/providers/${encodeURIComponent(pid)}/models`, {
+          method: 'PUT', body: { models },
+        });
+        toast('已保存');
+        await loadProviders();
+        await loadModels();
+      } catch (e) { toast(e.message, true); }
+    });
+  });
+}
+
+function showAddProvider() {
+  const opts = S.presets.map(p => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join('');
+
+  const html = `
+    <div class="card" id="addPvCard" style="margin-bottom:12px;border-color:var(--accent)">
+      <div class="card-body">
+        <div class="field">
+          <label>预设</label>
+          <select class="select" id="addPvPreset">
+            <option value="">自定义</option>${opts}
+          </select>
+          <div class="hint">选预设会自动填好地址与协议。</div>
+        </div>
+        <div class="field"><label>显示名称</label>
+          <input class="input" id="addPvName" placeholder="如：公司内网网关"></div>
+        <div class="field"><label>API 地址</label>
+          <input class="input" id="addPvUrl" placeholder="https://api.example.com/v1"></div>
+        <div class="field"><label>API 协议</label>
+          <select class="select" id="addPvProtocol">
+            ${S.protocols.map(x => `<option value="${esc(x.key)}">${esc(x.label)}</option>`).join('')}
+          </select></div>
+        <div class="field"><label>API 密钥</label>
+          <input class="input" type="password" id="addPvKey" placeholder="留空表示暂不配置（本地服务可留空）">
+          <div class="hint">加密后存入本地密钥库，不写入配置文件。</div></div>
+        <div class="row" style="gap:8px">
+          <span style="flex:1"></span>
+          <button class="btn sm" id="addPvCancel">取消</button>
+          <button class="btn sm primary" id="addPvOk">添加</button>
+        </div>
+      </div>
+    </div>`;
+
+  const list = $('#pvList');
+  if (!list) return;
+  list.insertAdjacentHTML('afterbegin', html);
+
+  const presetSel = $('#addPvPreset');
+  presetSel.onchange = () => {
+    const p = S.presets.find(x => x.key === presetSel.value);
+    if (!p) return;
+    $('#addPvName').value = p.name;
+    $('#addPvUrl').value = p.base_url;
+    $('#addPvProtocol').value = p.protocol;
+  };
+  $('#addPvCancel').onclick = () => $('#addPvCard').remove();
+  $('#addPvOk').onclick = async () => {
+    try {
+      await api('/api/providers', {
+        method: 'POST',
+        body: {
+          name: $('#addPvName').value,
+          base_url: $('#addPvUrl').value,
+          protocol: $('#addPvProtocol').value,
+          api_key: $('#addPvKey').value,
+          preset: presetSel.value || null,
+        },
+      });
+      toast('已添加');
+      await loadProviders();
+      await loadModels();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+/* ==========================================================================
+   对话的模型选择器
+   ========================================================================== */
+async function loadModels() {
+  try {
+    const d = await api('/api/models');
+    S.models = d.items || [];
+    S.activeModel = d.active || S.activeModel;
+  } catch { S.models = []; }
+  renderModelSelector();
+}
+
+function renderModelSelector() {
+  const sel = $('#chatModel');
+  if (!sel) return;
+  if (!S.models.length) {
+    sel.innerHTML = `<option value="">未配置模型（使用默认）</option>`;
+    return;
+  }
+  sel.innerHTML = S.models.map(m => {
+    const isActive = m.provider_id === S.activeModel.provider_id && m.model_id === S.activeModel.model;
+    return `<option value="${esc(m.provider_id)}::${esc(m.model_id)}"${isActive ? ' selected' : ''}>${esc(m.label)}</option>`;
+  }).join('');
+  sel.onchange = async () => {
+    const [pid, mid] = sel.value.split('::');
+    if (!pid || !mid) return;
+    try {
+      await api(`/api/providers/${encodeURIComponent(pid)}/active`, {
+        method: 'POST', body: { model_id: mid },
+      });
+      S.activeModel = { provider_id: pid, model: mid };
+      toast(`已切换到 ${mid}`);
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 /* ==========================================================================
@@ -838,10 +1292,10 @@ function bindGlobal() {
   });
 
   // 品牌 → 关于
-  $('#brand').onclick = () => openView('settings');
+  $('#brand').onclick = () => openSettings('about');
 
   // 视图入口
-  $$('[data-view]').forEach(b => b.onclick = () => openView(b.dataset.view));
+  $$('[data-view]').forEach(b => b.onclick = () => enterView(b.dataset.view));
 
   // 知识库搜索
   $('#libSearch').oninput = () => { if (S.activeView === 'library') loadLibrary(); };
@@ -865,8 +1319,25 @@ function bindGlobal() {
     if (loader) loader().catch(e => toast(e.message, true));
   });
 
+  // 设置弹窗
+  $('#btnCloseSettings').onclick = closeSettings;
+  $('#settingsModal').onclick = e => { if (e.target.id === 'settingsModal') closeSettings(); };
+  $('#btnOpenConfig').onclick = () => {
+    const p = S.status?.config?.app?.data_dir;
+    toast(p ? `配置文件位于 ${p}/../config/config.yaml` : '配置文件位于项目 config/ 目录');
+  };
+
   // 快捷键
   document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && $('#settingsModal').classList.contains('open')) {
+      closeSettings();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+      e.preventDefault();
+      openSettings('general');
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       openView('library');

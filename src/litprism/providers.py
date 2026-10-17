@@ -1,0 +1,516 @@
+"""模型提供商与模型目录。
+
+设计要点
+--------
+* **API Key 不落配置文件** —— 存在 :mod:`litprism.secrets`（DPAPI 加密），
+  ``providers.api_key_ref`` 只存引用。
+* **模型目录是"可选项清单"** —— 从提供商 ``/models`` 拉取后，用户勾选哪些
+  暴露给 chat 的模型选择器。``providers.chat_model`` 是当前选中的那一个。
+* **拉取失败要说清原因** —— 是网络不通、Key 无效、还是该提供商不支持列举模型，
+  三种情况的处理方式完全不同。
+
+预设
+----
+内置几个常见提供商的地址与协议，新建时选预设即可，不必手填。
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from .secrets import SecretStore
+
+PROTOCOLS = {
+    "openai": "OpenAI Chat Completions",
+    "anthropic": "Anthropic Messages",
+}
+
+PRESETS: list[dict] = [
+    {
+        "key": "openai",
+        "name": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        "protocol": "openai",
+    },
+    {
+        "key": "deepseek",
+        "name": "DeepSeek",
+        "base_url": "https://api.deepseek.com/v1",
+        "protocol": "openai",
+    },
+    {
+        "key": "dashscope",
+        "name": "阿里云百炼",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "protocol": "openai",
+    },
+    {
+        "key": "moonshot",
+        "name": "Moonshot",
+        "base_url": "https://api.moonshot.cn/v1",
+        "protocol": "openai",
+    },
+    {
+        "key": "zhipu",
+        "name": "智谱 GLM",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "protocol": "openai",
+    },
+    {
+        "key": "anthropic",
+        "name": "Anthropic",
+        "base_url": "https://api.anthropic.com/v1",
+        "protocol": "anthropic",
+    },
+    {
+        "key": "ollama",
+        "name": "Ollama（本地）",
+        "base_url": "http://localhost:11434/v1",
+        "protocol": "openai",
+    },
+]
+
+DEFAULT_MODELS = {
+    "openai": [("gpt-4o", "GPT-4o"), ("gpt-4o-mini", "GPT-4o mini")],
+    "deepseek": [("deepseek-chat", "DeepSeek Chat"), ("deepseek-reasoner", "DeepSeek Reasoner")],
+    "anthropic": [("claude-sonnet-4-5", "Claude Sonnet 4.5")],
+    "ollama": [("qwen2.5:7b", "Qwen2.5 7B")],
+}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+@dataclass
+class ProviderModel:
+    model_id: str
+    display_name: str = ""
+    enabled: bool = True
+    sort_order: int = 0
+
+    @property
+    def label(self) -> str:
+        return self.display_name or self.model_id
+
+    def to_dict(self) -> dict:
+        return {
+            "model_id": self.model_id,
+            "display_name": self.label,
+            "enabled": self.enabled,
+            "sort_order": self.sort_order,
+        }
+
+
+@dataclass
+class Provider:
+    id: str
+    name: str
+    base_url: str
+    protocol: str = "openai"
+    api_key_ref: str | None = None
+    api_key_mask: str = "未配置"
+    chat_model: str | None = None
+    multimodal: bool = False
+    is_custom: bool = True
+    status: str = "unconfigured"
+    status_note: str = ""
+    checked_at: str = ""
+    models: list[ProviderModel] = field(default_factory=list)
+
+    @property
+    def has_key(self) -> bool:
+        return self.api_key_mask not in ("未配置", "")
+
+    @property
+    def status_label(self) -> str:
+        return {
+            "ok": "已连接",
+            "unconfigured": "未配置",
+            "failed": "连接失败",
+            "unknown": "未测试",
+        }.get(self.status, self.status)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "base_url": self.base_url,
+            "protocol": self.protocol,
+            "protocol_label": PROTOCOLS.get(self.protocol, self.protocol),
+            "api_key_mask": self.api_key_mask,
+            "has_key": self.has_key,
+            "chat_model": self.chat_model,
+            "multimodal": self.multimodal,
+            "is_custom": self.is_custom,
+            "status": self.status,
+            "status_label": self.status_label,
+            "status_note": self.status_note,
+            "checked_at": self.checked_at,
+            "models": [m.to_dict() for m in self.models],
+            "enabled_models": [m.to_dict() for m in self.models if m.enabled],
+        }
+
+
+class ProviderError(ValueError):
+    """提供商操作失败。消息必须可操作。"""
+
+
+class ProviderStore:
+    def __init__(self, kb: Any, data_dir: str | None = None, secrets_store: SecretStore | None = None):
+        self.kb = kb
+        self.secrets = secrets_store or SecretStore(data_dir or kb.cfg.data_path)
+
+    # ------------------------------------------------------------------
+    def list(self) -> list[Provider]:
+        rows = self.kb._con.execute(
+            "SELECT * FROM providers ORDER BY sort_order, created_at"
+        ).fetchall()
+        return [self._row_to_provider(r) for r in rows]
+
+    def get(self, pid: str) -> Provider | None:
+        row = self.kb._con.execute("SELECT * FROM providers WHERE id = ?", (pid,)).fetchone()
+        return self._row_to_provider(row) if row else None
+
+    # ------------------------------------------------------------------
+    def create(
+        self,
+        *,
+        name: str,
+        base_url: str,
+        api_key: str = "",
+        protocol: str = "openai",
+        chat_model: str | None = None,
+        preset: str | None = None,
+    ) -> Provider:
+        if not (name or "").strip():
+            raise ProviderError("显示名称不能为空")
+        if not (base_url or "").strip():
+            raise ProviderError("API 地址不能为空")
+        if protocol not in PROTOCOLS:
+            raise ProviderError(f"未知协议 {protocol!r}。可用：{list(PROTOCOLS)}")
+
+        pid = f"pv_{uuid.uuid4().hex[:10]}"
+        key_ref = self.secrets.set(f"provider_{pid}", api_key) if api_key.strip() else None
+        now = _now()
+
+        with self.kb.tx() as con:
+            con.execute(
+                "INSERT INTO providers (id, name, base_url, api_key_ref, chat_model, multimodal,"
+                " is_custom, status, protocol, sort_order, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    pid, name.strip(), base_url.strip().rstrip("/"), key_ref,
+                    chat_model, 1 if protocol == "openai" else 0,
+                    0 if preset else 1, "unknown", protocol, 0, now, now,
+                ),
+            )
+
+        # 预置默认模型目录（用户可再「获取可用模型」覆盖）
+        seeds = DEFAULT_MODELS.get(preset or "", [])
+        if seeds:
+            self.set_models(pid, [{"model_id": m, "display_name": d, "enabled": True} for m, d in seeds])
+            if not chat_model:
+                self.set_active_model(pid, seeds[0][0])
+
+        return self.get(pid)  # type: ignore[return-value]
+
+    def update(
+        self,
+        pid: str,
+        *,
+        name: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        protocol: str | None = None,
+        chat_model: str | None = None,
+        multimodal: bool | None = None,
+    ) -> Provider:
+        p = self.get(pid)
+        if p is None:
+            raise ProviderError(f"提供商 {pid} 不存在")
+
+        sets, vals = [], []
+        if name is not None:
+            if not name.strip():
+                raise ProviderError("显示名称不能为空")
+            sets.append("name = ?")
+            vals.append(name.strip())
+        if base_url is not None:
+            if not base_url.strip():
+                raise ProviderError("API 地址不能为空")
+            sets.append("base_url = ?")
+            vals.append(base_url.strip().rstrip("/"))
+        if protocol is not None:
+            if protocol not in PROTOCOLS:
+                raise ProviderError(f"未知协议 {protocol!r}")
+            sets.append("protocol = ?")
+            vals.append(protocol)
+        if chat_model is not None:
+            sets.append("chat_model = ?")
+            vals.append(chat_model or None)
+        if multimodal is not None:
+            sets.append("multimodal = ?")
+            vals.append(1 if multimodal else 0)
+        if api_key:  # 空字符串表示"不改"，避免误清空
+            ref = self.secrets.set(f"provider_{pid}", api_key)
+            if p.api_key_ref:
+                self.secrets.delete(p.api_key_ref)
+            sets.append("api_key_ref = ?")
+            vals.append(ref)
+
+        if sets:
+            sets.append("updated_at = ?")
+            vals.extend([_now(), pid])
+            with self.kb.tx() as con:
+                con.execute(f"UPDATE providers SET {', '.join(sets)} WHERE id = ?", vals)
+        return self.get(pid)  # type: ignore[return-value]
+
+    def delete(self, pid: str) -> bool:
+        p = self.get(pid)
+        if p is None:
+            return False
+        if p.api_key_ref:
+            self.secrets.delete(p.api_key_ref)
+        with self.kb.tx() as con:
+            con.execute("DELETE FROM provider_models WHERE provider_id = ?", (pid,))
+            cur = con.execute("DELETE FROM providers WHERE id = ?", (pid,))
+        return cur.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # 模型目录
+    # ------------------------------------------------------------------
+    def set_models(self, pid: str, models: list[dict]) -> int:
+        """整体替换模型目录。``models`` 每项含 model_id / display_name / enabled。"""
+        cleaned: list[dict] = []
+        seen: set[str] = set()
+        for i, m in enumerate(models or []):
+            mid = str((m or {}).get("model_id") or "").strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            cleaned.append(
+                {
+                    "model_id": mid,
+                    "display_name": str(m.get("display_name") or mid).strip(),
+                    "enabled": 1 if m.get("enabled", True) else 0,
+                    "sort_order": i,
+                }
+            )
+
+        now = _now()
+        with self.kb.tx() as con:
+            con.execute("DELETE FROM provider_models WHERE provider_id = ?", (pid,))
+            for m in cleaned:
+                con.execute(
+                    "INSERT INTO provider_models (id, provider_id, model_id, display_name,"
+                    " enabled, sort_order, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        f"pm_{uuid.uuid4().hex[:10]}", pid, m["model_id"],
+                        m["display_name"], m["enabled"], m["sort_order"], now,
+                    ),
+                )
+        return len(cleaned)
+
+    def fetch_models(self, pid: str) -> list[dict]:
+        """从提供商的 ``/models`` 拉取可用模型。
+
+        失败时抛 :class:`ProviderError`，**消息要区分原因** ——
+        Key 无效和网络不通的处理方式完全不同。
+        """
+        p = self.get(pid)
+        if p is None:
+            raise ProviderError(f"提供商 {pid} 不存在")
+
+        import requests
+
+        key = self.secrets.get(p.api_key_ref)
+        url = f"{p.base_url.rstrip('/')}/models"
+        headers = {"Accept": "application/json"}
+        if key:
+            if p.protocol == "anthropic":
+                headers["x-api-key"] = key
+                headers["anthropic-version"] = "2023-06-01"
+            else:
+                headers["Authorization"] = f"Bearer {key}"
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+        except requests.RequestException as e:
+            raise ProviderError(
+                f"无法连接 {url}：{type(e).__name__}。"
+                "请检查 API 地址是否正确、网络是否可达（本地服务需先启动）。"
+            ) from e
+
+        if resp.status_code in (401, 403):
+            raise ProviderError(
+                f"认证失败（HTTP {resp.status_code}）。API Key 可能无效或权限不足。"
+            )
+        if resp.status_code == 404:
+            raise ProviderError(
+                f"该提供商未提供 /models 接口（HTTP 404）。"
+                "请在下方手动添加模型 ID。"
+            )
+        if resp.status_code >= 400:
+            raise ProviderError(f"拉取失败（HTTP {resp.status_code}）：{resp.text[:200]}")
+
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise ProviderError("返回内容不是合法 JSON，可能 API 地址指向了错误的路径。") from e
+
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            items = data if isinstance(data, list) else []
+
+        out: list[dict] = []
+        for it in items:
+            if isinstance(it, str):
+                out.append({"model_id": it, "display_name": it})
+                continue
+            if not isinstance(it, dict):
+                continue
+            mid = it.get("id") or it.get("name") or it.get("model")
+            if not mid:
+                continue
+            out.append(
+                {
+                    "model_id": str(mid),
+                    "display_name": str(it.get("display_name") or it.get("name") or mid),
+                }
+            )
+        out.sort(key=lambda x: x["model_id"])
+
+        with self.kb.tx() as con:
+            con.execute(
+                "UPDATE providers SET status = 'ok', status_note = ?, checked_at = ?,"
+                " updated_at = ? WHERE id = ?",
+                (f"拉取到 {len(out)} 个模型", _now(), _now(), pid),
+            )
+        return out
+
+    def test(self, pid: str) -> dict:
+        """连通性测试：拉一次 /models 看结果。"""
+        try:
+            models = self.fetch_models(pid)
+            return {"ok": True, "model_count": len(models), "message": f"连接正常，{len(models)} 个模型"}
+        except ProviderError as e:
+            with self.kb.tx() as con:
+                con.execute(
+                    "UPDATE providers SET status = 'failed', status_note = ?, checked_at = ? WHERE id = ?",
+                    (str(e)[:500], _now(), pid),
+                )
+            return {"ok": False, "message": str(e)}
+
+    # ------------------------------------------------------------------
+    # 当前生效
+    # ------------------------------------------------------------------
+    def get_active(self) -> tuple[Provider | None, str | None]:
+        """当前 chat 使用的 (provider, model_id)。"""
+        row = self.kb._con.execute(
+            "SELECT value FROM meta WHERE key = 'active_provider'"
+        ).fetchone()
+        if not row or not row["value"]:
+            return None, None
+        p = self.get(row["value"])
+        if p is None:
+            return None, None
+        model = p.chat_model
+        if not model:
+            enabled = [m for m in p.models if m.enabled]
+            model = enabled[0].model_id if enabled else None
+        return p, model
+
+    def set_active_model(self, pid: str, model_id: str) -> bool:
+        p = self.get(pid)
+        if p is None:
+            return False
+        with self.kb.tx() as con:
+            con.execute(
+                "UPDATE providers SET chat_model = ?, updated_at = ? WHERE id = ?",
+                (model_id, _now(), pid),
+            )
+            con.execute(
+                "INSERT INTO meta (key, value) VALUES ('active_provider', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (pid,),
+            )
+        return True
+
+    def chat_options(self) -> list[dict]:
+        """暴露给 chat 的模型选择器：所有启用的模型，按提供商分组。"""
+        out = []
+        for p in self.list():
+            for m in p.models:
+                if not m.enabled:
+                    continue
+                out.append(
+                    {
+                        "provider_id": p.id,
+                        "provider_name": p.name,
+                        "model_id": m.model_id,
+                        "display_name": m.label,
+                        "label": f"{p.name} · {m.label}",
+                        "status": p.status,
+                    }
+                )
+        return out
+
+    # ------------------------------------------------------------------
+    def _row_to_provider(self, row: Any) -> Provider:
+        d = dict(row)
+        pid = d["id"]
+        model_rows = [
+            dict(r)
+            for r in self.kb._con.execute(
+                "SELECT * FROM provider_models WHERE provider_id = ? ORDER BY sort_order",
+                (pid,),
+            ).fetchall()
+        ]
+        models = [
+            ProviderModel(
+                model_id=m["model_id"],
+                display_name=m.get("display_name") or m["model_id"],
+                enabled=bool(m.get("enabled", 1)),
+                sort_order=int(m.get("sort_order") or 0),
+            )
+            for m in model_rows
+        ]
+        ref = d.get("api_key_ref")
+        return Provider(
+            id=pid,
+            name=d["name"],
+            base_url=d["base_url"],
+            protocol=d.get("protocol") or "openai",
+            api_key_ref=ref,
+            api_key_mask=self.secrets.mask(ref),
+            chat_model=d.get("chat_model"),
+            multimodal=bool(d.get("multimodal")),
+            is_custom=bool(d.get("is_custom", 1)),
+            status=d.get("status") or "unconfigured",
+            status_note=d.get("status_note") or "",
+            checked_at=d.get("checked_at") or "",
+            models=models,
+        )
+
+
+def format_providers(providers: list[Provider]) -> str:
+    if not providers:
+        return "（未配置任何提供商）"
+    lines = []
+    for p in providers:
+        enabled = [m for m in p.models if m.enabled]
+        lines.append(
+            f"  ● {p.name:<14} {p.protocol:<10} {p.status_label:<6} "
+            f"模型 {len(enabled)}/{len(p.models)}  当前 {p.chat_model or '—'}"
+        )
+        lines.append(f"      {p.base_url}   Key: {p.api_key_mask}")
+    return "\n".join(lines)
+
+
+def dump_presets() -> list[dict]:
+    return PRESETS

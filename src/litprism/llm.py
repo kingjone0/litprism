@@ -358,6 +358,62 @@ class MockClient:
 
 
 # ---------------------------------------------------------------------------
+class AnthropicClient:
+    """Anthropic Messages 协议的最小实现。
+
+    与 OpenAI 兼容协议的差异：system 单独一个字段、认证用 x-api-key、
+    返回结构是 content 数组。
+    """
+
+    def __init__(self, cfg: LLMConfig):
+        if requests is None:
+            raise LLMError("缺少 requests 依赖：python -m pip install requests")
+        self.cfg = cfg
+        self.base_url = cfg.base_url.rstrip("/")
+        self.model = cfg.model
+        self.name = f"anthropic:{self.model}"
+
+    def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None) -> str:
+        system_parts = [m["content"] for m in messages if m.get("role") == "system"]
+        convo = [
+            {"role": m["role"], "content": m["content"]}
+            for m in messages
+            if m.get("role") in ("user", "assistant")
+        ]
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.cfg.max_tokens,
+            "temperature": self.cfg.temperature,
+            "messages": convo,
+        }
+        if system_parts:
+            payload["system"] = "\n\n".join(system_parts)
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self.cfg.api_key or "",
+            "anthropic-version": "2023-06-01",
+        }
+
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/messages", headers=headers, json=payload,
+                    timeout=self.cfg.timeout,
+                )
+                if resp.status_code >= 400:
+                    raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}")
+                data = resp.json()
+                blocks = data.get("content") or []
+                return "".join(b.get("text") or "" for b in blocks if b.get("type") == "text")
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+        raise LLMError(f"调用大模型失败（{self.name}）：{last_err}")
+
+
 def build_llm(cfg: Config):
     """按配置构造客户端；provider=mock 或缺少 Key 时自动降级为离线 mock。"""
     provider = (cfg.llm.provider or "mock").lower()
@@ -369,6 +425,37 @@ def build_llm(cfg: Config):
         # 没有 Key 时不报错，降级为 mock 并保持流程可用
         return MockClient(cfg.llm)
     return OpenAICompatClient(cfg.llm)
+
+
+def build_llm_for(
+    cfg: Config,
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    protocol: str = "openai",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+):
+    """按指定提供商参数构造客户端（用于 chat 的模型选择）。
+
+    ``protocol`` 为 ``anthropic`` 时走 Messages 协议，否则走 OpenAI 兼容协议。
+    """
+    from copy import deepcopy
+
+    lc: LLMConfig = deepcopy(cfg.llm)
+    lc.provider = "custom"
+    lc.base_url = base_url.rstrip("/")
+    lc.api_key = api_key
+    lc.model = model
+    if temperature is not None:
+        lc.temperature = temperature
+    if max_tokens is not None:
+        lc.max_tokens = max_tokens
+
+    if (protocol or "openai").lower() == "anthropic":
+        return AnthropicClient(lc)
+    return OpenAICompatClient(lc)
 
 
 def llm_status(cfg: Config) -> dict:

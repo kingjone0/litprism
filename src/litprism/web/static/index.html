@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>文献棱镜 LitPrism</title>
 <link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/lit-ui.css">
 </head>
 <body>
 
@@ -189,13 +190,10 @@
         </section>
 
         <section class="pane" data-pane="settings">
-          <div class="page-head">
-            <div class="page-title">设置</div>
-            <div class="page-sub">系统提示词为框架内置，不在此处暴露 —— 防止无意改坏防幻觉约束。</div>
-          </div>
-          <div class="settings">
-            <nav class="settings-nav" id="settingsNav"></nav>
-            <div id="settingsPanes"></div>
+          <div class="empty" style="padding-top:100px">
+            <div class="ico">⚙</div>
+            <div class="title">设置已改为弹窗</div>
+            <div class="desc">请从左侧栏左下角的「设置」打开。</div>
           </div>
         </section>
 
@@ -221,6 +219,23 @@
 
 <div class="toast-wrap" id="toasts"></div>
 
+<!-- ==================== 设置弹窗 ==================== -->
+<div class="modal-backdrop" id="settingsModal">
+  <div class="modal">
+    <header class="modal-head">
+      <div class="modal-title">设置</div>
+      <div class="spacer" style="flex:1"></div>
+      <button class="btn sm" id="btnOpenConfig">打开配置文件</button>
+      <button class="modal-close" id="btnCloseSettings" title="关闭">✕</button>
+    </header>
+    <div class="modal-body">
+      <nav class="modal-nav" id="settingsNav"></nav>
+      <div class="modal-content" id="settingsPanes"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/lit-ui.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
