@@ -16,6 +16,11 @@ pymupdf>=1.24.0           # 首选：速度快、版面还原好
 fastapi>=0.110.0
 uvicorn>=0.29.0
 
+# ---- MCP Server（可选，只用 CLI 可以不装）----
+# 注意：清华镜像可能缺少该包，若安装失败请换源：
+#   pip install "mcp>=2.0" -i https://mirrors.aliyun.com/pypi/simple/
+mcp>=2.0.0
+
 # ---- 增强能力（可选）----
 # sentence-transformers>=2.5.0   # 语义向量检索，未安装时自动降级为 BM25 词法检索
 # numpy>=1.26.0                  # TF-IDF 跨论文关联计算（未安装时降级为纯 Python 实现）

@@ -999,6 +999,156 @@ def cmd_skill(ctx: Ctx, args) -> int:
     return 0
 
 
+def cmd_deliverables(ctx: Ctx, args) -> int:
+    from .deliverables import TYPE_LABELS, DeliverableStore, format_deliverables
+
+    store = DeliverableStore(ctx.kb)
+
+    if args.action == "show":
+        d = store.resolve(args.ref or "")
+        if d is None:
+            err("未找到交付物")
+            return 1
+        title(f"交付物 · {d.title}")
+        kv("id", d.id)
+        kv("类型", d.type_label)
+        kv("状态", d.status_label)
+        kv("Skill", d.skill_id or "（内核能力生成）")
+        kv("引用", f"{d.citation_count} 条")
+        kv("字数", str(d.word_count))
+        kv("更新时间", d.updated_at[:19])
+        print()
+        print(d.content.strip() or "（空）")
+        if d.citations:
+            print()
+            print("引用来源：")
+            print(d.citation_summary())
+        return 0
+
+    if args.action == "export":
+        d = store.resolve(args.ref or "")
+        if d is None:
+            err("未找到交付物")
+            return 1
+        if args.all:
+            out_dir = Path(args.output or ctx.cfg.data_path / "notes" / "deliverables")
+            paths = store.export_all(out_dir, fmt=args.format)
+            ok(f"已导出 {len(paths)} 个交付物到 {out_dir}")
+            return 0
+        out = Path(args.output) if args.output else (
+            Path(ctx.cfg.data_path) / "notes" / "deliverables" / f"{d.id}.{args.format}"
+        )
+        p = store.export(d.id, out, fmt=args.format)
+        ok(f"已导出到 {p}")
+        if d.citations:
+            print(f"  含 {d.citation_count} 条引用来源")
+        return 0
+
+    if args.action == "delete":
+        d = store.resolve(args.ref or "")
+        if d is None:
+            err("未找到交付物")
+            return 1
+        ok(f"已移入回收站 {d.id}") if store.delete(d.id) else err("删除失败")
+        return 0
+
+    if args.action == "status":
+        d = store.resolve(args.ref or "")
+        if d is None:
+            err("未找到交付物")
+            return 1
+        if not args.to:
+            err("请用 --to 指定新状态（draft / final / exported）")
+            return 1
+        store.update(d.id, status=args.to)
+        ok(f"{d.id} 状态 → {args.to}")
+        return 0
+
+    title("交付物")
+    items = store.list(type=args.type, status=args.status, limit=args.limit)
+    st = store.stats()
+    print(f"  共 {st['total']} 个")
+    if st["by_type"]:
+        print("  按类型：" + "、".join(f"{TYPE_LABELS.get(k, k)} {v}" for k, v in st["by_type"].items()))
+    if st["by_status"]:
+        print("  按状态：" + "、".join(f"{k} {v}" for k, v in st["by_status"].items()))
+    print()
+    print(format_deliverables(items))
+    if not items:
+        print("\n  交付物由 Skill 的 output.type=deliverable 生成，")
+        print("  或由综述/对比等内核能力产出。导出时一并带出引用来源。")
+    return 0
+
+
+def cmd_mcp(ctx: Ctx, args) -> int:
+    from .mcp.tools import describe_tools, dump_schema
+
+    if args.action == "serve":
+        from .mcp.server import main as mcp_main
+
+        warn("即将启动 stdio 服务。此进程会阻塞，等待 MCP 客户端连接。")
+        print(f"  模式：{'只读' if ctx.cfg.mcp.readonly else '读写'}")
+        print("  客户端配置示例（Claude Desktop）：")
+        print(json.dumps(
+            {
+                "mcpServers": {
+                    "litprism": {
+                        "command": sys.executable,
+                        "args": ["-m", "litprism.mcp.server"],
+                    }
+                }
+            },
+            ensure_ascii=False, indent=2,
+        ))
+        print()
+        return mcp_main()
+
+    if args.action == "tools":
+        title("MCP 工具与资源")
+        print(describe_tools())
+        print()
+        kv("当前模式", "只读" if ctx.cfg.mcp.readonly else "读写")
+        if ctx.cfg.mcp.readonly:
+            print("  提示：写入工具在只读模式下不对外暴露。")
+        return 0
+
+    if args.action == "schema":
+        print(json.dumps(dump_schema(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.action == "audit":
+        from .mcp.audit import AuditLog, format_audit
+
+        log = AuditLog(ctx.kb, ctx.cfg.mcp.server_id)
+        title("MCP 调用审计")
+        st = log.stats()
+        print(f"  共 {st['total']} 次（成功 {st['ok']}，失败 {st['failed']}）")
+        if st["by_tool"]:
+            print("  按工具：" + "、".join(f"{k} {v}" for k, v in st["by_tool"].items()))
+        print()
+        print(format_audit(log.list(limit=args.limit)))
+        return 0
+
+    if args.action == "audit-clear":
+        from .mcp.audit import AuditLog
+
+        n = AuditLog(ctx.kb, ctx.cfg.mcp.server_id).clear()
+        ok(f"已清空 {n} 条审计记录")
+        return 0
+
+    title("MCP Server")
+    kv("状态", "已启用" if ctx.cfg.mcp.enabled else "未启用（不影响手动 serve）")
+    kv("模式", "只读" if ctx.cfg.mcp.readonly else "读写")
+    kv("server_id", ctx.cfg.mcp.server_id)
+    print()
+    print("  一期只做**对外**的 MCP Server，不接入外部 MCP 服务。")
+    print("  常用命令：")
+    print("    mcp tools    查看工具清单")
+    print("    mcp serve    启动 stdio 服务（阻塞）")
+    print("    mcp audit    查看调用记录")
+    return 0
+
+
 def cmd_rules(ctx: Ctx, args) -> int:
     from .invariants import describe_rules
 
@@ -1190,6 +1340,27 @@ def build_parser() -> argparse.ArgumentParser:
                    help="执行输入，可重复；如 --input topic=注意力机制")
     a.add_argument("--dry-run", action="store_true", help="只组装提示词，不调用模型")
     a.set_defaults(func=cmd_skill)
+
+    # ---- 交付物 ----
+    a = sub.add_parser("deliverables", help="交付物管理（综述 / 对比 / 笔记 / 审稿意见）")
+    a.add_argument("action", nargs="?", default="list",
+                   choices=["list", "show", "export", "delete", "status"])
+    a.add_argument("ref", nargs="?", help="交付物 id / 前缀 / 标题片段，留空取最近一个")
+    a.add_argument("--type", choices=["review", "comparison", "notes", "peer_review"])
+    a.add_argument("--status", choices=["draft", "final", "exported"])
+    a.add_argument("--to", help="action=status 时的目标状态")
+    a.add_argument("--output", help="导出路径（文件或目录）")
+    a.add_argument("--format", default="md", choices=["md", "json"])
+    a.add_argument("--all", action="store_true", help="导出全部")
+    a.add_argument("--limit", type=int, default=100)
+    a.set_defaults(func=cmd_deliverables)
+
+    # ---- MCP ----
+    a = sub.add_parser("mcp", help="MCP Server（对外暴露，默认只读）")
+    a.add_argument("action", nargs="?", default="status",
+                   choices=["status", "tools", "serve", "schema", "audit", "audit-clear"])
+    a.add_argument("--limit", type=int, default=30)
+    a.set_defaults(func=cmd_mcp)
 
     a = sub.add_parser("serve", help="启动 Web 界面")
     a.add_argument("--host", default="127.0.0.1")

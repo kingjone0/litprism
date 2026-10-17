@@ -486,7 +486,7 @@ class KnowledgeBase:
     def list_conversations(self, limit: int = 100) -> list[dict]:
         rows = self._con.execute(
             "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count"
-            " FROM conversations c ORDER BY c.updated_at DESC LIMIT ?",
+            " FROM conversations c ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]

@@ -148,6 +148,19 @@ class MemoryConfig:
 
 
 @dataclass
+class McpConfig:
+    """MCP Server 配置。
+
+    **默认只读** —— 写入需显式开启。MCP 让外部客户端能读写知识库，
+    默认放开写入的风险远大于收益。
+    """
+
+    enabled: bool = False               # 是否在应用启动时一并拉起 MCP Server
+    readonly: bool = True               # 只读模式：不暴露写工具
+    server_id: str = "local"            # 审计日志里标识来源
+
+
+@dataclass
 class AppConfig:
     name: str = "文献棱镜 LitPrism"
     data_dir: str = "./data"
@@ -166,6 +179,7 @@ class Config:
     export: ExportConfig = field(default_factory=ExportConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    mcp: McpConfig = field(default_factory=McpConfig)
     config_path: Path | None = None
     # 载入期校验产生的警告（未知键等）—— 不阻断启动，但要在 UI 上提示一次
     config_warnings: list[str] = field(default_factory=list)
@@ -234,6 +248,7 @@ def _from_dict(raw: dict) -> Config:
         ("export", ExportConfig),
         ("context", ContextConfig),
         ("memory", MemoryConfig),
+        ("mcp", McpConfig),
     ):
         if key in raw:
             sub = raw[key] or {}

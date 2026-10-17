@@ -112,3 +112,12 @@ memory:
   resident_max_items: 12       # 常驻条数上限
   allow_implicit: false        # 一期固定 false
   retrieval_top_k: 5           # 按需层检索条数
+
+# ---------------- MCP Server ----------------
+# 一期只做**对外**的 MCP Server（stdio 传输），不接入外部 MCP 服务。
+# 启动：python -m litprism.mcp.server
+mcp:
+  enabled: false               # 是否随应用一起拉起（不影响手动 serve）
+  readonly: true               # ⚠️ 默认只读。写入需显式改 false
+                               #    只读模式下 import_paper 不会注册给客户端
+  server_id: "local"           # 审计日志里标识来源
