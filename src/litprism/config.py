@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,58 @@ except ImportError:  # pragma: no cover - PyYAML 缺失时给出明确指引
     yaml = None  # type: ignore[assignment]
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# --------------------------------------------------------------------------
+# 两个根目录：只读资源 vs 可写数据
+# --------------------------------------------------------------------------
+def resolve_roots(
+    *,
+    frozen: bool,
+    meipass: str | Path | None = None,
+    localappdata: str | Path | None = None,
+    home: str | Path | None = None,
+    source_root: Path | None = None,
+) -> tuple[Path, Path]:
+    """返回 ``(BUNDLE_ROOT, APP_ROOT)``。
+
+    **为什么要分两个根**（这是打包后最容易踩的坑）：
+
+    * PyInstaller onefile 模式下 ``__file__`` 位于 ``sys._MEIPASS``
+      —— 那是**每次启动都会重建、退出后可能被清理的临时解包目录**。
+      若把它当作项目根，知识库会建在 ``%TEMP%\\data`` 里，
+      用户装了软件用一周，数据可能哪天就没了。
+    * 同时，包内资源（``config.example.yaml``、``web/static``）确实只在
+      ``_MEIPASS`` 里可读，不能写到那里去（重启即丢）。
+
+    所以：**读资源走 BUNDLE_ROOT，写数据走 APP_ROOT**。
+    源码运行时两者都是项目根，行为与之前完全一致。
+
+    可写根优先级：``LITPRISM_HOME`` 环境变量 > ``%LOCALAPPDATA%\\LitPrism``
+    > ``~/.litprism``（非 Windows 或变量缺失时）。
+    """
+    if not frozen:
+        root = Path(source_root) if source_root else Path(__file__).resolve().parents[2]
+        override = os.environ.get("LITPRISM_HOME")
+        return root, Path(override) if override else root
+
+    bundle = Path(meipass) if meipass else Path(sys.executable).parent
+    override = os.environ.get("LITPRISM_HOME")
+    if override:
+        app = Path(override)
+    elif localappdata:
+        app = Path(localappdata) / "LitPrism"
+    else:
+        app = (Path(home) if home else Path.home()) / ".litprism"
+    return bundle, app
+
+
+BUNDLE_ROOT, APP_ROOT = resolve_roots(
+    frozen=bool(getattr(sys, "frozen", False)),
+    meipass=getattr(sys, "_MEIPASS", None),
+    localappdata=os.environ.get("LOCALAPPDATA"),
+)
+
+# 向后兼容别名：原先所有相对路径都以「项目根」为基准
+PROJECT_ROOT = APP_ROOT
 
 
 # --------------------------------------------------------------------------
@@ -161,6 +213,20 @@ class McpConfig:
 
 
 @dataclass
+class WebSearchConfig:
+    """联网搜索配置（两级证据模型的 Tier 2）。
+
+    Key 走 SecretStore 加密存储，配置文件里只存 ref。
+    provider=none 表示禁用联网。
+    """
+
+    provider: str = "tavily"            # tavily | searxng | none
+    api_key_ref: str = ""               # SecretStore 引用，不存明文
+    searxng_url: str = "http://localhost:8888"
+    max_results: int = 5
+
+
+@dataclass
 class AppConfig:
     name: str = "文献棱镜 LitPrism"
     data_dir: str = "./data"
@@ -180,6 +246,7 @@ class Config:
     context: ContextConfig = field(default_factory=ContextConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    websearch: WebSearchConfig = field(default_factory=WebSearchConfig)
     config_path: Path | None = None
     # 载入期校验产生的警告（未知键等）—— 不阻断启动，但要在 UI 上提示一次
     config_warnings: list[str] = field(default_factory=list)
@@ -249,6 +316,7 @@ def _from_dict(raw: dict) -> Config:
         ("context", ContextConfig),
         ("memory", MemoryConfig),
         ("mcp", McpConfig),
+        ("websearch", WebSearchConfig),
     ):
         if key in raw:
             sub = raw[key] or {}
@@ -337,20 +405,34 @@ def _validate(cfg: Config) -> None:
         )
 
 
+def examples_config_path() -> Path | None:
+    """返回**只读**的配置模板路径（包内优先，其次开发目录）。"""
+    for cand in (
+        BUNDLE_ROOT / "config" / "config.example.yaml",
+        APP_ROOT / "config" / "config.example.yaml",
+    ):
+        if cand.exists():
+            return cand
+    return None
+
+
 def ensure_user_config() -> Path | None:
-    """确保存在**用户配置文件** ``config/config.yaml``。
+    """确保存在**用户配置文件** ``config/config.yaml``（位于可写根）。
 
     首次运行时从 ``config.example.yaml`` 复制一份。
 
     为什么必须这样做：设置界面会把改动写回配置文件。如果写的是
     ``config.example.yaml``（被 git 跟踪的模板），用户的每次改设置都会污染仓库。
     有了这一层，写回永远落在 gitignore 的 ``config.yaml`` 上。
+
+    打包后同理但更严格：模板在 ``BUNDLE_ROOT``（``_MEIPASS``，只读且重启即丢），
+    用户配置必须落在 ``APP_ROOT``，否则设置改了等于没改。
     """
-    user = PROJECT_ROOT / "config" / "config.yaml"
+    user = APP_ROOT / "config" / "config.yaml"
     if user.exists():
         return user
-    example = PROJECT_ROOT / "config" / "config.example.yaml"
-    if not example.exists():
+    example = examples_config_path()
+    if example is None:
         return None
     try:
         user.parent.mkdir(parents=True, exist_ok=True)
@@ -376,10 +458,12 @@ def load_config(path: str | Path | None = None) -> Config:
     if os.environ.get("LITPRISM_CONFIG"):
         candidates.append(Path(os.environ["LITPRISM_CONFIG"]))
     candidates += [
-        PROJECT_ROOT / "config" / "config.yaml",
+        APP_ROOT / "config" / "config.yaml",
         Path.cwd() / "config" / "config.yaml",
-        PROJECT_ROOT / "config" / "config.example.yaml",
     ]
+    example = examples_config_path()
+    if example is not None:
+        candidates.append(example)
 
     raw: dict[str, Any] = {}
     used: Path | None = None
@@ -412,9 +496,10 @@ def patch_config(path: str | Path, patch: dict[str, Any]) -> dict[str, Any]:
       需要保留注释的用户可以手动编辑配置文件。
     """
     p = Path(path)
-    # 若目标是被 git 跟踪的模板，改写到用户配置文件，避免污染仓库
-    example = PROJECT_ROOT / "config" / "config.example.yaml"
-    if p.name == "config.example.yaml" and p.resolve() == example.resolve():
+    # 若目标是被 git 跟踪的模板（或包内只读模板），改写到用户配置文件，
+    # 避免污染仓库，也避免写进 _MEIPASS 那种重启即丢的临时目录
+    example = examples_config_path()
+    if example is not None and p.resolve() == example.resolve():
         user = ensure_user_config()
         if user is not None:
             p = user
