@@ -157,13 +157,28 @@ async function loadSidebar() {
   const convBox = $('#convList');
   convBox.innerHTML = `<button class="side-new" id="btnNewConv">＋ 新建对话</button>` +
     S.conversations.map(c => `
-      <button class="side-item ${c.id === S.activeConv ? 'active' : ''}" data-conv="${esc(c.id)}">
-        <span class="ico">💬</span>
-        <span class="label">${esc(short(c.title, 18))}</span>
-        <span class="meta">${c.message_count || 0}</span>
-      </button>`).join('');
+      <div class="side-item-wrap">
+        <button class="side-item ${c.id === S.activeConv ? 'active' : ''}" data-conv="${esc(c.id)}">
+          <span class="ico">💬</span>
+          <span class="label">${esc(short(c.title, 16))}</span>
+          <span class="meta">${c.message_count || 0}</span>
+        </button>
+        <button class="conv-del" data-conv-del="${esc(c.id)}" title="删除会话">✕</button>
+      </div>`).join('');
   $('#btnNewConv').onclick = newConversation;
   $$('[data-conv]', convBox).forEach(b => b.onclick = () => openView('chat', { convId: b.dataset.conv }));
+  $$('[data-conv-del]', convBox).forEach(b => b.onclick = async e => {
+    e.stopPropagation();
+    const cid = b.dataset.convDel;
+    const item = S.conversations.find(c => c.id === cid);
+    if (!confirm(`删除会话「${item?.title || cid}」？\n全部消息与压缩记录会一并删除，不可恢复。`)) return;
+    try {
+      await api(`/api/conversations/${encodeURIComponent(cid)}`, { method: 'DELETE' });
+      if (S.activeConv === cid) { S.activeConv = null; openView('library'); }
+      toast('已删除');
+      loadSidebar();
+    } catch (err) { toast(err.message, true); }
+  });
 
   // ---- 知识库 ----
   const lib = $('#libList');
@@ -265,49 +280,96 @@ async function loadPaperDetail() {
 
     box.innerHTML = `
       <div class="page-head">
-        <div class="page-title">${esc(p.display_title || p.title)}</div>
-        <div class="page-sub">
-          ${esc((p.authors || []).join('、') || '作者未知')} · ${p.year || '年份未知'}
-          ${p.venue ? ' · ' + esc(p.venue) : ''}
+        <div class="row">
+          <div>
+            <div class="page-title">${esc(p.display_title || p.title)}</div>
+            <div class="page-sub">
+              ${esc((p.authors || []).join('、') || '作者未知')} · ${p.year || '年份未知'}
+              ${p.venue ? ' · ' + esc(p.venue) : ''}
+            </div>
+            <div class="row wrap" style="margin-top:10px">
+              ${badgeOf(p.verify_level)}
+              ${p.doi ? `<span class="mono muted">DOI: ${esc(p.doi)}</span>` : ''}
+              <span class="mono muted">${d.chunks ?? 0} 个分块</span>
+            </div>
+          </div>
+          <span style="flex:1"></span>
+          <div class="row" style="gap:6px">
+            <button class="btn sm" id="btnRename">重命名</button>
+            <button class="btn sm danger" id="btnDelete">删除</button>
+            <button class="btn sm primary" id="btnReanalyze">重新解读</button>
+          </div>
         </div>
-        <div class="row wrap" style="margin-top:10px">
-          ${badgeOf(p.verify_level)}
-          ${p.doi ? `<span class="mono muted">DOI: ${esc(p.doi)}</span>` : ''}
-          <span class="spacer"></span>
-          <button class="btn sm" id="btnReanalyze">重新解读</button>
+        <div class="segmented" style="margin-top:14px" id="paperTabs">
+          <button class="active" data-ptab="analysis">解读</button>
+          <button data-ptab="text">原文</button>
+          <button data-ptab="concepts">术语 (${concepts.length})</button>
         </div>
       </div>
 
-      ${a.research_question ? `
-      <div class="card"><div class="card-body">
-        ${analysisSection('研究问题', a.research_question)}
-        ${analysisSection('方法', a.methodology)}
-        ${analysisSection('实验设计', a.experiment_design)}
-        ${analysisSection('主要结论', a.key_conclusions)}
-        ${analysisSection('创新点', a.innovations)}
-        ${analysisSection('局限', a.limitations)}
-      </div></div>` : `
-      <div class="card"><div class="card-body">
-        <div class="empty"><div class="ico">🧩</div>
-          <div class="title">尚未解读</div>
-          <div class="desc">点击「重新解读」生成结构化解读（研究问题 / 方法 / 实验 / 结论 / 创新点 / 局限）。</div>
-        </div>
-      </div></div>`}
+      <div data-ppane="analysis">
+        ${a.research_question ? `
+          <div class="card"><div class="card-body">
+            ${analysisSection('研究问题', a.research_question)}
+            ${analysisSection('方法', a.methodology)}
+            ${analysisSection('实验设计', a.experiment_design)}
+            ${analysisSection('主要结论', a.key_conclusions)}
+            ${analysisSection('创新点', a.innovations)}
+            ${analysisSection('局限', a.limitations)}
+          </div></div>` : `
+          <div class="card"><div class="card-body">
+            <div class="empty"><div class="ico">🧩</div>
+              <div class="title">尚未解读</div>
+              <div class="desc">点「重新解读」生成结构化解读（研究问题 / 方法 / 实验 / 结论 / 创新点 / 局限）。</div>
+            </div>
+          </div></div>`}
+      </div>
 
-      ${concepts.length ? `
-      <div class="card">
-        <div class="card-head"><span class="card-title">术语</span>
-          <span class="badge neutral">${concepts.length}</span></div>
-        <div class="card-body">
-          <table class="table">
-            <thead><tr><th style="width:150px">术语</th><th>文中含义</th></tr></thead>
-            <tbody>${concepts.map(c => `
-              <tr><td><strong>${esc(c.term)}</strong></td><td>${esc(c.definition || '—')}</td></tr>`).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>` : ''}
+      <div data-ppane="text" style="display:none">
+        <div class="card"><div class="card-body" id="paperTextBody">
+          <div class="skeleton" style="width:60%"></div></div></div>
+      </div>
+
+      <div data-ppane="concepts" style="display:none">
+        ${concepts.length ? `
+          <div class="card"><div class="card-body">
+            <table class="table">
+              <thead><tr><th style="width:150px">术语</th><th>文中含义</th></tr></thead>
+              <tbody>${concepts.map(c => `
+                <tr><td><strong>${esc(c.term)}</strong></td><td>${esc(c.definition || '—')}</td></tr>`).join('')}
+              </tbody>
+            </table>
+          </div></div>` : `<div class="card"><div class="card-body">
+            <div class="empty"><div class="title">暂无术语</div></div></div></div>`}
+      </div>
     `;
+
+    // ---- 标签切换 ----
+    $$('#paperTabs [data-ptab]').forEach(b => b.onclick = () => {
+      $$('#paperTabs [data-ptab]').forEach(x => x.classList.toggle('active', x === b));
+      $$('[data-ppane]').forEach(x => x.style.display = x.dataset.ppane === b.dataset.ptab ? '' : 'none');
+      if (b.dataset.ptab === 'text') loadPaperText(S.activePaper);
+    });
+
+    // ---- 重命名 / 删除 ----
+    $('#btnRename').onclick = () => {
+      const cur = p.display_title || p.title || '';
+      const name = prompt('新的显示名称（只影响界面显示，不改原始题录标题）', cur);
+      if (name === null) return;
+      api(`/api/paper/${encodeURIComponent(S.activePaper)}`, {
+        method: 'PATCH', body: { display_title: name },
+      }).then(() => {
+        toast(name.trim() ? '已重命名' : '已恢复为原始标题');
+        loadSidebar();
+        loadPaperDetail();
+      }).catch(e => toast(e.message, true));
+    };
+    $('#btnDelete').onclick = () => {
+      if (!confirm('移入回收站？该论文将不再出现在检索与问答中。')) return;
+      api(`/api/paper/${encodeURIComponent(S.activePaper)}`, { method: 'DELETE' })
+        .then(() => { toast('已移入回收站'); S.activePaper = null; S.tabs = S.tabs.filter(t => t !== 'paper'); loadSidebar(); openView('library'); })
+        .catch(e => toast(e.message, true));
+    };
 
     $('#btnReanalyze').onclick = async () => {
       try {
@@ -319,6 +381,33 @@ async function loadPaperDetail() {
     };
   } catch (e) {
     box.innerHTML = `<div class="empty"><div class="title">加载失败</div><div class="desc">${esc(e.message)}</div></div>`;
+  }
+}
+
+async function loadPaperText(pid) {
+  const body = $('#paperTextBody');
+  if (!body) return;
+  try {
+    const d = await api(`/api/paper/${encodeURIComponent(pid)}/text`);
+    if (!d.pages?.length) {
+      body.innerHTML = `<div class="empty"><div class="title">没有可显示的正文</div>
+        <div class="desc">该文件可能没有可提取的文本层（扫描件）。扫描件转写功能一期暂缓。</div></div>`;
+      return;
+    }
+    body.innerHTML = d.pages.map(pg => `
+      <div style="margin-bottom:18px">
+        <div style="font-size:11px;font-weight:650;letter-spacing:.05em;text-transform:uppercase;
+                    color:var(--muted);margin-bottom:8px">
+          ${pg.page === null ? '无页码' : `第 ${pg.page} 页`}
+        </div>
+        ${pg.chunks.map(c => `
+          <div style="margin-bottom:10px">
+            ${c.section ? `<div style="font-size:11.5px;color:var(--accent);font-weight:550;margin-bottom:3px">${esc(c.section)}</div>` : ''}
+            <div style="font-size:13px;line-height:1.8;white-space:pre-wrap">${esc(c.text)}</div>
+          </div>`).join('')}
+      </div>`).join('');
+  } catch (e) {
+    body.innerHTML = `<div class="empty"><div class="desc">${esc(e.message)}</div></div>`;
   }
 }
 
@@ -352,8 +441,15 @@ async function loadChat() {
     box.innerHTML = `
       <div style="max-width:820px;margin:0 auto;padding:20px 24px 120px">
         <div class="page-head">
-          <div class="page-title">${esc(d.conversation.title)}</div>
-          <div class="page-sub">${msgs.length} 条消息 · 压缩锚点 ${String(d.conversation.compact_anchor_seq || 0).padStart(5, '0')}</div>
+          <div class="row">
+            <div>
+              <div class="page-title">${esc(d.conversation.title)}</div>
+              <div class="page-sub">
+                ${msgs.length} 条消息 · 压缩锚点 ${String(d.conversation.compact_anchor_seq || 0).padStart(5, '0')}
+                · 上下文压缩由策略自动触发
+              </div>
+            </div>
+          </div>
         </div>
         <div id="chatStream">
           ${msgs.length ? msgs.map(renderMessage).join('') : `
@@ -369,8 +465,6 @@ async function loadChat() {
               <span class="muted" style="font-size:11.5px">模型</span>
               <select class="select" id="chatModel"
                 style="width:auto;min-width:210px;font-size:12px;padding:4px 9px"></select>
-              <span style="flex:1"></span>
-              <button class="btn sm ghost" id="btnChatSettings">模型设置</button>
             </div>
             <div class="row" style="gap:8px;align-items:flex-end">
               <textarea class="textarea" id="chatInput" rows="2"
@@ -379,6 +473,7 @@ async function loadChat() {
             </div>
             <div style="margin-top:8px;font-size:11.5px;color:var(--muted)">
               回答只依据检索到的原文片段；无依据时会直接说明「未找到依据」，不会用常识补全。
+              可选模型在「设置 → 模型」里管理。
             </div>
           </div></div>
         </div>
@@ -390,7 +485,6 @@ async function loadChat() {
     const input = $('#chatInput');
     const send = () => askQuestion();
     $('#btnSend').onclick = send;
-    $('#btnChatSettings').onclick = () => openSettings('model');
     input.onkeydown = e => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); send(); }
     };
@@ -437,6 +531,17 @@ async function askQuestion() {
     });
     $('#pending')?.remove();
     stream.insertAdjacentHTML('beforeend', renderMessage(r.assistant, true));
+    if (r.insufficient_evidence) {
+      stream.insertAdjacentHTML('beforeend', `<div class="lui-degraded">
+        ⚠️ 本地知识库中没有找到足够的依据。可先在「知识库」里导入相关论文，
+        或用 <code>litprism recommend</code> 从学术数据库检索并导入。</div>`);
+    }
+    if (r.auto_compact) {
+      const ac = r.auto_compact;
+      stream.insertAdjacentHTML('beforeend', `<div class="insp-note" style="margin:8px 0">
+        ☑ 已自动压缩 ${esc(ac.range)}：遮蔽 ${ac.shadowed_tokens} token，
+        每轮省 ${ac.saved_per_turn}。被折掉的消息可随时还原。</div>`);
+    }
     LitUI.bind(stream);
     loadInspectorContext();
     loadSidebar();
@@ -448,6 +553,44 @@ async function askQuestion() {
   } finally {
     $('#btnSend').disabled = false;
     $('#chatInput')?.focus();
+  }
+}
+
+async function doCompact() {
+  if (!S.activeConv) return;
+  const btn = $('#btnCompact');
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+  try {
+    // 先 dry-run：只报告会压哪一段，不写任何数据
+    const dry = await api(`/api/compact/${encodeURIComponent(S.activeConv)}`, {
+      method: 'POST', body: { dry_run: true },
+    });
+    if (!dry.ok) {
+      toast(dry.reason || '没有可压缩的区间', true);
+      return;
+    }
+    const okGo = confirm(
+      `将把 ${dry.range} 折成摘要：\n` +
+      `遮蔽 ${dry.shadowed_tokens} token，保留 ${dry.retained_tokens} token。\n\n` +
+      `被折掉的消息不再进入上下文，但可随时按块还原。继续？`
+    );
+    if (!okGo) return;
+
+    if (btn) btn.textContent = '压缩中…';
+    const r = await api(`/api/compact/${encodeURIComponent(S.activeConv)}`, {
+      method: 'POST', body: {},
+    });
+    if (!r.ok) {
+      toast(r.reason || r.failure_code || '压缩失败', true);
+      return;
+    }
+    toast(`已压缩，节省 ${r.ledger?.saved_per_turn ?? 0} token/轮`);
+    await loadChat();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
   }
 }
 
@@ -514,10 +657,40 @@ async function loadDeliverables() {
           ${x.skill_id ? `<span class="mono">${esc(x.skill_id)}</span>` : ''}
         </div>
       </div>
-      <button class="btn sm" data-deliv="${esc(x.id)}">查看</button>
+      <div class="row" style="gap:6px;flex:none">
+        <select class="select" data-dstat="${esc(x.id)}"
+          style="font-size:11.5px;padding:4px 7px;width:auto">
+          ${['draft', 'final', 'exported'].map(s =>
+            `<option value="${s}"${s === x.status ? ' selected' : ''}>${({ draft: '草稿', final: '定稿', exported: '已导出' })[s]}</option>`).join('')}
+        </select>
+        <button class="btn sm" data-dexport="${esc(x.id)}">导出</button>
+        <button class="btn sm" data-deliv="${esc(x.id)}">查看</button>
+      </div>
     </div>`).join('');
 
   $$('[data-deliv]', box).forEach(b => b.onclick = () => showDeliverable(b.dataset.deliv));
+  $$('[data-dstat]', box).forEach(s => s.onchange = async () => {
+    try {
+      await api(`/api/deliverables/${encodeURIComponent(s.dataset.dstat)}`, {
+        method: 'PUT',
+        body: { status: s.value },
+      });
+      toast('状态已更新');
+      loadDeliverables();
+    } catch (e) { toast(e.message, true); }
+  });
+  $$('[data-dexport]', box).forEach(b => b.onclick = async () => {
+    const item = S.deliverables.find(x => x.id === b.dataset.dexport);
+    const name = item?.title || 'deliverable';
+    const dir = (S.status?.config?.export?.notes_dir || './notes').replace(/^\.\//, '');
+    try {
+      const p = await api(`/api/deliverables/${encodeURIComponent(b.dataset.dexport)}/export`, {
+        method: 'POST',
+        body: { path: `${dir}/deliverables/${name}.md` },
+      });
+      toast(`已导出到 ${p.path}`);
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
 async function showDeliverable(id) {
@@ -591,6 +764,46 @@ async function loadSkills() {
   }).join('');
 }
 
+function showNewSkill() {
+  if ($('#newSkillCard')) return;
+  const html = `
+    <div class="card" id="newSkillCard" style="margin-bottom:12px;border-color:var(--accent)">
+      <div class="card-body">
+        <div style="font-size:13px;font-weight:600;margin-bottom:10px">新建 Skill</div>
+        <div class="field"><label>标识（id）</label>
+          <input class="input" id="nsId" placeholder="小写字母、数字、连字符，如 literature-review">
+          <div class="hint">同时也是目录名，创建后不可改。</div></div>
+        <div class="field"><label>显示名称</label>
+          <input class="input" id="nsName" placeholder="如：文献综述草稿"></div>
+        <div class="field"><label>用途说明</label>
+          <input class="input" id="nsDesc" placeholder="一句话说明它做什么"></div>
+        <div class="row" style="gap:8px">
+          <span class="muted" style="font-size:11.5px">会生成 skill.yaml / prompt.md / README.md 三个声明式文件。</span>
+          <span style="flex:1"></span>
+          <button class="btn sm" id="nsCancel">取消</button>
+          <button class="btn sm primary" id="nsCreate">创建</button>
+        </div>
+      </div>
+    </div>`;
+  const box = $('#skillCards');
+  box.insertAdjacentHTML('afterbegin', html);
+  $('#nsCancel').onclick = () => $('#newSkillCard').remove();
+  $('#nsCreate').onclick = async () => {
+    const id = $('#nsId').value.trim();
+    if (!id) { toast('请填写标识', true); return; }
+    try {
+      const r = await api('/api/skills/scaffold', {
+        method: 'POST',
+        body: { id, name: $('#nsName').value.trim() || id, description: $('#nsDesc').value.trim() },
+      });
+      toast(`已创建：${r.path}`);
+      await loadSkills();
+      await loadSidebar();
+    } catch (e) { toast(e.message, true); }
+  };
+  $('#nsId').focus();
+}
+
 /* ==========================================================================
    核验与白名单
    ========================================================================== */
@@ -639,6 +852,8 @@ async function doVerify() {
     <div class="skeleton" style="width:50%"></div></div></div>`;
   try {
     const r = await api('/api/verify', { method: 'POST', body: { title: q } });
+    const citable = r.level === 'verified' || r.level === 'manual_confirmed';
+
     box.innerHTML = `<div class="card" style="margin-top:12px"><div class="card-body">
       <div class="row" style="margin-bottom:10px">
         ${badgeOf(r.level)}
@@ -653,7 +868,41 @@ async function doVerify() {
         ${r.matches.map(m => `<div style="margin-top:6px;font-size:12px">
           <span class="mono muted">[${esc(m.source)}]</span> ${m.similarity.toFixed(3)} · ${esc(m.title)}
         </div>`).join('')}` : ''}
-    </div></div>`;
+    </div></div>
+
+    ${!citable ? `
+    <div class="card" style="margin-top:12px;border-color:var(--warn)">
+      <div class="card-head"><span class="card-title">人工确认放行</span></div>
+      <div class="card-body">
+        <div style="font-size:12px;color:var(--muted);line-height:1.65;margin-bottom:10px">
+          如果你确认这篇文献真实存在，可以人工放行。<strong>确认依据必填</strong>，
+          且会保留确认当时的自动判定 —— 将来复核时能分清哪些是机器判的、哪些是人拍的板。
+        </div>
+        <textarea class="textarea" id="wlReason" rows="2"
+          placeholder="例如：在 NeurIPS 2024 会议论文集里见过这篇，且作者组有相关前期工作"></textarea>
+        <div class="row" style="margin-top:9px;gap:8px">
+          <span class="muted" style="font-size:11.5px">放行后徽章显示为「🔵人工确认」，与「✅已核验」区分。</span>
+          <span style="flex:1"></span>
+          <button class="btn sm" id="btnWlConfirm">确认放行</button>
+        </div>
+      </div>
+    </div>` : ''}
+    `;
+
+    const btn = $('#btnWlConfirm');
+    if (btn) btn.onclick = async () => {
+      const reason = $('#wlReason').value.trim();
+      if (reason.length < 4) { toast('请填写确认依据（至少 4 个字）', true); return; }
+      try {
+        await api('/api/whitelist', {
+          method: 'POST',
+          body: { title: q, level_at_confirm: r.level, reason },
+        });
+        toast('已加入白名单');
+        await loadWhitelist();
+        doVerify();
+      } catch (e) { toast(e.message, true); }
+    };
   } catch (e) {
     box.innerHTML = `<div class="card" style="margin-top:12px"><div class="card-body">
       <div class="badge danger">核验失败</div>
@@ -717,7 +966,16 @@ async function renderSettingsPane(key) {
     return;
   }
 
-  box.innerHTML = `<div class="card"><div class="card-body">${settingsBody(key, c)}</div></div>`;
+  const EDITABLE = ['sources', 'verify', 'retrieval', 'export'];
+  box.innerHTML = `
+    <div class="card" id="set-pane-${key}"><div class="card-body">${settingsBody(key, c)}</div></div>
+    ${EDITABLE.includes(key) ? `<div class="row" style="margin-top:14px;gap:8px">
+      <span class="muted" style="font-size:11.5px">改动会写入配置文件；部分项需重启应用才完全生效。</span>
+      <span style="flex:1"></span>
+      <button class="btn sm primary" id="btnSaveCfg">保存</button>
+    </div>` : ''}`;
+  const saveBtn = $('#btnSaveCfg');
+  if (saveBtn) saveBtn.onclick = () => saveSettingsPane(key);
 
   if (key === 'general') {
     const sel = $('#setTheme');
@@ -751,35 +1009,85 @@ function settingsBody(key, c) {
             <option value="light"${S.theme === 'light' ? ' selected' : ''}>浅色</option>
             <option value="dark"${S.theme === 'dark' ? ' selected' : ''}>深色</option>
           </select>`) +
-        row('语言', '界面语言（一期仅简体中文）。', `<input class="input" value="简体中文" disabled>`);
+        row('语言', '界面语言（一期仅简体中文）。', `<input class="input" value="简体中文" disabled>`) +
+        row('面板布局', '右侧检视面板的显示状态会被记住。',
+          `<button class="btn sm" id="btnResetLayout">重置布局</button>`);
 
-    case 'sources':
-      return Object.entries(c.sources || {}).map(([k, v]) =>
-        row(k, v?.enabled ? '已启用' : '未启用',
-          `<span class="badge ${v?.enabled ? 'ok' : 'neutral'}">${v?.enabled ? '启用' : '关闭'}</span>`)
-      ).join('') || '<div class="muted">无数据源配置</div>';
+    case 'sources': {
+      const items = Object.entries(c.sources || {});
+      if (!items.length) return '<div class="muted">无数据源配置</div>';
+      return items.map(([k, v]) => {
+        const label = { crossref: 'Crossref', openalex: 'OpenAlex', arxiv: 'arXiv',
+                        semantic_scholar: 'Semantic Scholar', unpaywall: 'Unpaywall' }[k] || k;
+        const on = !!v?.enabled;
+        return row(
+          `${label}`,
+          k === 'semantic_scholar' || k === 'unpaywall'
+            ? '需要 API Key 或为可选增强源。'
+            : '免费开放，建议保持启用。',
+          `<div style="display:flex;flex-direction:column;gap:6px">
+             <label class="row" style="gap:6px;cursor:pointer">
+               <input type="checkbox" data-cfg="sources.${k}.enabled" data-type="bool"${on ? ' checked' : ''}>
+               <span style="font-size:12.5px">启用</span>
+             </label>
+             ${v && 'mailto' in v ? `<input class="input" data-cfg="sources.${k}.mailto"
+               placeholder="联系邮箱（部分源要求）" value="${esc(v.mailto || '')}"
+               style="font-size:11.5px;padding:4px 8px">` : ''}
+           </div>`);
+      }).join('');
+    }
 
     case 'verify':
-      return row('相似度阈值', '标题相似度达到该值才判定为疑似匹配。',
-          `<div class="mono" style="font-size:12px">${c.verification?.threshold ?? '—'}</div>`) +
+      return row('已核验阈值', '标题相似度达到该值，且有多源佐证时判定为「已核验」。',
+          `<input class="input" type="number" step="0.01" min="0" max="1"
+            data-cfg="verification.verified_threshold" data-type="number"
+            value="${c.verification?.verified_threshold ?? 0.92}">`) +
+        row('疑似阈值', '低于该值视为未匹配；介于两阈值之间为「疑似匹配」，需人工确认。',
+          `<input class="input" type="number" step="0.01" min="0" max="1"
+            data-cfg="verification.likely_threshold" data-type="number"
+            value="${c.verification?.likely_threshold ?? 0.82}">`) +
+        row('要求年份匹配', '开启后，年份差异较大的候选会被降级。',
+          `<label class="row" style="gap:6px;cursor:pointer">
+            <input type="checkbox" data-cfg="verification.require_year_match" data-type="bool"
+              ${c.verification?.require_year_match ? 'checked' : ''}>
+            <span style="font-size:12.5px">开启</span>
+          </label>`) +
         row('人工确认白名单', '自动核验未通过但经人工确认放行的文献。徽章显示为「🔵人工确认」。',
           `<button class="btn sm" id="setGoWhitelist">查看（${S.whitelist.length} 条）</button>`) +
         row('判定等级', '五态：已核验 / 人工确认 / 疑似 / 未核到 / 无法判定。只有前两者可引用。',
           `<div class="row wrap" style="gap:4px">${badgeOf('verified')}${badgeOf('manual_confirmed')}${badgeOf('likely')}${badgeOf('not_found')}${badgeOf('unchecked')}</div>`);
 
     case 'retrieval':
-      return row('分块大小 / 重叠', '影响检索粒度。块过大会稀释相似度，过小会切断上下文。',
-          `<div class="mono" style="font-size:12px">${c.retrieval?.chunk_size ?? '—'} / ${c.retrieval?.chunk_overlap ?? '—'}</div>`) +
+      return row('分块大小', '每个检索单元的字数。块过大会稀释相似度，过小会切断上下文。',
+          `<input class="input" type="number" min="200" max="4000"
+            data-cfg="retrieval.chunk_size" data-type="number"
+            value="${c.retrieval?.chunk_size ?? 900}">`) +
+        row('分块重叠', '相邻块的重叠字数，避免关键句被切断。',
+          `<input class="input" type="number" min="0" max="1000"
+            data-cfg="retrieval.chunk_overlap" data-type="number"
+            value="${c.retrieval?.chunk_overlap ?? 150}">`) +
         row('召回数', '每次检索返回的片段数。受上下文预算约束，实际会动态调整。',
-          `<div class="mono" style="font-size:12px">${c.retrieval?.top_k ?? '—'}</div>`) +
+          `<input class="input" type="number" min="1" max="50"
+            data-cfg="retrieval.top_k" data-type="number"
+            value="${c.retrieval?.top_k ?? 8}">`) +
+        row('最低相关度', '低于该分数的片段会被丢弃。0 表示不过滤。',
+          `<input class="input" type="number" step="0.01" min="0" max="1"
+            data-cfg="retrieval.min_score" data-type="number"
+            value="${c.retrieval?.min_score ?? 0}">`) +
         row('上下文预算', '压缩在「新增量」上动手，不在「窗口位置」上动手。',
-          `<div class="mono" style="font-size:11.5px">window ${c.context?.window_tokens ?? '—'} · step ${c.context?.step_tokens ?? '—'}</div>`);
+          `<div class="mono" style="font-size:11.5px">window ${c.context?.window_tokens ?? '—'} · step ${c.context?.step_tokens ?? '—'}</div>`) +
+        row('启用扫描件转写', '需要支持图像输入的多模态模型。一期暂缓，开启后不生效。',
+          `<span class="badge neutral">暂缓</span>`);
 
     case 'export':
       return row('默认格式', '导出笔记与交付物的默认格式。',
-          `<div class="mono" style="font-size:12px">${esc((c.export?.formats || []).join(', ') || 'markdown')}</div>`) +
-        row('笔记目录', '导出文件的落盘位置。',
-          `<div class="mono" style="font-size:11.5px">${esc(c.export?.notes_dir || '—')}</div>`);
+          `<select class="select" data-cfg="export.formats.0">
+            <option value="markdown"${(c.export?.formats || ['markdown'])[0] === 'markdown' ? ' selected' : ''}>Markdown</option>
+            <option value="json"${(c.export?.formats || [])[0] === 'json' ? ' selected' : ''}>JSON</option>
+          </select>`) +
+        row('笔记目录', '导出文件的落盘位置（相对数据目录）。',
+          `<input class="input" data-cfg="export.notes_dir"
+            value="${esc(c.export?.notes_dir || './notes')}">`);
 
     case 'about':
       return row('版本', '应用与数据库 schema 版本。',
@@ -788,6 +1096,8 @@ function settingsBody(key, c) {
           `<div class="mono" style="font-size:11.5px">
             ${S.status?.stats?.papers ?? 0} 篇论文 · ${fmtNum(S.status?.stats?.chunks)} 块
           </div>`) +
+        row('当前模型', '对话使用的模型。可在「模型」页切换。',
+          `<div class="mono" style="font-size:11.5px">${esc(llm.provider || '—')} / ${esc(llm.model || '—')}</div>`) +
         row('MCP 服务', '一期只做对外 Server。默认只读，随应用启动按配置决定是否拉起。',
           `<div class="row" style="gap:6px">
             <span class="badge ${c.mcp?.readonly ? 'ok' : 'warn'}">${c.mcp?.readonly ? '只读' : '读写'}</span>
@@ -797,6 +1107,47 @@ function settingsBody(key, c) {
           `<span class="badge neutral">不可更改</span>`);
   }
   return '';
+}
+
+/* 收集 pane 里所有 [data-cfg] 控件的值，拼成嵌套 patch */
+function collectPatch(pane) {
+  const patch = {};
+  pane.querySelectorAll('[data-cfg]').forEach(el => {
+    const path = el.dataset.cfg.split('.');
+    let v;
+    if (el.dataset.type === 'bool' || el.type === 'checkbox') v = el.checked;
+    else if (el.dataset.type === 'number' || el.type === 'number') v = Number(el.value);
+    else v = el.value;
+
+    let node = patch;
+    for (let i = 0; i < path.length - 1; i++) {
+      const k = path[i];
+      const isIdx = /^\d+$/.test(k);
+      if (isIdx) {
+        node[k] = node[k] || [];
+      } else {
+        node[k] = node[k] || {};
+      }
+      node = node[k];
+    }
+    node[path[path.length - 1]] = v;
+  });
+  return patch;
+}
+
+async function saveSettingsPane(key) {
+  const pane = $(`#set-pane-${key}`);
+  if (!pane) return;
+  const patch = collectPatch(pane);
+  try {
+    const r = await api('/api/config', { method: 'PATCH', body: patch });
+    S.status = { ...(S.status || {}), config: r.config };
+    toast('已保存');
+    (r.warnings || []).forEach(w => toast(w, true));
+    if (key === 'sources') loadSidebar();
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 /* ==========================================================================
@@ -974,26 +1325,26 @@ function bindProviderEditors() {
       btn.textContent = '拉取中…';
       try {
         const r = await api(`/api/providers/${encodeURIComponent(pid)}/fetch-models`, { method: 'POST' });
-        const box = q('[data-pv-models]');
-        box.innerHTML = '';
-        (r.items || []).forEach(m => {
-          const div = document.createElement('div');
-          div.className = 'pm-row';
-          div.innerHTML = `
-            <input class="input" data-pm-id value="${esc(m.model_id)}">
-            <input class="input" data-pm-name value="${esc(m.display_name || m.model_id)}">
-            <button class="icon-btn on" data-pm-toggle title="已暴露给对话">◉</button>
-            <button class="icon-btn" data-pm-del title="删除">🗑</button>`;
-          box.appendChild(div);
-        });
-        bindRows();
-        toast(`拉取到 ${r.items.length} 个模型，确认后点「保存」`);
+        showCandidates(card, pid, r.items || []);
       } catch (e) {
         toast(e.message, true);
       } finally {
         btn.disabled = false;
         btn.textContent = old;
       }
+    });
+
+    q('[data-pv-join]')?.addEventListener('click', async () => {
+      const picked = [...card.querySelectorAll('[data-cand]:checked')]
+        .map(cb => ({ model_id: cb.value, display_name: cb.dataset.name || cb.value }));
+      if (!picked.length) { toast('请先勾选要加入的模型', true); return; }
+      await joinModels(card, pid, picked);
+    });
+    q('[data-pv-joinall]')?.addEventListener('click', async () => {
+      const picked = [...card.querySelectorAll('[data-cand]')]
+        .map(cb => ({ model_id: cb.value, display_name: cb.dataset.name || cb.value }));
+      if (!picked.length) { toast('没有可加入的模型', true); return; }
+      await joinModels(card, pid, picked);
     });
 
     q('[data-pv-reset]')?.addEventListener('click', () => {
@@ -1035,6 +1386,77 @@ function bindProviderEditors() {
       } catch (e) { toast(e.message, true); }
     });
   });
+}
+
+/* 拉取到的可用模型 → 勾选加入目录（增量，不冲掉已调好的条目） */
+function showCandidates(card, pid, items) {
+  const existing = new Set(
+    (S.providers.find(p => p.id === pid)?.models || []).map(m => m.model_id)
+  );
+  if (!items.length) {
+    toast('该提供商未返回任何模型，可手动添加', true);
+    return;
+  }
+  const dupes = items.filter(i => existing.has(i.model_id)).length;
+  const fresh = items.filter(i => !existing.has(i.model_id));
+
+  let box = card.querySelector('[data-pv-candidates]');
+  if (!box) {
+    box = document.createElement('div');
+    box.setAttribute('data-pv-candidates', '');
+    card.querySelector('.pv-body').appendChild(box);
+  }
+  box.style.display = '';
+  box.innerHTML = `
+    <div class="pm-head">
+      可用模型（${items.length} 个${dupes ? `，${dupes} 个已在目录` : ''}）
+      <span class="spacer"></span>
+      <button data-pv-join>加入所选</button>
+      ${fresh.length ? '<button data-pv-joinall>全部加入</button>' : ''}
+      <button data-pv-closecand>收起</button>
+    </div>
+    <div style="max-height:190px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+      ${items.map(m => {
+        const inDir = existing.has(m.model_id);
+        return `<label style="display:flex;gap:8px;align-items:center;padding:6px 10px;
+                       border-bottom:1px solid var(--border);font-size:12px;cursor:pointer">
+          <input type="checkbox" data-cand="${esc(m.model_id)}" data-name="${esc(m.display_name)}"
+                 ${inDir ? 'disabled' : 'checked'}>
+          <span style="flex:1;min-width:0">
+            ${esc(m.display_name || m.model_id)}
+            ${m.model_id !== (m.display_name || '') ? `<span class="mono muted">· ${esc(m.model_id)}</span>` : ''}
+          </span>
+          ${inDir ? '<span class="badge ok">已在目录</span>' : ''}
+        </label>`;
+      }).join('')}
+    </div>`;
+
+  box.querySelector('[data-pv-closecand]').onclick = () => { box.style.display = 'none'; };
+  box.querySelector('[data-pv-join]').onclick = async () => {
+    const picked = [...box.querySelectorAll('[data-cand]:checked')]
+      .map(cb => ({ model_id: cb.value, display_name: cb.dataset.name || cb.value }));
+    if (!picked.length) { toast('请先勾选要加入的模型', true); return; }
+    await joinModels(card, pid, picked);
+  };
+  const allBtn = box.querySelector('[data-pv-joinall]');
+  if (allBtn) allBtn.onclick = async () => {
+    const picked = [...box.querySelectorAll('[data-cand]')]
+      .map(cb => ({ model_id: cb.value, display_name: cb.dataset.name || cb.value }));
+    if (!picked.length) { toast('没有可加入的模型', true); return; }
+    await joinModels(card, pid, picked);
+  };
+}
+
+async function joinModels(card, pid, picked) {
+  try {
+    const r = await api(`/api/providers/${encodeURIComponent(pid)}/models`, {
+      method: 'PUT', body: { mode: 'merge', models: picked },
+    });
+    toast(`已加入 ${r.added.length} 个模型${r.skipped.length ? `（${r.skipped.length} 个已存在，跳过）` : ''}`);
+    card.querySelector('[data-pv-candidates]')?.remove();
+    await loadProviders();
+    await loadModels();
+  } catch (e) { toast(e.message, true); }
 }
 
 function showAddProvider() {
@@ -1303,6 +1725,8 @@ function bindGlobal() {
   // Skill 搜索与刷新
   $('#skillSearch').oninput = () => { if (S.activeView === 'skills') loadSkills(); };
   $('#btnSkillRefresh').onclick = () => loadSkills().then(() => toast('已刷新'));
+  const skillNewBtn = $('#btnSkillNew');
+  if (skillNewBtn) skillNewBtn.onclick = showNewSkill;
 
   // 核验
   $('#btnVerify').onclick = doVerify;

@@ -225,6 +225,28 @@ class KnowledgeBase:
         vals.append(limit)
         return [self._row_to_paper(r) for r in self._con.execute(sql, vals).fetchall()]
 
+    def rename_paper(self, paper_id: str, display_title: str) -> bool:
+        """改**显示名**。
+
+        ⚠️ 只改 ``display_title``，绝不动 ``title``。原始题录标题用于
+        核验比对、生成引用、导出 BibTeX —— 改了它会让真实论文被判成
+        ``not_found``，还会让导出的 BibTeX 带上随手起的名字。
+        """
+        dt = (display_title or "").strip()
+        row = self._con.execute(
+            "SELECT title FROM papers WHERE id = ?", (paper_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if not dt or dt == row["title"]:
+            dt = None   # 与原名相同或为空 → 恢复用原始标题
+        with self.tx() as con:
+            con.execute(
+                "UPDATE papers SET display_title = ?, updated_at = ? WHERE id = ?",
+                (dt, _now(), paper_id),
+            )
+        return True
+
     def delete_paper(self, paper_id: str) -> bool:
         rows = self._con.execute("SELECT rowid FROM chunks WHERE paper_id = ?", (paper_id,)).fetchall()
         with self.tx() as con:
@@ -490,6 +512,17 @@ class KnowledgeBase:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """删除会话及全部关联数据。
+
+        ``messages`` / ``compaction_*`` / ``turn_views`` 都对 ``conversations``
+        设了 ``ON DELETE CASCADE``，且连接开启了 ``foreign_keys = ON``，
+        所以删主表一条即可级联清干净。
+        """
+        with self.tx() as con:
+            cur = con.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        return cur.rowcount > 0
 
     def resolve_conversation(self, ref: str) -> dict | None:
         """按 id / id 前缀 / 标题片段定位会话；``ref`` 为空时取最近一个。"""

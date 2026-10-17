@@ -253,6 +253,25 @@ a:hover { text-decoration: underline; }
 }
 .side-new:hover { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
 
+.side-item-wrap { position: relative; }
+.conv-del {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: none;
+  place-items: center;
+  color: var(--muted);
+  font-size: 10px;
+}
+.side-item-wrap:hover .conv-del { display: grid; }
+.conv-del:hover { background: var(--danger-soft); color: var(--danger); }
+.side-item-wrap .side-item .meta { margin-right: 16px; }
+.side-item-wrap:hover .side-item .meta { display: none; }
+
 .side-footer {
   border-top: 1px solid var(--border);
   padding: 8px;

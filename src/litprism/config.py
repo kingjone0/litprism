@@ -337,12 +337,39 @@ def _validate(cfg: Config) -> None:
         )
 
 
+def ensure_user_config() -> Path | None:
+    """确保存在**用户配置文件** ``config/config.yaml``。
+
+    首次运行时从 ``config.example.yaml`` 复制一份。
+
+    为什么必须这样做：设置界面会把改动写回配置文件。如果写的是
+    ``config.example.yaml``（被 git 跟踪的模板），用户的每次改设置都会污染仓库。
+    有了这一层，写回永远落在 gitignore 的 ``config.yaml`` 上。
+    """
+    user = PROJECT_ROOT / "config" / "config.yaml"
+    if user.exists():
+        return user
+    example = PROJECT_ROOT / "config" / "config.example.yaml"
+    if not example.exists():
+        return None
+    try:
+        user.parent.mkdir(parents=True, exist_ok=True)
+        user.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+        return user
+    except OSError:
+        return None
+
+
 def load_config(path: str | Path | None = None) -> Config:
     """加载配置。
 
     查找顺序：显式路径 → 环境变量 LITPRISM_CONFIG → ./config/config.yaml
     → ./config/config.example.yaml → 内置默认值。
     """
+    # 首次运行：把 example 复制成 config.yaml，后续读写都以它为准
+    if not path:
+        ensure_user_config()
+
     candidates: list[Path] = []
     if path:
         candidates.append(Path(path))
@@ -371,6 +398,60 @@ def load_config(path: str | Path | None = None) -> Config:
     cfg.ensure_dirs()
     _validate(cfg)
     return cfg
+
+
+def patch_config(path: str | Path, patch: dict[str, Any]) -> dict[str, Any]:
+    """把 ``patch`` 深合并进配置文件，**校验通过才落盘**。
+
+    设计取舍
+    --------
+    * **先校验后写盘** —— 非法配置绝不能落地，否则下次启动直接崩。
+    * **只合并不覆盖** —— 未提及的键原样保留。
+    * **拒绝写 api_key** —— 密钥走 :mod:`litprism.secrets`，不进配置文件。
+    * **注释会丢失** —— yaml 库不保留注释。这是设置界面的固有代价，
+      需要保留注释的用户可以手动编辑配置文件。
+    """
+    p = Path(path)
+    # 若目标是被 git 跟踪的模板，改写到用户配置文件，避免污染仓库
+    example = PROJECT_ROOT / "config" / "config.example.yaml"
+    if p.name == "config.example.yaml" and p.resolve() == example.resolve():
+        user = ensure_user_config()
+        if user is not None:
+            p = user
+
+    raw: dict[str, Any] = {}
+    if p.exists():
+        try:
+            loaded = yaml.safe_load(p.read_text(encoding="utf-8"))
+            raw = loaded if isinstance(loaded, dict) else {}
+        except (yaml.YAMLError, OSError):
+            raw = {}
+
+    if isinstance(patch.get("llm"), dict) and "api_key" in patch["llm"]:
+        raise ValueError(
+            "API Key 不写入配置文件。请在「设置 → 模型」里通过提供商配置写入，"
+            "它会被加密存入本地密钥库。"
+        )
+
+    _deep_merge(raw, patch)
+
+    # 用合并后的内容走一遍完整校验（不应用环境变量，校验的是文件本身）
+    probe = _from_dict(raw)
+    _validate(probe)
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    tmp.replace(p)
+    return raw
+
+
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> None:
+    for k, v in patch.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
 
 
 def config_to_dict(cfg: Config) -> dict:

@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from ..agents import CompareAgent, QAAgent, RecommendAgent, render_comparison, render_recommendation
-from ..config import Config, config_to_dict
+from ..config import Config, config_to_dict, load_config
 from ..db import KnowledgeBase
 from ..extract import analyze_paper, format_analysis
 from ..ingest import SUPPORTED_EXT, chunk_document, load_document
@@ -93,12 +93,68 @@ def create_app(cfg: Config) -> FastAPI:
             "config": config_to_dict(cfg),
         }
 
+    @app.patch("/api/config")
+    def patch_config_api(req: dict):
+        """局部更新配置。**校验通过才落盘**，非法配置一律拒绝。
+
+        注意：数据目录、分块参数等需要重建索引的项，改动后要重启应用才完全生效。
+        """
+        from ..config import patch_config as _patch
+
+        if not cfg.config_path:
+            raise HTTPException(400, "当前使用内置默认配置，没有可写入的配置文件。")
+        try:
+            _patch(cfg.config_path, req)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        # 重新载入，让本次会话立即生效
+        try:
+            fresh = load_config(cfg.config_path)
+            cfg.__dict__.update(fresh.__dict__)
+        except Exception:  # noqa: BLE001
+            pass
+
+        warnings = list(getattr(cfg, "config_warnings", []) or [])
+        return {"ok": True, "config": config_to_dict(cfg), "warnings": warnings}
+
     @app.get("/api/papers")
     def papers(status_filter: str | None = None, q: str | None = None, limit: int = 300):
         items = kb.list_papers(status=status_filter, query=q, limit=limit)
         for p in items:
             p.pop("full_text", None)
         return {"items": items, "count": len(items)}
+
+    @app.patch("/api/paper/{paper_id}")
+    def rename_paper(paper_id: str, req: dict):
+        """改显示名。只动 ``display_title``，原始题录标题保持不变。"""
+        if not kb.rename_paper(paper_id, req.get("display_title") or ""):
+            raise HTTPException(404, "未找到论文")
+        return {"ok": True}
+
+    @app.delete("/api/paper/{paper_id}")
+    def delete_paper(paper_id: str):
+        if not kb.delete_paper(paper_id):
+            raise HTTPException(404, "未找到论文")
+        return {"ok": True}
+
+    @app.get("/api/paper/{paper_id}/text")
+    def paper_text(paper_id: str):
+        """原文分块（按页分组）。供论文详情的「原文」标签使用。"""
+        p = kb.resolve_paper(paper_id)
+        if not p:
+            raise HTTPException(404, "未找到论文")
+        chunks = kb.get_chunks(p["id"], limit=2000)
+        pages: dict[int | None, list[dict]] = {}
+        for c in chunks:
+            pages.setdefault(c.get("page"), []).append(
+                {"section": c.get("section"), "text": c.get("text"), "chunk_id": c.get("id")}
+            )
+        ordered = [
+            {"page": pg, "chunks": items}
+            for pg, items in sorted(pages.items(), key=lambda x: (x[0] is None, x[0] or 0))
+        ]
+        return {"total": len(chunks), "pages": ordered}
 
     @app.get("/api/paper/{paper_id}")
     def paper(paper_id: str):
@@ -287,6 +343,13 @@ def create_app(cfg: Config) -> FastAPI:
         cid = kb.add_conversation(req.get("title") or "新会话", scope=req.get("scope"))
         return {"id": cid}
 
+    @app.delete("/api/conversations/{conv_id}")
+    def delete_conversation(conv_id: str):
+        conv = kb.resolve_conversation(conv_id)
+        if conv is None:
+            raise HTTPException(404, "会话不存在")
+        return {"ok": kb.delete_conversation(conv["id"])}
+
     @app.get("/api/conversations/{conv_id}/messages")
     def messages(conv_id: str):
         from ..genui import process as genui_process
@@ -382,12 +445,61 @@ def create_app(cfg: Config) -> FastAPI:
         )
 
         proc = genui_process(content, kb)
+
+        # ---- 自动压缩：策略判定达到阈值就折，不让用户操心 ----
+        # 手动 /compact 仍保留在 CLI 作为逃生门，但界面不暴露主动入口 ——
+        # 用户不应该需要理解「上下文占用」才能正常使用。
+        auto_compact = None
+        try:
+            from ..context.policy import Policy
+            from ..context.seam import Seam
+            from ..context.summarizer import ExtractiveSummarizer, Summarizer
+            from ..context.telemetry import Telemetry
+
+            meter = Telemetry(kb, cfg).meter
+            policy = Policy(cfg)
+            fresh_conv = kb.resolve_conversation(conv["id"])
+            msgs = kb.get_messages(conv["id"])
+            meas = meter.measure(kb, conv["id"])
+            zones = policy.protected_zones(meas, msgs)
+            decision = policy.decide_trigger(
+                meas,
+                anchor_seq=int((fresh_conv or {}).get("compact_anchor_seq") or 0),
+                messages=msgs,
+                protected=zones,
+            )
+            if decision.should_compact:
+                sel = policy.select(meas, messages=msgs, aggressive=decision.emergency_truncate)
+                if sel.ok:
+                    seam = Seam(kb, cfg)
+                    tx_id, _ = seam.begin(conv["id"], decision.trigger, sel)
+                    if tx_id:
+                        in_range = [m for m in msgs if sel.start_seq <= m["seq"] <= sel.end_seq]
+                        summary = Summarizer(
+                            cfg, chat_llm, backend=ExtractiveSummarizer()
+                        ).summarize(in_range, sel.shadowed_tokens)
+                        if summary.ok:
+                            res = seam.commit(tx_id, summary)
+                            if res.ok:
+                                auto_compact = {
+                                    "trigger": decision.trigger,
+                                    "range": sel.range_text,
+                                    "shadowed_tokens": sel.shadowed_tokens,
+                                    "saved_per_turn": (res.ledger or {}).get("saved_per_turn", 0),
+                                    "block_id": res.block_id,
+                                }
+                        else:
+                            seam.fail(tx_id, "summary", summary.error)
+        except Exception:  # noqa: BLE001 - 自动压缩失败绝不能影响回答
+            auto_compact = None
+
         return {
             "user": user_msg,
             "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict},
             "confidence": getattr(ans, "confidence", None),
             "insufficient_evidence": bool(getattr(ans, "insufficient_evidence", False)),
             "issues": proc.issues,
+            "auto_compact": auto_compact,
         }
 
     # ---------------------------------------------------------------- 上下文
@@ -522,6 +634,80 @@ def create_app(cfg: Config) -> FastAPI:
             "empty_text": reg.empty_state_text(),
         }
 
+    @app.post("/api/skills/scaffold")
+    def scaffold_skill(req: dict):
+        """按模板新建一个 Skill 目录。只生成声明式文件，不含任何可执行代码。"""
+        import re as _re
+
+        from ..skills.manifest import SCHEMA_VERSION
+        from ..skills.registry import SkillRegistry
+
+        sid = (req.get("id") or "").strip()
+        if not _re.match(r"^[a-z0-9][a-z0-9-]{1,48}$", sid):
+            raise HTTPException(
+                400, "id 不合法：需以小写字母或数字开头，只含小写字母/数字/连字符，长度 2–49。"
+            )
+
+        reg = SkillRegistry(cfg)
+        target = reg.ensure_dir() / sid
+        if target.exists():
+            raise HTTPException(400, f"Skill {sid} 已存在。")
+
+        name = (req.get("name") or sid).strip()
+        desc = (req.get("description") or "（待填写用途）").strip()
+
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "id": sid,
+            "name": name,
+            "version": "0.1.0",
+            "description": desc,
+            "author": "",
+            "trigger": {"prefix": f"/{sid}", "keywords": [name]},
+            "inputs": [
+                {"key": "topic", "label": "主题", "type": "text", "required": True,
+                 "placeholder": "例如：注意力机制"},
+            ],
+            "context": [
+                {"capability": "search_passages", "query": "{{topic}}", "top_k": 6},
+            ],
+            "capabilities": ["search_passages"],
+            "output": {"type": "answer", "citation_required": True},
+        }
+        prompt = (
+            f"围绕「{{{{topic}}}}」整理要点。\n\n"
+            "要求：\n"
+            "1. 只依据给定的原文片段作答，片段里没有的信息不要写入。\n"
+            "2. 每条结论后标注来源，格式为 [P<编号> p.<页码>]。\n"
+            "3. 区分原文事实与你的推断，推断需显式标注。\n"
+        )
+
+        import yaml as _yaml
+
+        target.mkdir(parents=True, exist_ok=False)
+        (target / "skill.yaml").write_text(
+            _yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False), encoding="utf-8"
+        )
+        (target / "prompt.md").write_text(prompt, encoding="utf-8")
+        (target / "README.md").write_text(
+            f"# {name}\n\n{desc}\n\n"
+            "Skill 是**声明式**的提示词扩展，不含可执行代码。\n\n"
+            "- `skill.yaml` 清单：元数据 / 输入契约 / 上下文声明 / 能力白名单 / 输出形态\n"
+            "- `prompt.md` 提示词模板，可用 `{{变量}}` 引用 inputs 中声明的输入\n\n"
+            "可用能力（固定，不可扩展）：search_passages / search_papers / get_analysis /\n"
+            "list_collections / get_graph / verify_paper / compare_papers\n",
+            encoding="utf-8",
+        )
+
+        entries = reg.reload()
+        entry = reg.get(sid)
+        return {
+            "ok": True,
+            "path": str(target),
+            "skill": entry.to_dict() if entry else None,
+            "stats": reg.stats(),
+        }
+
     # ---------------------------------------------------------------- 交付物
     @app.get("/api/deliverables")
     def deliverables(type: str | None = None, status: str | None = None):
@@ -539,6 +725,36 @@ def create_app(cfg: Config) -> FastAPI:
         if d is None:
             raise HTTPException(404, "交付物不存在")
         return {**d.to_dict(), "content": d.content}
+
+    @app.put("/api/deliverables/{did}")
+    def update_deliverable(did: str, req: dict):
+        from ..deliverables import DeliverableStore
+
+        store = DeliverableStore(kb)
+        if store.resolve(did) is None:
+            raise HTTPException(404, "交付物不存在")
+        store.update(did, **{k: v for k, v in (req or {}).items() if k in ("status", "title", "content")})
+        d = store.get(did)
+        return {**d.to_dict(), "content": d.content}
+
+    @app.post("/api/deliverables/{did}/export")
+    def export_deliverable(did: str, req: dict):
+        from ..deliverables import DeliverableStore
+
+        store = DeliverableStore(kb)
+        if store.resolve(did) is None:
+            raise HTTPException(404, "交付物不存在")
+        path = (req or {}).get("path")
+        if not path:
+            raise HTTPException(400, "path 不能为空")
+        fmt = (req or {}).get("format") or "md"
+        if fmt not in ("md", "json"):
+            raise HTTPException(400, "format 只支持 md / json")
+        try:
+            p = store.export(did, path, fmt=fmt)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"ok": True, "path": str(p)}
 
     # ---------------------------------------------------------------- 白名单
     @app.get("/api/whitelist")
@@ -639,8 +855,11 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.put("/api/providers/{pid}/models")
     def set_models(pid: str, req: dict):
-        n = _provider_store().set_models(pid, req.get("models") or [])
-        return {"ok": True, "count": n}
+        mode = (req or {}).get("mode") or "replace"
+        models = req.get("models") or []
+        if mode == "merge":
+            return _provider_store().add_models(pid, models)
+        return {"ok": True, "count": _provider_store().set_models(pid, models)}
 
     @app.post("/api/providers/{pid}/test")
     def test_provider(pid: str):

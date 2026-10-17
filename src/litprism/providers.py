@@ -316,6 +316,42 @@ class ProviderStore:
                 )
         return len(cleaned)
 
+    def add_models(self, pid: str, models: list[dict]) -> dict:
+        """**增量**加入模型目录。
+
+        与 :meth:`set_models` 的区别：已存在的条目**原样保留**（包括用户的
+        enabled 勾选与显示名），只插入新的。这对应「拉取可用模型 → 勾选
+        要加入哪些」的交互 —— 整体替换会把用户已调好的目录冲掉。
+        """
+        p = self.get(pid)
+        if p is None:
+            raise ProviderError(f"提供商 {pid} 不存在")
+
+        existing = {m.model_id for m in p.models}
+        now = _now()
+        added: list[str] = []
+        skipped: list[str] = []
+
+        with self.kb.tx() as con:
+            for i, m in enumerate(models or []):
+                mid = str((m or {}).get("model_id") or "").strip()
+                if not mid:
+                    continue
+                if mid in existing:
+                    skipped.append(mid)
+                    continue
+                existing.add(mid)
+                con.execute(
+                    "INSERT INTO provider_models (id, provider_id, model_id, display_name,"
+                    " enabled, sort_order, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        f"pm_{uuid.uuid4().hex[:10]}", pid, mid,
+                        str(m.get("display_name") or mid).strip(), 1, 1000 + i, now,
+                    ),
+                )
+                added.append(mid)
+        return {"added": added, "skipped": skipped}
+
     def fetch_models(self, pid: str) -> list[dict]:
         """从提供商的 ``/models`` 拉取可用模型。
 
