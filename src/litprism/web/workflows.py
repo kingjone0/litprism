@@ -46,7 +46,10 @@ def register_workflows(app, kb, cfg, task_llm):
             store.validate_export(d)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
-        return Response(store.render_markdown(d), media_type='text/markdown; charset=utf-8',
+        content = store.render_markdown(d)
+        if d.status == 'draft':
+            store.update(d.id, status='exported')
+        return Response(content, media_type='text/markdown; charset=utf-8',
                         headers={'Content-Disposition': 'attachment; filename="litprism-notes.md"'})
 
     @app.get('/api/deliverables-archive')
@@ -64,6 +67,9 @@ def register_workflows(app, kb, cfg, task_llm):
         with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
             for d in items:
                 archive.writestr(_safe_filename(d.title)+'-'+d.id+'.md', store.render_markdown(d))
+        for d in items:
+            if d.status == 'draft':
+                store.update(d.id, status='exported')
         return Response(output.getvalue(), media_type='application/zip',
                         headers={'Content-Disposition': 'attachment; filename="litprism-deliverables.zip"'})
 

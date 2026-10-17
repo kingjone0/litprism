@@ -91,12 +91,20 @@ def analyze_paper(
     if not isinstance(evidence, dict):
         evidence = {}
     for field, _ in _FIELDS:
-        value = str(data.get(field) or '').strip()
+        raw = data.get(field)
+        if raw is not None and not isinstance(raw, str):
+            data[field] = ''
+            issues.append(f'{field}: 字段必须是文本。')
+            continue
+        value = (raw or '').strip()
+        data[field] = value
         if not value:
             continue
         refs = evidence.get(field) or []
         if isinstance(refs, str):
             refs = [refs]
+        if not isinstance(refs, list):
+            refs = []
         if data.get('_mock'):
             refs = [e['tag'] + (f" p.{e['page']}" if e['page'] is not None else '')
                     for e in excerpts if any(part.strip()[:50] in e['text'] for part in value.split('\n') if len(part.strip()) >= 15)]
@@ -110,10 +118,15 @@ def analyze_paper(
     data['field_evidence'] = evidence
     data['_citation_check'] = {'passed': not issues, 'issues': issues}
     data['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': paper_id, 'page': e['page']} for e in excerpts]
-    data.setdefault("keywords", [])
+    keywords = data.get('keywords')
+    data['keywords'] = [v for v in keywords if isinstance(v, str)] if isinstance(keywords, list) else []
+    # 术语只能来自本次独立校验，不能信任 extract 顺带返回的 concepts。
+    data['concepts'] = []
     data["_model"] = getattr(llm, "name", "unknown")
 
     kb.save_analysis(paper_id, data, model=getattr(llm, "name", "unknown"))
+    with kb.tx() as con:
+        con.execute('DELETE FROM concepts WHERE paper_id = ?', (paper_id,))
 
     if with_concepts:
         try:
@@ -123,16 +136,16 @@ def analyze_paper(
             ]
             cdata = llm.chat_json(cm, task="concepts")
             concepts = [c for c in cdata.get('concepts') or []
-                        if not citation_issues(str(c.get('definition') or ''), excerpts)]
+                        if isinstance(c, dict) and isinstance(c.get('term'), str)
+                        and isinstance(c.get('definition'), str)
+                        and not citation_issues(c['definition'], excerpts)]
             if concepts:
-                # 覆盖式更新：先清旧
-                with kb.tx() as con:
-                    con.execute("DELETE FROM concepts WHERE paper_id = ?", (paper_id,))
                 kb.add_concepts(paper_id, concepts)
                 data["concepts"] = concepts
         except Exception as e:  # noqa: BLE001
             data["_concepts_error"] = f"{type(e).__name__}: {e}"
 
+    kb.save_analysis(paper_id, data, model=getattr(llm, 'name', 'unknown'))
     return data
 
 

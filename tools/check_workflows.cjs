@@ -111,11 +111,42 @@ const assert = require('node:assert/strict');
     await page.locator('.workspace-nav [data-view=library]').click();
     await page.locator('#paperList [data-paper]').first().click();
     await page.locator('#btnDelete').click();
+    await expect(page.locator('#paperList .list-item')).toHaveCount(1);
+    await expect(page.locator('#btnCompareSelected')).toBeDisabled();
+    await expect(page.locator('#libSummary')).toContainText('1');
     await page.locator('[data-view=trash]').first().click();
     await expect(page.locator('[data-restore-paper]')).toHaveCount(1);
     await page.locator('[data-restore-paper]').click();
     await expect(page.locator('[data-restore-paper]')).toHaveCount(0);
+    await page.locator('.workspace-nav [data-view=library]').click();
+    await expect(page.locator('#paperList .list-item')).toHaveCount(2);
+
+    // 空分组不误报为空库；删除正在筛选的分组后返回全库。
+    await page.locator('#btnCollection').click();
+    await page.locator('#researchTask [name=name]').fill('空分组');
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
+    const emptyGroup = await page.locator('#collectionFilter option', { hasText: '空分组' }).getAttribute('value');
+    await page.locator('#collectionFilter').selectOption(emptyGroup);
+    await expect(page.locator('#paperList')).toContainText('此分组暂无文献');
+    await page.locator('#btnCollection').click();
+    await page.locator(`[data-delete-group="${emptyGroup}"]`).click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
+    await expect(page.locator('#collectionFilter')).toHaveValue('');
+    await expect(page.locator('#paperList .list-item')).toHaveCount(2);
+
+    // 新工作流在深色主题与桌面最小窗口内保持可操作。
     await page.setViewportSize({ width: 1000, height: 660 });
+    await page.locator('#btnTheme').click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await page.locator('#btnPaperExport').click();
+    await expect(page.locator('#researchTask')).toBeVisible();
+    const submit = await page.locator('#researchTask [type=submit]').boundingBox();
+    assert(submit.x >= 0 && submit.y >= 0 && submit.x + submit.width <= 1000 && submit.y + submit.height <= 660);
+    await page.locator('#researchTask [name=format]').selectOption('bibtex');
+    const [bib] = await Promise.all([page.waitForEvent('download'), page.locator('#researchTask [type=submit]').click()]);
+    assert.equal(bib.suggestedFilename(), 'litprism.bib');
+    await expect(page.locator('#researchTask')).toHaveCount(0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(errors, []);
     console.log('Real API workflow acceptance passed: import guard + confirmation, groups, comparison, export, analysis, scoped chat, snapshots, preferences, skills, recommendations, recycle bin.');

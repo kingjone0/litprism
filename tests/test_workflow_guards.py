@@ -225,7 +225,11 @@ def test_create_download_and_archive_delivery_validate_sources(env):
     assert r.status_code == 200
     downloaded = client.get('/api/deliverables/'+r.json()['id']+'/download')
     assert downloaded.status_code == 200 and '## 引用来源' in downloaded.text
+    store = DeliverableStore(kb)
+    assert store.get(r.json()['id']).status == 'exported'
+    store.update(r.json()['id'], status='final')
     assert client.get('/api/deliverables-archive').content.startswith(b'PK')
+    assert store.get(r.json()['id']).status == 'final'
     kb.update_paper(pid, verify_level='not_found')
     assert client.get('/api/deliverables/'+r.json()['id']+'/download').status_code == 409
     assert client.get('/api/deliverables-archive').status_code == 409
@@ -302,3 +306,40 @@ def test_legacy_setting_cannot_disable_required_citation_check(env):
     cfg.qa.strict_citation_check = False
     model.text = '错误来源 [P999 p.999]'
     assert not QAAgent(kb, cfg, model).ask('alphatopic').citation_check_passed
+
+
+@pytest.mark.parametrize('concept_result', [[], [{'term': 'Bad', 'definition': '错误 [P999 p.9]'}], 'error'])
+def test_reanalysis_clears_old_concepts_and_persists_latest_result(env, concept_result):
+    from litprism.extract import analyze_paper
+    cfg, kb, _, client = env
+    pid = paper(kb)
+    kb.add_concepts(pid, [{'term': 'Old', 'definition': '旧模型结果'}])
+    class Extraction(Model):
+        def chat_json(self, messages, task='', **kw):
+            if task == 'concepts':
+                if concept_result == 'error':
+                    raise RuntimeError('offline failure')
+                return {'concepts': concept_result}
+            return super().chat_json(messages, task=task, **kw)
+    result = analyze_paper(kb, cfg, Extraction(), pid, force=True)
+    assert result['concepts'] == []
+    assert kb.list_concepts(pid) == []
+    assert kb.get_analysis(pid)['payload'] == result
+    detail = client.get('/api/paper/'+pid).json()
+    assert detail['analysis']['concepts'] == []
+    assert 'Old' not in detail['markdown']
+
+
+def test_malformed_extraction_fields_cannot_break_detail_or_export(env):
+    from litprism.extract import analyze_paper, format_analysis
+    cfg, kb, _, client = env
+    pid = paper(kb)
+    class Extraction(Model):
+        def chat_json(self, messages, **kw):
+            return {'research_question': ['无效字段 [P1 p.1]'], 'keywords': 42,
+                    'concepts': [{'term': 'Injected', 'definition': '未检查'}]}
+    result = analyze_paper(kb, cfg, Extraction(), pid, with_concepts=False)
+    assert result['research_question'] == '' and result['keywords'] == []
+    assert not result['_citation_check']['passed']
+    assert 'Injected' not in format_analysis(kb.get_paper(pid), result)
+    assert client.get('/api/paper/'+pid).status_code == 200

@@ -248,6 +248,11 @@ async function loadSidebar() {
     api('/api/skills').catch(() => ({ items: [], stats: {} })),
   ]);
   S.papers = papers.items || [];
+  if (S.selectedPapers) {
+    S.selectedPapers = new Set([...S.selectedPapers].filter(id => S.papers.some(p => p.id === id)));
+    $('#btnCompareSelected').disabled = S.selectedPapers.size < 2;
+  }
+  S.compareKey = null;
   S.conversations = convs.items || [];
   S.skills = skills.items || [];
 
@@ -329,8 +334,8 @@ async function loadLibrary() {
   if (!items.length) {
     box.innerHTML = `<div class="empty">
       <div class="empty-mark">${icon('library')}</div>
-      <div class="title">${q ? '没有匹配的论文' : '知识库还是空的'}</div>
-      <div class="desc">${q ? '换个标题或作者关键词试试。' : '点击「导入文献」或拖入 PDF，完成核验后开始阅读。核验未通过时可查看原因并人工确认。'}</div>
+      <div class="title">${q ? '没有匹配的论文' : group ? '此分组暂无文献' : '知识库还是空的'}</div>
+      <div class="desc">${q ? '换个标题或作者关键词试试。' : group ? '切换到全部分组，或将已有文献移入此分组。' : '点击「导入文献」或拖入 PDF，完成核验后开始阅读。核验未通过时可查看原因并人工确认。'}</div>
     </div>`;
     return;
   }
@@ -470,7 +475,7 @@ async function loadPaperDetail() {
     $('#btnDelete').onclick = () => {
       if (!confirm('移入回收站？该论文将不再出现在检索与问答中。')) return;
       api(`/api/paper/${encodeURIComponent(S.activePaper)}`, { method: 'DELETE' })
-        .then(() => { toast('已移入回收站'); S.activePaper = null; S.tabs = S.tabs.filter(t => t !== 'paper'); loadSidebar(); openView('library'); })
+        .then(async () => { toast('已移入回收站'); S.activePaper = null; S.tabs = S.tabs.filter(t => t !== 'paper'); await refreshLibrary(); openView('library'); })
         .catch(e => toast(e.message, true));
     };
 
@@ -798,6 +803,7 @@ async function loadDeliverables() {
     const name = item?.title || 'deliverable';
     try {
       await downloadApi(`/api/deliverables/${encodeURIComponent(b.dataset.dexport)}/download`, `${name}.md`);
+      await loadDeliverables();
       toast('已生成带引用来源的下载文件');
     } catch (e) { toast(e.message, true); }
   });

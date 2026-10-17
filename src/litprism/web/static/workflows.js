@@ -54,7 +54,7 @@ async function refreshCollections() {
   const filter = $('#collectionFilter');
   const value = filter.value;
   filter.innerHTML = '<option value="">全部分组</option>' + S.collections.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
-  filter.value = value;
+  filter.value = S.collections.some(c => c.id === value) ? value : '';
 }
 
 function showConversationDialog() {
@@ -192,7 +192,7 @@ async function loadTrash() {
   const data = await api('/api/trash');
   $('#trashList').innerHTML = (data.items || []).map(p => `<div class="list-item"><div class="list-main">${esc(p.display_title || p.title)}<p class="muted">${esc(p.deleted_at)}</p></div><button class="btn" data-restore-paper="${esc(p.id)}">恢复文献</button></div>`).join('') || '<div class="empty">回收站为空。</div>';
   $$('[data-restore-paper]').forEach(b => b.onclick = async () => {
-    try { await api('/api/trash/' + b.dataset.restorePaper + '/restore', { method: 'POST' }); await loadTrash(); await loadSidebar(); }
+    try { await api('/api/trash/' + b.dataset.restorePaper + '/restore', { method: 'POST' }); await loadTrash(); await refreshLibrary(); }
     catch (error) { toast(error.message, true); }
   });
 }
@@ -204,7 +204,7 @@ async function manageCollections() {
   }, '创建分组');
   $$('[data-rename-group]', d).forEach(b => b.onclick = () => {
     const c = S.collections.find(x => x.id === b.dataset.renameGroup); d.close();
-    workflowDialog('重命名分组', `<input class="input" name="name" value="${esc(c.name)}" required>`, async v => { await api('/api/collections/' + c.id, { method: 'PATCH', body: v }); await refreshCollections(); });
+    workflowDialog('重命名分组', `<input class="input" name="name" value="${esc(c.name)}" required>`, async v => { await api('/api/collections/' + c.id, { method: 'PATCH', body: v }); await refreshCollections(); await refreshLibrary(); });
   });
   $$('[data-delete-group]', d).forEach(b => b.onclick = async () => {
     if (!confirm('删除此分组？文献会保留在未分组中。')) return;
