@@ -32,6 +32,15 @@ from .relations import cluster, compute_relations
 from .search import import_record, search_external, search_local
 from .textutil import extract_doi, truncate
 from .verify import PaperVerifier
+from .whitelist import (
+    LEVELS,
+    Whitelist,
+    WhitelistError,
+    badge,
+    format_entries,
+    is_citable,
+    label,
+)
 
 # Windows 控制台强制 UTF-8，避免中文乱码
 try:
@@ -91,7 +100,8 @@ class Ctx:
     @property
     def verifier(self) -> PaperVerifier:
         if self._verifier is None:
-            self._verifier = PaperVerifier(self.cfg)
+            # 挂上白名单：人工确认过的文献不再重复走网络核验
+            self._verifier = PaperVerifier(self.cfg, Whitelist(self.kb))
         return self._verifier
 
 
@@ -362,13 +372,20 @@ def cmd_verify(ctx: Ctx, args) -> int:
     vr = ctx.verifier.verify(title=query, doi=doi, log=True)
     print(f"  查询：{query or doi}")
     print(f"  结果：{vr.message}")
-    kv("判定", vr.level)
+    kv("判定", f"{vr.level}  {badge(vr.level)}")
     kv("是否存在", "是" if vr.exists else "否")
     kv("置信度", f"{vr.confidence:.4f}")
     kv("响应数据源", "、".join(vr.sources_ok) or "无")
     if vr.sources_failed:
         kv("失败数据源", "、".join(vr.sources_failed))
     kv("耗时", f"{vr.elapsed_ms} ms")
+
+    if vr.manual:
+        print()
+        kv("白名单条目", vr.whitelist_id or "-")
+        kv("确认时自动判定", label(vr.original_level or ""))
+        kv("确认依据", vr.confirm_reason)
+
     if vr.matches:
         print("\n  候选匹配：")
         for m in vr.matches:
@@ -376,8 +393,83 @@ def cmd_verify(ctx: Ctx, args) -> int:
             print(f"      {', '.join(m.authors[:4]) or '-'} · {m.year or '-'} · {m.venue or '-'}")
             if m.doi:
                 print(f"      DOI: {m.doi}   {m.url or ''}")
+
+    # ---- 人工确认放行 ----
+    if args.confirm:
+        print()
+        title("人工确认放行")
+        if vr.level == "verified":
+            print("  该文献已通过自动核验，无需人工确认。")
+        else:
+            try:
+                entry = Whitelist(ctx.kb).add(
+                    title=query or (vr.best_match.title if vr.best_match else doi or ""),
+                    reason=args.confirm,
+                    doi=doi,
+                    level_at_confirm=vr.level,
+                    verify_evidence=vr.to_dict(),
+                )
+            except WhitelistError as e:
+                err(str(e))
+                return 2
+            ok(f"已加入白名单 {entry.id}")
+            print(f"  确认时自动判定：{label(entry.level_at_confirm)}（保留原判定，不覆盖）")
+            print(f"  依据：{entry.reason}")
+            print()
+            print("  说明：白名单是**记录在案的例外**，不是抹掉证据的重写 ——")
+            print("        verify_evidence 里保留了确认当时的完整核验结果，将来可复核。")
+            print("        引用时徽章显示为「人工确认」，与自动核验的「已核验」区分。")
+
     if args.json:
         print(json.dumps(vr.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_whitelist(ctx: Ctx, args) -> int:
+    wl = Whitelist(ctx.kb)
+
+    if args.action == "add":
+        if not args.title:
+            err("请提供标题：whitelist add \"论文标题\" --reason \"确认依据\"")
+            return 1
+        try:
+            entry = wl.add(
+                title=args.title,
+                reason=args.reason or "",
+                doi=args.doi,
+                level_at_confirm=args.level,
+            )
+        except WhitelistError as e:
+            err(str(e))
+            return 2
+        title("加入白名单")
+        ok(f"已加入 {entry.id}")
+        print(f"  {entry.render()}")
+        return 0
+
+    if args.action == "remove":
+        if not args.id:
+            err("请提供白名单条目 id")
+            return 1
+        title("移除白名单")
+        ok(f"已移除 {args.id}") if wl.remove(args.id) else err(f"未找到 {args.id}")
+        return 0
+
+    title("人工确认白名单")
+    entries = wl.list(limit=args.limit)
+    st = wl.stats()
+    print(f"  共 {st['total']} 条")
+    if st["by_original_verdict"]:
+        print(
+            "  按确认时自动判定："
+            + "、".join(f"{label(k)} {v}" for k, v in st["by_original_verdict"].items())
+        )
+    print()
+    print(format_entries(entries))
+    if entries:
+        print()
+        print("  注意：这些文献**不是自动核验通过**，而是人工确认放行。")
+        print("        引用时徽章显示「人工确认」，与「已核验」区分。")
     return 0
 
 
@@ -385,17 +477,34 @@ def cmd_import(ctx: Ctx, args) -> int:
     title("核验并导入外部文献")
     vr = ctx.verifier.verify(title=args.query or "", doi=args.doi, log=True)
     print(f"  核验：{vr.message}")
-    if not vr.exists:
-        err("未通过核验，拒绝导入（避免向本地知识库注入无法确认真实性的文献）")
+    if not is_citable(vr.level):
+        err(
+            f"未通过核验（{label(vr.level)}），拒绝导入"
+            "（避免向本地知识库注入无法确认真实性的文献）。"
+        )
+        print()
+        print("  如果你确认这篇文献真实存在，可以：")
+        print(f"    litprism verify \"{args.query or args.doi}\" --confirm \"你的确认依据\"")
+        print("  然后再导入。人工确认会留痕，徽章显示为「人工确认」而非「已核验」。")
         return 2
-    best = vr.best_match
-    rec = {
-        "title": best.title, "authors": best.authors, "year": best.year,
-        "venue": best.venue, "doi": best.doi, "url": best.url,
-        "abstract": best.abstract, "origin": "verified_import",
-    }
+
+    if vr.best_match is not None:
+        best = vr.best_match
+        rec = {
+            "title": best.title, "authors": best.authors, "year": best.year,
+            "venue": best.venue, "doi": best.doi, "url": best.url,
+            "abstract": best.abstract, "origin": "verified_import",
+        }
+    else:
+        # 人工确认放行：数据库没有命中记录，只能用工整的题录信息
+        rec = {
+            "title": args.query or vr.query_title,
+            "doi": args.doi,
+            "origin": "manual_confirmed_import",
+        }
     pid, _ = import_record(ctx.kb, rec, verification=vr, tags=["核验导入"])
-    ok(f"已导入 {pid}：{truncate(best.title, 60)}")
+    ok(f"已导入 {pid}：{truncate(rec['title'], 60)}")
+    print(f"  徽章：{badge(vr.level)}")
     return 0
 
 
@@ -777,6 +886,119 @@ def cmd_turns(ctx: Ctx, args) -> int:
     return 0
 
 
+def cmd_skill(ctx: Ctx, args) -> int:
+    from .skills.registry import SkillRegistry, format_entries
+    from .skills.runner import SkillRunner, format_result
+    from .skills.validate import format_result as format_validation
+
+    reg = SkillRegistry(ctx.cfg)
+
+    if args.action == "dir":
+        d = reg.ensure_dir()
+        title("Skill 目录")
+        print(f"  {d}")
+        print()
+        print("  每个 Skill 是一个子目录，内含：")
+        print("    skill.yaml   清单（元数据 / 输入契约 / 上下文声明 / 能力白名单 / 输出形态）")
+        print("    prompt.md    提示词模板，可用 {{变量}} 引用 inputs 中声明的输入")
+        print()
+        print("  ⚠️ 一期只支持**声明式** Skill，不支持自定义代码 ——")
+        print("     允许携带可执行代码等于开放任意代码执行入口。")
+        return 0
+
+    if args.action == "show":
+        if not args.skill_id:
+            err("请提供 skill id")
+            return 1
+        reg.discover()
+        entry = reg.get(args.skill_id)
+        if entry is None:
+            err(f"未找到 Skill {args.skill_id!r}")
+            return 1
+        title(f"Skill · {entry.name}")
+        kv("id", entry.id)
+        kv("版本", entry.version)
+        kv("状态", entry.status)
+        kv("说明", entry.manifest.description or "-")
+        kv("路径", entry.manifest.path)
+        kv("触发前缀", entry.manifest.prefix or "-")
+        kv("关键词", "、".join(entry.manifest.keywords) or "-")
+        kv("能力白名单", "、".join(entry.manifest.capabilities) or "（空）")
+        kv("输出形态", f"{entry.manifest.output_type}"
+           + (f" / {entry.manifest.deliverable_type}" if entry.manifest.output_type == "deliverable" else ""))
+        kv("要求引用", "是" if entry.manifest.citation_required else "否")
+        if entry.manifest.inputs:
+            print("\n  输入契约：")
+            for i in entry.manifest.inputs:
+                req = "必填" if i.required else "可选"
+                print(f"    · {i.key:<14} {i.label or i.key:<14} {i.type:<10} {req}")
+        if entry.manifest.context:
+            print("\n  上下文预取：")
+            for c in entry.manifest.context:
+                print(f"    · {c.capability}  {c.args or ''}")
+        print()
+        print(format_validation(entry.validation))
+        return 0
+
+    if args.action == "validate":
+        title("校验 Skill")
+        entries = reg.reload()
+        if args.skill_id:
+            entries = [e for e in entries if e.id == args.skill_id]
+            if not entries:
+                err(f"未找到 Skill {args.skill_id!r}")
+                return 1
+        if not entries:
+            print("  （没有可校验的 Skill）")
+            return 0
+        bad = 0
+        for e in entries:
+            print(format_validation(e.validation))
+            if not e.validation.ok:
+                bad += 1
+            print()
+        ok(f"{len(entries) - bad} / {len(entries)} 通过校验")
+        return 0 if bad == 0 else 2
+
+    if args.action == "run":
+        if not args.skill_id:
+            err("请提供 skill id")
+            return 1
+        inputs: dict = {}
+        for pair in args.input or []:
+            if "=" not in pair:
+                err(f"--input 需要 key=value 形式，收到 {pair!r}")
+                return 1
+            k, v = pair.split("=", 1)
+            inputs[k.strip()] = v.strip()
+
+        reg.discover()
+        entry = reg.get(args.skill_id)
+        if entry is None:
+            err(f"未找到 Skill {args.skill_id!r}")
+            return 1
+        title(f"执行 Skill · {entry.name}")
+        runner = SkillRunner(ctx.kb, ctx.cfg, llm=None if args.dry_run else ctx.llm, registry=reg)
+        result = runner.run(args.skill_id, inputs, dry_run=args.dry_run)
+        print(format_result(result))
+        if result.answer and not args.dry_run:
+            print()
+            print(result.answer)
+        return 0 if result.ok else 2
+
+    # 默认：列表
+    title("Skill 列表")
+    entries = reg.discover()
+    st = reg.stats()
+    if st["empty"]:
+        print("  " + reg.empty_state_text().replace("\n", "\n  "))
+        return 0
+    print(f"  共 {st['total']} 个（可用 {st['usable']}，异常 {st['failed']}）")
+    print()
+    print(format_entries(entries))
+    return 0
+
+
 def cmd_rules(ctx: Ctx, args) -> int:
     from .invariants import describe_rules
 
@@ -862,8 +1084,24 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("query", nargs="?", help="论文标题")
     a.add_argument("--doi", help="按 DOI 核验（最可靠）")
     a.add_argument("--auto-doi", action="store_true", help="从标题参数里自动抽取 DOI")
+    a.add_argument(
+        "--confirm",
+        metavar="依据",
+        help="核验未通过时人工确认放行。依据必填，会留痕并保留原判定",
+    )
     a.add_argument("--json", action="store_true", help="输出完整 JSON")
     a.set_defaults(func=cmd_verify)
+
+    a = sub.add_parser("whitelist", help="人工确认白名单（记录在案的例外）")
+    a.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"])
+    a.add_argument("title", nargs="?", help="论文标题（action=add）")
+    a.add_argument("--reason", help="确认依据（必填）：为什么认为这篇文献真实存在")
+    a.add_argument("--doi")
+    a.add_argument("--id", help="白名单条目 id（action=remove）")
+    a.add_argument("--level", default="not_found", choices=list(LEVELS),
+                   help="确认时的自动核验判定（默认 not_found）")
+    a.add_argument("--limit", type=int, default=100)
+    a.set_defaults(func=cmd_whitelist)
 
     a = sub.add_parser("import", help="核验外部文献并导入本地知识库")
     a.add_argument("query", nargs="?", help="标题")
@@ -942,6 +1180,16 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("conversation", nargs="?", help="会话 id / 标题片段")
     a.add_argument("--limit", type=int, default=20)
     a.set_defaults(func=cmd_turns)
+
+    # ---- Skill 框架 ----
+    a = sub.add_parser("skill", help="Skill 管理（一期只建框架，不内置任何 Skill）")
+    a.add_argument("action", nargs="?", default="list",
+                   choices=["list", "show", "validate", "run", "dir"])
+    a.add_argument("skill_id", nargs="?", help="Skill id")
+    a.add_argument("--input", action="append", metavar="key=value",
+                   help="执行输入，可重复；如 --input topic=注意力机制")
+    a.add_argument("--dry-run", action="store_true", help="只组装提示词，不调用模型")
+    a.set_defaults(func=cmd_skill)
 
     a = sub.add_parser("serve", help="启动 Web 界面")
     a.add_argument("--host", default="127.0.0.1")

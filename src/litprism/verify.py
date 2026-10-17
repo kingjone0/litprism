@@ -47,6 +47,11 @@ from .textutil import (
     title_similarity,
     truncate,
 )
+from .whitelist import LEVEL_LABELS, Whitelist, normalize_level
+
+
+def _level_label(level: str | None) -> str:
+    return LEVEL_LABELS.get(normalize_level(level), level or "未知")
 
 USER_AGENT = "LitPrism/1.0 (academic paper verification; +https://github.com/)"
 _CACHE_TTL = timedelta(days=7)
@@ -80,7 +85,7 @@ class VerificationResult:
     query_title: str = ""
     doi: str | None = None
     exists: bool = False
-    level: str = "unchecked"        # verified | likely | not_found | unchecked
+    level: str = "unchecked"        # verified | manual_confirmed | likely | not_found | unchecked
     confidence: float = 0.0
     best_match: SourceRecord | None = None
     matches: list[SourceRecord] = field(default_factory=list)
@@ -90,13 +95,28 @@ class VerificationResult:
     checked_at: str = ""
     elapsed_ms: int = 0
     cached: bool = False
+    # ---- 人工确认相关 ----
+    manual: bool = False                    # 是否由人工确认放行
+    whitelist_id: str | None = None         # 命中的白名单条目
+    confirm_reason: str = ""                # 用户填写的确认依据
+    original_level: str | None = None       # 人工确认**之前**自动核验判了什么
 
     @property
     def verified(self) -> bool:
+        return self.level in ("verified", "manual_confirmed")
+
+    @property
+    def auto_verified(self) -> bool:
+        """仅自动核验通过（不含人工确认）。"""
         return self.level == "verified"
 
     @property
     def message(self) -> str:
+        if self.level == "manual_confirmed":
+            return (
+                f"🔵 人工确认放行：自动核验当时判定为「{_level_label(self.original_level or '')}」，"
+                f"已由用户确认并留痕。依据：{truncate(self.confirm_reason, 60)}"
+            )
         if self.level == "verified":
             if self.best_match is None:
                 return f"✅ 已核验（置信度 {self.confidence:.2f}）"
@@ -454,8 +474,9 @@ class SemanticScholarSource:
 # 核验器
 # ---------------------------------------------------------------------------
 class PaperVerifier:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, whitelist: Whitelist | None = None):
         self.cfg = cfg
+        self.whitelist = whitelist
         self.http = _Http(cfg.cache_path, timeout=25)
         self._sources: dict[str, Any] = {}
         if cfg.sources.crossref.enabled:
@@ -488,6 +509,7 @@ class PaperVerifier:
         year: int | None = None,
         arxiv_id: str | None = None,
         log: bool = False,
+        skip_whitelist: bool = False,
     ) -> VerificationResult:
         t0 = time.time()
         res = VerificationResult(
@@ -499,6 +521,26 @@ class PaperVerifier:
             res.level = "unchecked"
             res.errors.append("缺少标题与 DOI，无法核验")
             return res
+
+        # ---- 白名单：命中即放行，且**保留**确认当时的自动判定 ----
+        # 白名单是记录在案的例外，不是抹掉证据的重写：
+        # original_level 会带上"确认当时自动核验判了什么"，将来复核时能分清
+        # 哪些是机器判的、哪些是人拍的板。
+        if self.whitelist is not None and not skip_whitelist:
+            entry = self.whitelist.find(doi=res.doi, title=title or None)
+            if entry is not None:
+                res.level = "manual_confirmed"
+                res.exists = True
+                res.manual = True
+                res.whitelist_id = entry.id
+                res.confirm_reason = entry.reason
+                res.original_level = entry.level_at_confirm
+                res.confidence = 1.0
+                res.sources_ok = ["whitelist"]
+                res.elapsed_ms = int((time.time() - t0) * 1000)
+                if log:
+                    self._write_log(title or (res.doi or ""), res)
+                return res
 
         collected: list[SourceRecord] = []
         doi_hit = False
@@ -580,12 +622,17 @@ class PaperVerifier:
 
         res.elapsed_ms = int((time.time() - t0) * 1000)
         if log:
-            try:
-                from .db import KnowledgeBase
-                KnowledgeBase(self.cfg).log_verification(title or (res.doi or ""), res.to_dict())
-            except Exception:
-                pass
+            self._write_log(title or (res.doi or ""), res)
         return res
+
+    def _write_log(self, query: str, res: VerificationResult) -> None:
+        """写核验审计日志。**失败不阻断** —— 日志写不进去不该让核验失败。"""
+        try:
+            from .db import KnowledgeBase
+
+            KnowledgeBase(self.cfg).log_verification(query, res.to_dict())
+        except Exception:  # noqa: BLE001
+            pass
 
     def verify_record(self, rec: SourceRecord, log: bool = False) -> VerificationResult:
         return self.verify(

@@ -9,6 +9,7 @@ from .db import KnowledgeBase
 from .query import build_or_fts_query, expand_query
 from .textutil import normalize_doi, normalize_title, title_similarity, truncate
 from .verify import ArxivSource, OpenAlexSource, PaperVerifier, SourceRecord, VerificationResult
+from .whitelist import is_citable
 
 
 # ---------------------------------------------------------------------------
@@ -242,14 +243,19 @@ def import_record(
     """把一条（已核验的）外部文献记录导入本地知识库。
 
     返回 ``(paper_id, created)``。若记录未通过核验则拒绝导入。
+
+    五态里只有 ``verified`` 与 ``manual_confirmed`` 可以进库 ——
+    后者是人工确认放行，属于记录在案的例外，``verify_evidence`` 会保留
+    确认当时的自动判定，不把人的判断伪装成机器的结论。
     """
     level = (record.get("verification") or {}).get("level")
     if verification is not None:
         level = verification.level
-    if level in ("not_found", "unchecked"):
+    if not is_citable(level):
         raise ValueError(
-            f"拒绝导入：该文献未通过真实性核验（level={level}）。"
-            "本地知识库只接受已在权威数据库命中的文献，以避免污染检索结果。"
+            f"拒绝导入：该文献未通过真实性核验（level={level or 'unknown'}）。"
+            "本地知识库只接受已在权威数据库命中的文献，或经人工确认放行的文献，"
+            "以避免污染检索结果。"
         )
 
     vr_dict = verification.to_dict() if verification else record.get("verification", {})
@@ -265,7 +271,8 @@ def import_record(
         source=record.get("origin") or record.get("source") or "external",
         origin=record.get("url") or record.get("doi"),
         tags=tags or ["外部导入"],
-        verify_status="verified" if level == "verified" else "unverified",
+        # verify_status 与 verify_level 保持同一取值，避免两套状态互相打架
+        verify_status=level or "verified",
         verify_level=level or "verified",
         verify_confidence=float((verification.confidence if verification else 1.0)),
         verify_evidence=vr_dict,

@@ -16,6 +16,7 @@ from .prompts import COMPARE_SYSTEM, QA_SYSTEM, RECOMMEND_SYSTEM
 from .search import citing_works, related_works, search_external, search_local
 from .textutil import parse_citations, title_similarity, truncate
 from .verify import PaperVerifier
+from .whitelist import badge, is_citable
 
 
 # ===========================================================================
@@ -379,8 +380,10 @@ class RecommendAgent:
                         "abstract": p.get("abstract"), "citation_count": None,
                         "sources": ["local"], "origin": "local_library",
                         "verification": {
-                            "level": p.get("verify_level") or "unverified",
-                            "exists": (p.get("verify_level") == "verified"),
+                            "level": p.get("verify_level") or "unchecked",
+                            # 人工确认的文献同样算「存在」，但 level 保留 manual_confirmed，
+                            # 让调用方能区分「机器核到的」与「人确认的」
+                            "exists": is_citable(p.get("verify_level")),
                             "confidence": p.get("verify_confidence") or 0.0,
                             "basis": "本地知识库中的文献", "sources": ["local"],
                         },
@@ -449,7 +452,7 @@ class RecommendAgent:
             for c in fresh:
                 if c.get("_paper_id"):
                     continue
-                if (c.get("verification") or {}).get("level") != "verified":
+                if not is_citable((c.get("verification") or {}).get("level")):
                     continue
                 try:
                     pid, _ = import_record(self.kb, c, tags=["推荐导入", f"seed:{query[:40]}"])
@@ -482,9 +485,7 @@ def render_recommendation(data: dict) -> str:
     lines.append("")
     for i, c in enumerate(data.get("items") or [], 1):
         v = c.get("verification") or {}
-        badge = {"verified": "✅已核验", "likely": "⚠️疑似", "not_found": "❌未核到"}.get(
-            v.get("level", ""), "❔未核验"
-        )
+        mark = badge(v.get("level"))
         lines.append(f"### {i}. {c['title']}")
         meta = []
         if c.get("authors"):
@@ -493,7 +494,7 @@ def render_recommendation(data: dict) -> str:
             meta.append(str(c["year"]))
         if c.get("venue"):
             meta.append(c["venue"])
-        meta.append(badge)
+        meta.append(mark)
         if c.get("citation_count") is not None:
             meta.append(f"被引 {c['citation_count']}")
         if c.get("already_in_library"):

@@ -26,6 +26,7 @@ from .config import Config
 from . import schema as _schema
 from .refs import make_ref
 from .textutil import build_fts_query, cjk_segment, paper_fingerprint, truncate
+from .whitelist import badge
 
 # Schema 定义与迁移已抽到 schema.py —— 单一事实来源
 SCHEMA = _schema.SCHEMA_V1          # 兼容旧引用；新代码请直接用 schema.py
@@ -599,7 +600,6 @@ class KnowledgeBase:
     def paper_brief(self, paper: dict, width: int = 72) -> str:
         authors = paper.get("authors") or []
         a = ", ".join(authors[:3]) + (" 等" if len(authors) > 3 else "")
-        mark = {"verified": "✅已核验", "not_found": "⚠️未核到", "unverified": "❔未核验"}.get(
-            paper.get("verify_status", ""), "❔"
-        )
+        # 徽章统一由 whitelist.badge() 产出 —— 自动核验与人工确认必须视觉可区分
+        mark = badge(paper.get("verify_level") or paper.get("verify_status"))
         return f"[{paper['id']}] {truncate(paper['title'], width)}\n    {a or '作者未知'} · {paper.get('year') or '年份未知'} · {mark}"

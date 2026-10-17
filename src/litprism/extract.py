@@ -12,6 +12,7 @@ from .db import KnowledgeBase
 from .llm import LLMError
 from .prompts import CONCEPTS_SYSTEM, EXTRACT_SYSTEM
 from .textutil import truncate
+from .whitelist import label
 
 # 优先纳入上下文的章节（按重要性排序）
 _PRIORITY_SECTIONS = ["摘要", "引言", "相关工作", "方法", "实验", "结果", "消融实验", "讨论", "结论", "局限", "未来工作", "正文"]
@@ -183,6 +184,12 @@ def _verify_badge(paper: dict) -> str:
     conf = paper.get("verify_confidence") or 0
     if level == "verified":
         return f"✅ 已核验（置信度 {conf:.2f}）"
+    if level == "manual_confirmed":
+        # 人工确认与自动核验**必须区分** —— 前者是人的判断，后者是机器的结论
+        return (
+            f"🔵 人工确认放行（确认时自动判定为「{label(paper.get('original_level') or '')}」）。"
+            "这是记录在案的例外，不是自动核验通过。"
+        )
     if level == "likely":
         return f"⚠️ 疑似匹配，需人工确认（相似度 {conf:.2f}）"
     if level == "not_found":
