@@ -2,7 +2,7 @@
 
 > **给接手的 agent 看的第一份文档。**
 > 这里记录的是**实测过的现状**，不是设计意图。凡标「推断」的都是未验证的，请先验证再行动。
-> 最后更新：2026-10-18（功能守卫与桌面流程补齐：551 项测试通过；真实本地 API 无窗口流程通过；功能补齐已提交 d5f0305；兼容性补修回归通过，未重新打包，F3 暂停）
+> 最后更新：2026-10-18（553 项测试通过；CommandCode DeepSeek V4.1 Flash 真实短任务通过；提供方兼容性补修完成并纳入提交，未重新打包，F3 暂停）
 
 ---
 
@@ -21,7 +21,7 @@
 PY="C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
 cd E:/aicoding/paper-research-agent
 
-# 测试（当前：551 passed；路径单测要求测试进程不带 LITPRISM_HOME）
+# 测试（当前：553 passed；路径单测要求测试进程不带 LITPRISM_HOME）
 $PY -m pytest tests -q
 
 # CLI
@@ -78,6 +78,10 @@ curl -s --noproxy '*' -H "X-LitPrism-Token: $T" http://127.0.0.1:8899/api/status
 ---
 
 ## 3. 进度矩阵（截至 2026-10-18）
+
+### 真实提供方增量
+
+CommandCode 的 `deepseek/deepseek-v4.1-flash` 已通过真实短问答、追问、解读/术语与对比（仅合成资料）。Key 经用户授权存入独立数据根的 DPAPI SecretStore，未切换默认模型。发现并修复输出截断提示、对比返回类型及 UI 术语读取，553 项测试和非空术语 UI 流程通过；这些补修已纳入本轮提交。详见功能补齐进度末节。
 
 ### 当前增量：先补功能，暂停打包
 

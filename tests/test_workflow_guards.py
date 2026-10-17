@@ -343,3 +343,35 @@ def test_malformed_extraction_fields_cannot_break_detail_or_export(env):
     assert not result['_citation_check']['passed']
     assert 'Injected' not in format_analysis(kb.get_paper(pid), result)
     assert client.get('/api/paper/'+pid).status_code == 200
+
+
+def test_output_token_limit_is_reported_without_identical_retries(monkeypatch):
+    from litprism.config import LLMConfig
+    from litprism.llm import OpenAICompatClient, OutputLimitError
+    calls = []
+    def respond(*a, **kw):
+        calls.append(kw)
+        return SimpleNamespace(status_code=200, json=lambda: {
+            'choices': [{'finish_reason': 'length', 'message': {'content': '{"partial":'}}],
+            'usage': {'completion_tokens': 100}})
+    monkeypatch.setattr('litprism.llm.requests.post', respond)
+    model = OpenAICompatClient(LLMConfig())
+    with pytest.raises(OutputLimitError, match='输出 token 上限'):
+        model.chat_json([{'role': 'user', 'content': 'test'}])
+    assert len(calls) == 1
+    assert model.last_usage == {'completion_tokens': 100}
+
+
+def test_compare_accepts_single_cited_statement_without_character_iteration(env):
+    cfg, kb, _, _ = env
+    ids = [paper(kb), paper(kb, title='Second')]
+    class Comparison(Model):
+        def chat_json(self, messages, **kw):
+            return {'summary': '结论 [P1 p.1]', 'dimensions': [],
+                    'convergence': '一致点 [P1 p.1][P2 p.1]', 'divergence': '',
+                    'evidence_map': [{'claim': '结论', 'sources': 'P1 p.1'}]}
+    result = CompareAgent(kb, cfg, Comparison()).compare(ids)
+    assert result['_citation_check']['passed']
+    assert result['convergence'] == ['一致点 [P1 p.1][P2 p.1]']
+    assert result['divergence'] == []
+    assert result['evidence_map'][0]['sources'] == ['P1 p.1']

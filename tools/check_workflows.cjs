@@ -59,6 +59,8 @@ const assert = require('node:assert/strict');
     await page.locator('#paperList [data-paper]').first().click();
     await page.locator('#btnReanalyze').click();
     await expect(page.locator('#paperDetail')).toContainText('offline:acceptance-fixture');
+    await page.locator('[data-ptab=concepts]').click();
+    await expect(page.locator('[data-ppane=concepts]')).toContainText('alphatopic');
 
     // 新建会话范围、问答、原文证据与每轮请求快照。
     await page.locator('#btnNewConv').click();

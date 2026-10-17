@@ -288,12 +288,16 @@ class CompareAgent:
                 blocks.append(f"[{tag}] D{index} {location}\n{chunk['text']}")
         prompt = '\n\n'.join(blocks)
         system = SYSTEM_ACADEMIC + "\n仅比较给定原文，不使用先前解读作为事实。维度缺信息写未提及。输出 JSON：summary, dimensions（每项 dimension, values，键为 D1/D2 等论文编号）, convergence, divergence, evidence_map。每个非空学术结论标注 [P# p.N]，P 是原文片段编号；无页码来源不写页码。"
+        system += '\n严格使用以下结构：{"summary":"结论 [P1 p.3]","dimensions":[{"dimension":"方法","values":{"D1":"方法 [P1 p.3]","D2":"方法 [P2 p.3]"}}],"convergence":["一致点 [P1 p.3][P2 p.3]"],"divergence":["差异 [P1 p.3][P2 p.3]"],"evidence_map":[{"claim":"结论","sources":["P1 p.3","P2 p.3"]}]}。这里页码仅为格式示例，必须替换为实际页码。convergence、divergence、sources 必须是字符串数组，无结论则用空数组。'
         if aspects:
             prompt += '\n关注维度：' + '、'.join(aspects)
         messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}]
         if sum(meter.estimate_message(m) for m in messages) > self.cfg.context.available_tokens:
             raise ValueError('对比原文超过上下文预算，请减少论文数量或分批对比。')
         data = self.llm.chat_json(messages, task='compare')
+        for key in ('convergence', 'divergence'):
+            if isinstance(data.get(key), str):
+                data[key] = [data[key]] if data[key].strip() else []
         texts = [str(data.get('summary') or '')]
         for dimension in data.get('dimensions') or []:
             texts.extend(str(v) for v in (dimension.get('values') or {}).values() if v and v != '未提及')
@@ -304,7 +308,12 @@ class CompareAgent:
             if text.strip():
                 issues.extend(citation_issues(text, excerpts))
         for item in data.get('evidence_map') or []:
-            issues.extend(citation_issues(' '.join('['+str(v).strip('[]')+']' for v in item.get('sources') or []), excerpts))
+            refs = item.get('sources') or []
+            if isinstance(refs, str):
+                refs = [refs]
+                item['sources'] = refs
+            issues.extend(citation_issues(' '.join('['+str(v).strip('[]')+']' for v in refs), excerpts))
+        issues = list(dict.fromkeys(issues))
         data['_citation_check'] = {'passed': not issues, 'issues': issues}
         data['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': e['paper_id'], 'page': e['page']} for e in excerpts]
         data['_model'] = getattr(self.llm, 'name', 'unknown')

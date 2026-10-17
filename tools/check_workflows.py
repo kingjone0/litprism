@@ -30,7 +30,7 @@ class AcceptanceModel:
             return {'research_question': '用于离线验收的原文描述 [P1 p.1]',
                     'field_evidence': {'research_question': ['P1 p.1']}}
         if task == 'concepts':
-            return {'concepts': []}
+            return {'concepts': [{'term': 'alphatopic', 'definition': '用于离线验收的原文描述 [P1 p.1]', 'category': '方法'}]}
         if task == 'compare':
             return {'summary': '用于离线验收的原文描述 [P1 p.1]', 'dimensions': []}
         return {'answer': '用于离线验收的原文描述 [P1 p.1]'}

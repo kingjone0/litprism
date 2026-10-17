@@ -380,7 +380,7 @@ async function loadPaperDetail() {
     const p = d.paper || d;
     const a = d.analysis || {};
     S.paperAnalysis = a;
-    const concepts = d.concepts || [];
+    const concepts = d.concepts || a.concepts || [];
 
     box.innerHTML = `
       <div class="page-head">

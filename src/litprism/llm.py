@@ -33,6 +33,10 @@ class ContextWindowError(LLMError):
     pass
 
 
+class OutputLimitError(LLMError):
+    pass
+
+
 # ---------------------------------------------------------------------------
 # JSON 解析：容忍模型输出的 ```json 代码块、前后废话、尾随逗号
 # ---------------------------------------------------------------------------
@@ -107,8 +111,10 @@ class OpenAICompatClient:
                     raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}")
                 data = resp.json()
                 self.last_usage = data.get('usage')
+                if data['choices'][0].get('finish_reason') == 'length':
+                    raise OutputLimitError('模型达到输出 token 上限，结果不完整；请提高输出预算（推理模型的思考也占用此预算）或缩小任务。')
                 return data["choices"][0]["message"]["content"] or ""
-            except ContextWindowError:
+            except (ContextWindowError, OutputLimitError):
                 raise
             except Exception as e:  # noqa: BLE001
                 last_err = e
