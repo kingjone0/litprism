@@ -83,6 +83,11 @@ def create_app(cfg: Config) -> FastAPI:
         return HTMLResponse(html)
 
     # ---------------------------------------------------------------- 状态
+    @app.get("/api/ping")
+    def ping():
+        """存活探测。不读任何数据，也是外壳模式下唯一免 token 的 /api 路径。"""
+        return {"pong": True, "app": cfg.app.name}
+
     @app.get("/api/status")
     def status():
         return {

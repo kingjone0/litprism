@@ -31,10 +31,19 @@ $PY run.py add sample_papers/ --verify
 $PY run.py ask "这些论文在方法论上的核心差异是什么？"
 $PY run.py serve            # http://127.0.0.1:8765
 
-# 打包 sidecar（单文件 exe，约 145MB，耗时 ~2min）
+# 打包 sidecar（单文件 exe，约 139MB，耗时 ~2.5min）
 # ⚠️ 必须用这个脚本，别直接调 pyinstaller —— 否则产物会落到 ./dist 而不是 packaging/dist
 $PY packaging/build.py
 ./packaging/dist/litprism-sidecar.exe --port 8899
+
+# 桌面外壳（Electron）
+npm install                                  # 首次：装 @tauri-apps/cli + electron
+env -u ELECTRON_RUN_AS_NODE ./node_modules/electron/dist/electron.exe desktop-electron/main.js
+#   ↑ 必须去掉 ELECTRON_RUN_AS_NODE（宿主设的），否则 electron 以纯 Node 运行
+# 自证模式：加 LITPRISM_SELFTEST=1，页面会把 DOM 摘要与截图写到 _selftest.json/.png
+
+# Tauri 版（当前环境白屏，仅备选，见 §5.3）
+npx tauri build --debug --no-bundle
 #  → stdout: LITPRISM_READY {"port": 8899, "token": "...", "pid": null}
 #  → 所有 /api/* 必须带 X-LitPrism-Token 头，缺了返回 401
 
@@ -83,7 +92,7 @@ curl -s --noproxy '*' -H "X-LitPrism-Token: $T" http://127.0.0.1:8899/api/status
 | E1–E7 界面 | ✅ 完成 | 三栏 + 设置弹窗 + 自动压缩 + 会话删除 + 模型目录增量加入 |
 | F0 sidecar 握手 | ✅ 完成 | 200/401/401；静态资源不设防 |
 | F1 PyInstaller spike | ✅ **完成** | 三项验证全过，见 §5.1 |
-| F2 Tauri 工程 | ❌ 未开始 | — |
+| F2 外壳工程 | ✅ **完成（用 Electron）** | 窗口渲染 + 数据加载 + 进程回收均已实测，见 §5.3 |
 | W1–W3 联网检索 | 📐 仅设计 | `docs/联网检索与知识库扩充设计.md`，Key 已备 |
 
 ---
@@ -173,6 +182,49 @@ PDF 解析       → BERT 16 页 / 61 块                                       
 **留给 F2 的伏笔**：Tauri 前端 origin 是 `tauri://localhost`，请求 `127.0.0.1:PORT` 属跨源，
 需要给 sidecar 加 CORS（或走 Tauri 的 HTTP 插件代理）。这一条**尚未实测，属推断**。
 
+### 5.3 外壳选型：Tauri 白屏 → 改用 Electron（已定案）
+
+**结论先行**：外壳用 **`desktop-electron/main.js`**（约 150 行）。Tauri 工程保留在
+`src-tauri/` 作为备选，但**当前环境跑不起来**。
+
+**根因（实测，有日志）**：这台机器上 Chromium 的 **GPU 进程反复以 `0xC0000005`
+（访问违例）崩溃**，最终 `FATAL: GPU process isn't usable. Goodbye.`。
+Tauri 的 WebView2 与 Electron 用的是同一个 Chromium 底座，所以两者都白屏 ——
+**这不是框架问题，是环境问题**。Electron 加上
+`--disable-gpu / --disable-gpu-compositing / --disable-gpu-sandbox / --no-sandbox` +
+`app.disableHardwareAcceleration()` 后正常渲染。
+
+**最小判定实验怎么做的**（值得复用）：把内嵌页面换成一行 `PROBE-OK` 的 HTML，
+重建后再看。仍然全黑 ⇒ 排除了「我们的页面/资源路径有问题」，锁定为 webview 本身。
+
+**Electron 端的两个坑（都已修，别再踩）**：
+
+| 坑 | 症状 | 修法 |
+|---|---|---|
+| `spawn` 直接跑 `.bat` | `spawn EINVAL`，backend 起不来 | Windows 下经 `cmd /d /s /c` 调用 |
+| 先杀 onefile 启动器 | 应用退了 **sidecar 还活着** | 先用**握手行里的真实 pid** 杀，再收启动器（启动器一死，`/T` 就枚举不到子进程了） |
+
+**为什么窗口直接 `loadURL(后端地址)` 而不是内嵌前端**：Python 侧本来就用 FastAPI
+提供整套 UI（`run.py serve` 同一套），窗口加载它就是**同源**页面 —— 不需要 CORS、
+不需要注入脚本、不需要把前端打进壳里。token 走 URL hash（`#t=…`，不发给服务器、不进 Referer）。
+少一层就少一类坑，这是折腾 Tauri 一整轮换来的判断。
+
+**Tauri 侧的失败清单**（若将来要回来修，别重复试）：`navigate()` 返回 `Ok` 但 URL 不变；
+主线程再试一样；`WebviewUrl::External` 建窗时 `on_navigation` 放行（日志 `→ true`）仍 `about:blank`；
+运行期建窗同样 `about:blank`；`additionalBrowserArgs` 在 conf 里不生效（调试端口没开）。
+**注意**：以上都是在 GPU 已崩的前提下测的，加上 `--disable-gpu` 类参数后 Tauri 是否可用，
+**没有验证过**，不要据此断言"Tauri 不可用"。
+
+**调试工具**（都在仓库里，别再手搓）：
+- `LITPRISM_SELFTEST=1` + Electron → 页面把自己 DOM 摘要与截图写到 `_selftest.json/.png`。
+  **截图会被上层窗口遮挡，靠"拍屏幕"判断渲染状态不可靠**——这条弯路走过好几轮。
+- `packaging/_debug_sidecar.bat` —— 让外壳跑**源码版** sidecar（改 Python 不用等 2 分钟打包）。
+  纯 ASCII + CRLF，cmd.exe 按 GBK 读，中文注释会把整行读坏。
+- `tools/window_shot.py` —— 抓窗口截图（仅当自证不可用时）。WebView2 内容 `PrintWindow`
+  抓不到（全白）；`SetForegroundWindow` 会被前台锁定拒绝。
+- 跑 Electron 前必须 `env -u ELECTRON_RUN_AS_NODE`：宿主（WorkBuddy）设了这个变量，
+  否则 `electron.exe` 以纯 Node 身份运行，`require('electron').app` 是 undefined。
+
 ### 5.2 其它
 
 | 项 | 说明 |
@@ -190,8 +242,9 @@ PDF 解析       → BERT 16 页 / 61 块                                       
 ## 6. 下一步（建议顺序）
 
 1. ~~修 §5.1 的 frozen 路径~~ ✅ 已完成（2026-10-17）。
-2. **F2 Tauri 工程**：sidecar 生命周期 + IPC 握手 + 单实例锁 + **CORS/HTTP 插件**（见 §5.1 末尾）。
-3. **F3 NSIS 安装包**。
+2. ~~F2 外壳工程~~ ✅ 已完成（Electron，见 §5.3）。
+3. **F3 安装包**：`electron-builder`（NSIS）。要带 `packaging/dist/litprism-sidecar.exe` 作为 extraResource。
+   **注意**：本机 Chromium GPU 进程会崩，安装包里的启动参数必须保留 §5.3 那几个开关。
 4. **W1**：web_search provider（tavily/searxng）+ 正文提取 + 双通道提示词 + **双通道引用校验** + `web-source-list` 组件 + 对话「联网补充」开关。
 5. **W2**：答后入库编排（URL 论文特征检测 → 入库卡片 → 核验 → OA 下载 → ingest，**必须用户确认**）。
 6. **W3**：证据不足自动建议联网 + `schema v4` 的 `web_citations` 字段。

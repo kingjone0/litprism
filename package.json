@@ -1,0 +1,15 @@
+{
+  "name": "litprism-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "文献棱镜 LitPrism 桌面外壳的构建工具链（仅用于 Tauri CLI，前端无打包步骤）",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "tauri build",
+    "dev": "tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "electron": "^44.9.0"
+  }
+}

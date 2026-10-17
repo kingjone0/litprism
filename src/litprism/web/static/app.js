@@ -38,10 +38,50 @@ function short(s, n = 60) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+/* 后台地址与 token 由桌面外壳在握手完成后用 eval 推给页面（也可来自 URL fragment）。
+   两种来源都要认，且**必须等它到达**再发请求 —— 否则首屏会拿 401。 */
+let resolveEnv;
+const ENV_READY = new Promise(res => { resolveEnv = res; });
+
+window.__setLitPrismEnv = function (cfg) {
+  window.__LITPRISM__ = cfg || {};
+  resolveEnv(window.__LITPRISM__);
+};
+
+(function resolveEnvFromFragment() {
+  if (window.__LITPRISM__) return resolveEnv(window.__LITPRISM__);
+
+  const m = /(?:^|[#&])t=([^&]*)/.exec(location.hash || '');
+  if (m && m[1]) {
+    window.__setLitPrismEnv({ base: '', token: decodeURIComponent(m[1]) });
+    return;
+  }
+
+  /* 关键：桌面外壳里页面 origin 是 tauri://localhost，API 在后端端口上。
+     此时**绝不能**用空配置放行 —— 相对路径会打到 Tauri 的资源处理器，
+     请求根本到不了后端（表现是「界面空白、服务端零请求」，极难定位）。
+     必须等外壳把 base/token 推过来。 */
+  const inShell = location.protocol === 'tauri:' || /(^|\.)tauri\.localhost$/.test(location.hostname);
+  if (inShell) {
+    // 兜底：外壳彻底失败时也不能让界面永远卡住
+    setTimeout(() => resolveEnv(window.__LITPRISM__ || {}), 120000);
+    return;
+  }
+
+  // 浏览器直连 `run.py serve`：无外壳注入、无 token，立刻放行
+  resolveEnv({});
+})();
+
+function apiEnv() { return window.__LITPRISM__ || {}; }
+
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+  await ENV_READY;
+  const env = apiEnv();
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (env.token) headers['X-LitPrism-Token'] = env.token;
+  const res = await fetch((env.base || '') + path, {
     ...opts,
+    headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const text = await res.text();
