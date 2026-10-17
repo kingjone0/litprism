@@ -179,7 +179,8 @@ async function createWindow() {
     minWidth: 1000,
     minHeight: 660,
     title: '文献棱镜 LitPrism',
-    backgroundColor: '#0b1120',
+    backgroundColor: '#fcfcfa',
+    autoHideMenuBar: true,
     show: false,
     webPreferences: {
       // 页面由本地后台提供，不需要任何 Node 能力 —— 保持默认的隔离

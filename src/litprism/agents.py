@@ -79,9 +79,15 @@ class QAAgent:
         *,
         paper_ids: list[str] | None = None,
         top_k: int | None = None,
+        conversation_id: str | None = None,
+        before_seq: int | None = None,
     ) -> QAAnswer:
+        from .context.dialogue import HISTORY_GUARD, DialogueContext, build_dialogue
+        from .context.meter import Meter
+
+        dialogue = build_dialogue(self.kb, self.cfg, conversation_id, before_seq) if conversation_id else DialogueContext()
         top_k = top_k or self.cfg.retrieval.top_k
-        hits = search_local(self.kb, question, top_k=top_k, paper_ids=paper_ids, llm=self.llm)
+        hits = search_local(self.kb, dialogue.query(question), top_k=top_k, paper_ids=paper_ids, llm=self.llm)
         res = QAAnswer(question=question, model=getattr(self.llm, "name", "unknown"))
 
         if not hits:
@@ -132,7 +138,7 @@ class QAAgent:
             scope = "指定论文：" + "、".join(truncate(t["title"], 40) for t in titles if t)
 
         messages = [
-            {"role": "system", "content": QA_SYSTEM},
+            {"role": "system", "content": QA_SYSTEM + "\n\n" + HISTORY_GUARD + "\n\n" + dialogue.memory.prompt_block()},
             {
                 "role": "user",
                 "content": (
@@ -143,6 +149,21 @@ class QAAgent:
                 ),
             },
         ]
+
+        meter = Meter(self.cfg)
+        remaining = max(0, self.cfg.context.available_tokens - sum(meter.estimate_message(m) for m in messages) - 8)
+        history, history_refs = dialogue.prompt(meter, remaining)
+        if history:
+            messages.insert(1, {"role": "user", "content": history})
+        if conversation_id:
+            from .memory.view import TurnViewStore
+
+            TurnViewStore(self.kb).freeze(
+                conversation_id, dialogue.memory,
+                read_refs={**dialogue.memory.read_refs(), "history": history_refs,
+                           "retrieved": [e["chunk_id"] for e in excerpts if e.get("chunk_id")]},
+                retrieved_tokens=meter.estimate_text(material),
+            )
 
         try:
             data = self.llm.chat_json(messages, task="qa")
@@ -160,6 +181,14 @@ class QAAgent:
 
         if self.cfg.qa.strict_citation_check:
             self._check_citations(res)
+        # 偏好守卫与引用检查是独立约束，不能因关闭常规检查而绕过。
+        from .memory.guards import detect_memory_as_fact, validate_citations
+
+        for result in (detect_memory_as_fact(res.answer), validate_citations(res.answer)):
+            if not result.ok:
+                res.citation_check_passed = False
+                res.citation_issues.extend(v.message for v in result.violations)
+                res.warnings.append(result.summary())
         return res
 
     def _check_citations(self, res: QAAnswer) -> None:

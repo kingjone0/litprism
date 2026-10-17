@@ -16,11 +16,37 @@ const S = {
   activePaper: null,
   tabs: [],
   theme: localStorage.getItem('litprism-theme') || 'light',
-  inspector: localStorage.getItem('litprism-inspector') !== '0',
+  inspector: localStorage.getItem('litprism-evidence-panel') === '1',
+  sidebar: localStorage.getItem('litprism-sidebar') !== '0',
+  inspectorTab: 'sources',
+  messages: [],
+  sources: [],
+  sending: false,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+// 本地 SVG 图标保持跨平台一致，不依赖字体或远程资源。
+function icon(name) {
+  const paths = {
+    sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
+    panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/>',
+    search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    close: '<path d="m6 6 12 12M6 18 18 6"/>',
+    theme: '<path d="M20 13a8 8 0 0 1-9-9 8 8 0 1 0 9 9Z"/>',
+    prism: '<path d="m12 3 9 17H3L12 3Z"/><path d="m12 3 3 17M3 20l10-10"/>',
+    library: '<path d="M4 4h4v16H4zM10 4h4v16h-4zM17 4l4 15-4 1-4-15"/>',
+    shield: '<path d="m12 3 8 3v6c0 4-4 7-8 9-4-2-8-5-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/>',
+    document: '<path d="M14 3H5v18h14V8l-5-5Z"/><path d="M14 3v5h5M8 12h8M8 16h6"/>',
+    chat: '<path d="M21 11a8 8 0 0 1-8 8H6l-4 3 1-7a8 8 0 1 1 18-4Z"/>',
+    skills: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3H9Z"/>',
+    send: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
+  };
+  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.document}</svg>`;
+}
 
 /* ---------------------------------------------------------------- 工具 */
 function esc(s) {
@@ -104,14 +130,14 @@ function toast(msg, isErr = false) {
 
 function badgeOf(level) {
   const map = {
-    verified:        ['ok', '✅ 已核验'],
-    manual_confirmed:['manual', '🔵 人工确认'],
-    likely:          ['warn', '⚠️ 疑似'],
-    not_found:       ['danger', '❌ 未核到'],
-    unchecked:       ['neutral', '❔ 无法判定'],
+    verified:        ['ok', '已核验'],
+    manual_confirmed:['manual', '人工确认'],
+    likely:          ['warn', '疑似匹配'],
+    not_found:       ['danger', '未核到'],
+    unchecked:       ['neutral', '无法判定'],
   };
   const [cls, text] = map[level] || ['neutral', '❔ 未知'];
-  return `<span class="badge ${cls}">${text}</span>`;
+  return `<span class="badge status-badge ${cls}">${text}</span>`;
 }
 
 /* ---------------------------------------------------------------- 主题 */
@@ -121,6 +147,31 @@ function applyTheme() {
 }
 function applyInspector() {
   $('#main').classList.toggle('inspector-hidden', !S.inspector);
+  $('#inspector').inert = !S.inspector;
+  $('#btnInspector').setAttribute('aria-expanded', String(S.inspector));
+  $('#btnInspector').classList.toggle('selected', S.inspector);
+}
+function toggleInspector(show = !S.inspector) {
+  S.inspector = show;
+  localStorage.setItem('litprism-evidence-panel', show ? '1' : '0');
+  applyInspector();
+  if (show) refreshInspector();
+}
+function applySidebar() {
+  $('#main').classList.toggle('sidebar-hidden', !S.sidebar);
+  $('#sidebar').inert = !S.sidebar;
+  $('#btnSidebar').setAttribute('aria-expanded', String(S.sidebar));
+}
+function toggleSidebar() {
+  S.sidebar = !S.sidebar;
+  localStorage.setItem('litprism-sidebar', S.sidebar ? '1' : '0');
+  applySidebar();
+}
+function refreshInspector() {
+  if (!S.inspector) return;
+  const loader = { sources: loadInspectorSources, context: loadInspectorContext,
+    graph: loadInspectorGraph, deliv: loadInspectorDeliv }[S.inspectorTab];
+  if (loader) loader().catch(e => toast(e.message, true));
 }
 
 /* ==========================================================================
@@ -133,21 +184,29 @@ const VIEW_TITLES = {
 
 function openView(view, opts = {}) {
   S.activeView = view;
+  $('#tbTitle').textContent = VIEW_TITLES[view] || view;
   $$('.pane').forEach(p => p.classList.toggle('active', p.dataset.pane === view));
   $('#workBody').classList.toggle('flush', view === 'chat');
 
   if (view === 'paper' && opts.paperId) S.activePaper = opts.paperId;
-  if (view === 'chat' && opts.convId) S.activeConv = opts.convId;
+  if (view === 'chat' && opts.convId && opts.convId !== S.activeConv) {
+    S.activeConv = opts.convId;
+    S.messages = [];
+    S.sources = [];
+  }
 
   if (!S.tabs.includes(view)) S.tabs.push(view);
   renderTabs();
-  $$('.side-item').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  $$('.side-item').forEach(b => b.classList.toggle('active',
+    b.dataset.view === view || (view === 'paper' && b.dataset.paper === S.activePaper) ||
+    (view === 'chat' && b.dataset.conv === S.activeConv)));
 
   const loader = {
     library: loadLibrary, paper: loadPaperDetail, chat: loadChat,
     deliverables: loadDeliverables, skills: loadSkills, verify: loadVerify,
   }[view];
   if (loader) loader().catch(e => toast(e.message, true));
+  refreshInspector();
 }
 
 /* 侧边栏入口：设置走弹窗，其余切工作区视图 */
@@ -195,16 +254,15 @@ async function loadSidebar() {
 
   // ---- 对话 ----
   const convBox = $('#convList');
-  convBox.innerHTML = `<button class="side-new" id="btnNewConv">＋ 新建对话</button>` +
-    S.conversations.map(c => `
+  convBox.innerHTML = S.conversations.length ? S.conversations.map(c => `
       <div class="side-item-wrap">
         <button class="side-item ${c.id === S.activeConv ? 'active' : ''}" data-conv="${esc(c.id)}">
-          <span class="ico">💬</span>
+          ${icon('chat')}
           <span class="label">${esc(short(c.title, 16))}</span>
           <span class="meta">${c.message_count || 0}</span>
         </button>
         <button class="conv-del" data-conv-del="${esc(c.id)}" title="删除会话">✕</button>
-      </div>`).join('');
+      </div>`).join('') : '<div class="side-empty">新建对话，开始一次有据可查的研究。</div>';
   $('#btnNewConv').onclick = newConversation;
   $$('[data-conv]', convBox).forEach(b => b.onclick = () => openView('chat', { convId: b.dataset.conv }));
   $$('[data-conv-del]', convBox).forEach(b => b.onclick = async e => {
@@ -227,25 +285,13 @@ async function loadSidebar() {
   } else {
     lib.innerHTML = S.papers.map(p => `
       <button class="side-item" data-paper="${esc(p.id)}">
-        <span class="ico">📄</span>
+        ${icon('document')}
         <span class="label" title="${esc(p.title)}">${esc(short(p.display_title || p.title, 20))}</span>
       </button>`).join('');
     $$('[data-paper]', lib).forEach(b => b.onclick = () => openView('paper', { paperId: b.dataset.paper }));
   }
 
-  // ---- Skill ----
-  const sl = $('#skillList');
-  if (!S.skills.length) {
-    sl.innerHTML = `<div class="side-empty">尚未添加 Skill</div>
-      <button class="side-item" data-view="skills"><span class="ico">⚙</span><span class="label">管理 Skill</span></button>`;
-  } else {
-    sl.innerHTML = S.skills.map(k => `
-      <button class="side-item" data-view="skills">
-        <span class="ico">${k.ok ? '◈' : '✕'}</span>
-        <span class="label">${esc(k.name)}</span>
-        <span class="meta">v${esc(k.version)}</span>
-      </button>`).join('');
-  }
+  // 技能统一从底部进入管理页，不在主导航重复展开。
   $('#skillCount').textContent = S.skills.length || '';
   $$('.side-item[data-view]').forEach(b => b.onclick = () => enterView(b.dataset.view));
 }
@@ -272,20 +318,26 @@ async function loadLibrary() {
 
   const st = S.status?.stats || {};
   $('#libSub').textContent =
-    `${st.papers ?? items.length} 篇论文 · ${fmtNum(st.chunks)} 个分块 · 已解读 ${st.analyses ?? 0} 篇`;
+    q ? `找到 ${items.length} 篇匹配文献` : '整理文献、阅读原文，让每一个结论有据可查。';
+  const citable = S.papers.filter(p => ['verified', 'manual_confirmed'].includes(p.verify_level)).length;
+  $('#libSummary').innerHTML = [
+    [S.papers.length, '篇文献', 'library'], [citable, '篇核验可引用', 'shield'],
+    [st.analyses ?? 0, '篇已解读', 'document'],
+  ].map(([n, label, glyph]) => `<div class="summary-item">${icon(glyph)}<div><strong>${fmtNum(n)}</strong><span>${label}</span></div></div>`).join('');
 
   const box = $('#paperList');
   if (!items.length) {
     box.innerHTML = `<div class="empty">
-      <div class="ico">📚</div>
+      <div class="empty-mark">${icon('library')}</div>
       <div class="title">${q ? '没有匹配的论文' : '知识库还是空的'}</div>
-      <div class="desc">${q ? '换个关键词试试。' : '用 <code>litprism add &lt;论文.pdf&gt;</code> 导入，或把 PDF 拖到窗口里。'}</div>
+      <div class="desc">${q ? '换个标题或作者关键词试试。' : '当前可通过命令 <code>litprism add &lt;论文.pdf&gt;</code> 导入文献。核验状态和原文来源会随文献保留。'}</div>
     </div>`;
     return;
   }
 
   box.innerHTML = items.map(p => `
     <button class="list-item" data-paper="${esc(p.id)}">
+      <span class="paper-mark">${icon('document')}</span>
       <div class="list-main">
         <div class="list-title">${esc(p.display_title || p.title)}</div>
         <div class="list-sub">
@@ -295,6 +347,7 @@ async function loadLibrary() {
           ${badgeOf(p.verify_level)}
         </div>
       </div>
+      <span class="paper-open" aria-hidden="true">↗</span>
     </button>`).join('');
 
   $$('[data-paper]', box).forEach(b => b.onclick = () => openView('paper', { paperId: b.dataset.paper }));
@@ -455,7 +508,7 @@ function analysisSection(label, text) {
   if (!text) return '';
   return `<div style="margin-bottom:16px">
     <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:5px">${label}</div>
-    <div style="font-size:13.5px;line-height:1.75;white-space:pre-wrap">${esc(text)}</div>
+    <div class="reading-text">${esc(text)}</div>
   </div>`;
 }
 
@@ -464,6 +517,7 @@ function analysisSection(label, text) {
    ========================================================================== */
 async function loadChat() {
   const box = $('#chatDetail');
+  const convId = S.activeConv;
   if (!S.activeConv) {
     box.innerHTML = `<div class="empty" style="padding-top:120px">
       <div class="ico">💬</div>
@@ -474,32 +528,36 @@ async function loadChat() {
   }
 
   try {
-    const d = await api(`/api/conversations/${encodeURIComponent(S.activeConv)}/messages`);
+    const d = await api(`/api/conversations/${encodeURIComponent(convId)}/messages`);
+    if (S.activeView !== 'chat' || S.activeConv !== convId) return;
     const msgs = d.items || [];
+    S.messages = msgs;
+    S.sources = d.sources || [];
     $('#tbTitle').textContent = d.conversation.title || '对话';
 
     box.innerHTML = `
-      <div style="max-width:820px;margin:0 auto;padding:20px 24px 120px">
+      <div class="chat-layout">
         <div class="page-head">
           <div class="row">
             <div>
               <div class="page-title">${esc(d.conversation.title)}</div>
-              <div class="page-sub">
-                ${msgs.length} 条消息 · 压缩锚点 ${String(d.conversation.compact_anchor_seq || 0).padStart(5, '0')}
-                · 上下文压缩由策略自动触发
-              </div>
+              <div class="page-sub">基于本地文献 · 引用可回溯</div>
             </div>
           </div>
         </div>
-        <div id="chatStream">
+        <div id="chatStream" role="log" aria-label="研究对话">
           ${msgs.length ? msgs.map(renderMessage).join('') : `
-            <div class="empty"><div class="ico">✎</div>
-              <div class="title">开始提问</div>
-              <div class="desc">基于知识库提问，每条结论都会附原文来源并做回溯校验。<br>
-                无法追溯到片段的结论会被标注，而不是悄悄补全。</div>
+            <div class="empty chat-welcome"><div class="empty-mark">${icon('prism')}</div>
+              <div class="eyebrow">READ · QUESTION · CONNECT</div>
+              <h2 class="title">把问题交给文献</h2>
+              <div class="desc">从一个研究问题开始，回答将附上原文来源。<br>证据不足时，会明确告诉你。</div>
+              <div class="question-starters">
+                <button class="starter" data-question="这些论文分别研究了什么问题？">梳理研究问题 <span>↗</span></button>
+                <button class="starter" data-question="这些研究的方法有哪些局限？">寻找方法局限 <span>↗</span></button>
+              </div>
             </div>`}
         </div>
-        <div id="chatCompose" style="margin-top:16px">
+        <div id="chatCompose">
           <div class="card"><div class="card-body">
             <div class="row" style="gap:8px;margin-bottom:9px">
               <span class="muted" style="font-size:11.5px">模型</span>
@@ -508,12 +566,11 @@ async function loadChat() {
             </div>
             <div class="row" style="gap:8px;align-items:flex-end">
               <textarea class="textarea" id="chatInput" rows="2"
-                placeholder="基于知识库提问…（Ctrl+Enter 发送）"></textarea>
-              <button class="btn primary" id="btnSend">发送</button>
+                aria-label="研究问题" placeholder="向文献提问，或继续追问…"></textarea>
+              <button class="btn primary" id="btnSend" title="发送（Ctrl+Enter）" ${S.sending ? 'disabled' : ''}>${icon('send')}<span>发送</span></button>
             </div>
             <div style="margin-top:8px;font-size:11.5px;color:var(--muted)">
-              回答只依据检索到的原文片段；无依据时会直接说明「未找到依据」，不会用常识补全。
-              可选模型在「设置 → 模型」里管理。
+              <span>回答依据原文片段，证据不足时拒答。</span><kbd>Ctrl + Enter 发送</kbd>
             </div>
           </div></div>
         </div>
@@ -523,6 +580,7 @@ async function loadChat() {
     loadModels();
 
     const input = $('#chatInput');
+    $$('.starter', box).forEach(b => b.onclick = () => { input.value = b.dataset.question; input.focus(); });
     const send = () => askQuestion();
     $('#btnSend').onclick = send;
     input.onkeydown = e => {
@@ -530,7 +588,7 @@ async function loadChat() {
     };
     input.focus();
 
-    loadInspectorContext();
+    refreshInspector();
   } catch (e) {
     box.innerHTML = `<div class="empty"><div class="title">加载失败</div><div class="desc">${esc(e.message)}</div></div>`;
   }
@@ -539,20 +597,17 @@ async function loadChat() {
 async function askQuestion() {
   const input = $('#chatInput');
   const q = (input?.value || '').trim();
-  if (!q || !S.activeConv) return;
+  if (!q || !S.activeConv || S.sending) return;
+  S.sending = true;
+  const convId = S.activeConv;
+  const sendButton = $('#btnSend');
 
   const stream = $('#chatStream');
   const empty = stream.querySelector('.empty');
   if (empty) empty.remove();
 
   // 乐观插入用户消息
-  stream.insertAdjacentHTML('beforeend', `
-    <div class="chat-turn" style="margin-bottom:14px;display:flex;gap:10px;flex-direction:row-reverse">
-      <div class="chat-avatar" style="background:var(--accent);color:#fff">我</div>
-      <div style="flex:1;min-width:0;max-width:88%">
-        <div class="chat-bubble user">${esc(q)}</div>
-      </div>
-    </div>`);
+  stream.insertAdjacentHTML('beforeend', renderMessage({ role: 'user', content: q }));
   stream.insertAdjacentHTML('beforeend', `
     <div id="pending" style="margin-bottom:14px;display:flex;gap:10px">
       <div class="chat-avatar">AI</div>
@@ -566,9 +621,12 @@ async function askQuestion() {
   stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
 
   try {
-    const r = await api(`/api/chat/${encodeURIComponent(S.activeConv)}`, {
+    const r = await api(`/api/chat/${encodeURIComponent(convId)}`, {
       method: 'POST', body: { question: q },
     });
+    if (S.activeConv !== convId || S.activeView !== 'chat' || !stream.isConnected) return;
+    S.messages.push(r.user, r.assistant);
+    S.sources = r.sources || [];
     $('#pending')?.remove();
     stream.insertAdjacentHTML('beforeend', renderMessage(r.assistant, true));
     if (r.insufficient_evidence) {
@@ -577,22 +635,23 @@ async function askQuestion() {
         或用 <code>litprism recommend</code> 从学术数据库检索并导入。</div>`);
     }
     if (r.auto_compact) {
-      const ac = r.auto_compact;
       stream.insertAdjacentHTML('beforeend', `<div class="insp-note" style="margin:8px 0">
-        ☑ 已自动压缩 ${esc(ac.range)}：遮蔽 ${ac.shadowed_tokens} token，
-        每轮省 ${ac.saved_per_turn}。被折掉的消息可随时还原。</div>`);
+        已整理较早的对话，保留摘要以便继续研究。原始记录仍可追溯。</div>`);
     }
     LitUI.bind(stream);
-    loadInspectorContext();
+    refreshInspector();
     loadSidebar();
   } catch (e) {
+    if (!stream.isConnected) return;
     $('#pending')?.remove();
     stream.insertAdjacentHTML('beforeend', `
       <div class="lui-degraded">回答失败：${esc(e.message)}</div>`);
     toast(e.message, true);
   } finally {
-    $('#btnSend').disabled = false;
-    $('#chatInput')?.focus();
+    S.sending = false;
+    sendButton.disabled = false;
+    if ($('#btnSend')) $('#btnSend').disabled = false;
+    if (stream.isConnected) $('#chatInput')?.focus();
   }
 }
 
@@ -637,7 +696,8 @@ async function doCompact() {
 function renderMessage(m, fresh = false) {
   const isUser = m.role === 'user';
   const isCheckpoint = m.kind === 'compact-checkpoint';
-  const check = m.citation_check || {};
+  let check = m.citation_check || {};
+  if (typeof check === 'string') { try { check = JSON.parse(check); } catch { check = {}; } }
 
   // 组件段优先；没有 segments 时退回纯文本
   let body;
@@ -655,14 +715,14 @@ function renderMessage(m, fresh = false) {
        </div>` : '';
 
   return `
-    <div class="chat-turn" style="margin-bottom:14px;display:flex;gap:10px;flex-direction:${isUser ? 'row-reverse' : 'row'}">
-      <div class="chat-avatar" style="${isUser ? 'background:var(--accent);color:#fff' : ''}">${isUser ? '我' : 'AI'}</div>
-      <div style="flex:1;min-width:0;max-width:88%">
+    <div class="chat-turn ${isUser ? 'from-user' : 'from-assistant'}">
+      <div class="chat-avatar">${isUser ? '我' : icon('prism')}</div>
+      <div class="chat-message">
         ${isCheckpoint ? `<div class="badge accent" style="margin-bottom:6px">压缩检查点</div>` : ''}
         <div class="chat-bubble ${isUser ? 'user' : ''}">${body}</div>
         ${checkWarn}
         <div style="margin-top:4px;font-size:10.5px;color:var(--muted);text-align:${isUser ? 'right' : 'left'}">
-          ${esc(m.ref || '')} · ${esc((m.created_at || '').slice(0, 16).replace('T', ' '))}
+          ${isUser ? '你' : '文献棱镜'}${m.created_at ? ' · ' + esc(m.created_at.slice(0, 16).replace('T', ' ')) : ''}
         </div>
       </div>
     </div>`;
@@ -1625,9 +1685,9 @@ async function loadInspectorContext() {
         两种占用
       </div>
       <div class="metric"><span class="k">会话记账</span><span class="v">${fmtNum(occ.total_tokens)}</span></div>
-      <div class="metric"><span class="k">发送视图</span><span class="v">${fmtNum(occ.surface_tokens)}</span></div>
+      <div class="metric"><span class="k">会话可见内容（估算）</span><span class="v">${fmtNum(occ.surface_tokens)}</span></div>
       <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.6">
-        记账含已压缩原文（降得慢）；发送视图是实际发给模型的大小。
+        记账含已压缩原文；可见内容仅统计消息与摘要。系统指令、偏好和本轮检索片段另占空间，实际请求可能裁减历史。
       </div>
 
       <div style="margin-top:16px;font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase">
@@ -1673,6 +1733,30 @@ async function loadInspectorContext() {
   } catch (e) {
     box.innerHTML = `<div class="empty" style="padding:24px 8px"><div class="desc">${esc(e.message)}</div></div>`;
   }
+}
+
+async function loadInspectorSources() {
+  const box = $('#inspSources');
+  const view = S.activeView;
+  const paperId = S.activePaper;
+  if (view === 'chat') {
+    box.innerHTML = S.sources.length
+      ? `<p class="source-intro">最近一次回答检索到的原文片段。页码与内容均取自知识库；不表示每个片段都被回答引用。</p>${LitUI.renderSegments(S.sources)}`
+      : '<div class="empty"><div class="title">本轮暂无原文来源</div><div class="desc">有检索依据的回答会在这里显示原文片段。历史对话和用户偏好不会成为引用来源。</div></div>';
+    LitUI.bind(box);
+    return;
+  }
+  if (view !== 'paper' || !paperId) {
+    box.innerHTML = '<div class="empty"><div class="title">让结论回到原文</div><div class="desc">打开一篇文献查看原文，或在对话中提问，查看回答对应的证据片段。</div></div>';
+    return;
+  }
+  box.innerHTML = '<div class="skeleton"></div>';
+  const d = await api(`/api/paper/${encodeURIComponent(paperId)}/text`);
+  if (S.activeView !== view || S.activePaper !== paperId) return;
+  box.innerHTML = '<p class="source-intro">当前文献的原文摘录，按页码排列。</p>' + (d.pages || []).map(pg => `
+    <details class="source-page"><summary>${pg.page == null ? '无页码' : '第 ' + esc(pg.page) + ' 页'}</summary>
+      ${pg.chunks.map(c => `<div class="source-excerpt">${c.section ? `<strong>${esc(c.section)}</strong>` : ''}<p>${esc(c.text)}</p></div>`).join('')}
+    </details>`).join('');
 }
 
 async function loadInspectorGraph() {
@@ -1731,6 +1815,11 @@ async function loadInspectorDeliv() {
    启动
    ========================================================================== */
 function bindGlobal() {
+  $$('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
+  $('#btnSidebar').onclick = toggleSidebar;
+  $('#btnNewConv').onclick = newConversation;
+  $('#btnSearch').onclick = () => { openView('library'); $('#libSearch').focus(); };
+  $('#btnCloseInspector').onclick = () => { toggleInspector(false); $('#btnInspector').focus(); };
   // 主题
   $('#btnTheme').onclick = () => {
     S.theme = S.theme === 'dark' ? 'light' : 'dark';
@@ -1740,11 +1829,7 @@ function bindGlobal() {
   };
 
   // 右侧面板开关
-  $('#btnInspector').onclick = () => {
-    S.inspector = !S.inspector;
-    localStorage.setItem('litprism-inspector', S.inspector ? '1' : '0');
-    applyInspector();
-  };
+  $('#btnInspector').onclick = () => toggleInspector();
 
   // 侧边栏折叠
   $$('[data-toggle]').forEach(h => h.onclick = () => {
@@ -1777,10 +1862,10 @@ function bindGlobal() {
 
   // 右侧面板 tab
   $$('[data-insp]').forEach(t => t.onclick = () => {
+    S.inspectorTab = t.dataset.insp;
     $$('[data-insp]').forEach(x => x.classList.toggle('active', x === t));
     $$('[data-insp-pane]').forEach(p => p.classList.toggle('active', p.dataset.inspPane === t.dataset.insp));
-    const loader = { context: loadInspectorContext, graph: loadInspectorGraph, deliv: loadInspectorDeliv }[t.dataset.insp];
-    if (loader) loader().catch(e => toast(e.message, true));
+    refreshInspector();
   });
 
   // 设置弹窗
@@ -1802,6 +1887,15 @@ function bindGlobal() {
       openSettings('general');
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+      e.preventDefault();
+      if (e.altKey) toggleInspector(); else toggleSidebar();
+      return;
+    }
+    if (e.key === 'Escape' && S.inspector) {
+      toggleInspector(false);
+      $('#btnInspector').focus();
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       openView('library');
@@ -1813,6 +1907,7 @@ function bindGlobal() {
 async function boot() {
   applyTheme();
   applyInspector();
+  applySidebar();
   bindGlobal();
 
   try {
@@ -1824,8 +1919,6 @@ async function boot() {
 
   await loadSidebar();
   openView('library');
-  loadInspectorGraph().catch(() => {});
-  loadInspectorDeliv().catch(() => {});
 }
 
 boot();

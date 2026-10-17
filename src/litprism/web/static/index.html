@@ -11,62 +11,56 @@
 
 <div class="app">
 
-  <!-- ==================== 自绘标题栏 ==================== -->
+  <!-- 原生窗口标题栏之下的工作区工具栏 -->
   <header class="titlebar">
-    <div class="dots">
-      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-    </div>
-    <div class="tb-title" id="tbTitle">文献棱镜 LitPrism</div>
+    <button class="tb-btn" id="btnSidebar" title="收起导航（Ctrl+B）" aria-label="切换导航" aria-controls="sidebar" aria-expanded="true"><span data-icon="sidebar"></span></button>
+    <span class="toolbar-label">研究工作台</span><span class="toolbar-divider">/</span>
+    <div class="tb-title" id="tbTitle">知识库</div>
     <div class="tb-actions">
-      <button class="tb-btn" id="btnTheme" title="切换主题">◐</button>
-      <button class="tb-btn" id="btnInspector" title="显示/隐藏右侧面板">▤</button>
+      <button class="toolbar-search" id="btnSearch" title="搜索知识库（Ctrl+K）"><span data-icon="search"></span><span>搜索论文</span><kbd>Ctrl K</kbd></button>
+      <button class="tb-btn" id="btnTheme" title="切换主题" aria-label="切换主题"><span data-icon="theme"></span></button>
+      <button class="btn evidence-toggle" id="btnInspector" title="证据与详情（Ctrl+Alt+B）" aria-controls="inspector" aria-expanded="false"><span data-icon="panel"></span><span>证据与详情</span></button>
     </div>
   </header>
 
-  <div class="main" id="main">
+  <div class="main inspector-hidden" id="main">
 
     <!-- ==================== 左侧栏 ==================== -->
-    <aside class="sidebar">
-      <div class="brand" id="brand" title="关于">
-        <div class="brand-name">文献棱镜 LitPrism</div>
-        <div class="brand-version" id="brandVersion">v1.0.0</div>
-      </div>
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <button class="brand" id="brand" title="关于文献棱镜">
+        <span class="brand-mark" data-icon="prism"></span>
+        <span><span class="brand-name">文献棱镜</span><span class="brand-caption">LitPrism <span id="brandVersion">v1.0.0</span></span></span>
+      </button>
+      <div class="side-launch"><button class="side-new" id="btnNewConv"><span data-icon="plus"></span> 新建研究对话</button></div>
+      <nav class="workspace-nav" aria-label="研究工具">
+        <button class="side-item" data-view="library"><span data-icon="library"></span><span class="label">知识库</span><span class="count" id="libCount"></span></button>
+        <button class="side-item" data-view="verify"><span data-icon="shield"></span><span class="label">真实性核验</span></button>
+        <button class="side-item" data-view="deliverables"><span data-icon="document"></span><span class="label">研究产出</span></button>
+      </nav>
 
       <div class="side-scroll">
 
         <section class="side-section">
           <button class="side-head" data-toggle="conv">
-            <span class="chev">▾</span> 对话 <span class="count" id="convCount"></span>
+            <span class="chev">▾</span> 研究对话 <span class="count" id="convCount"></span>
           </button>
           <div class="side-items" id="convList">
-            <button class="side-new" id="btnNewConv">＋ 新建对话</button>
           </div>
         </section>
 
         <section class="side-section">
           <button class="side-head" data-toggle="lib">
-            <span class="chev">▾</span> 知识库 <span class="count" id="libCount"></span>
+            <span class="chev">▾</span> 文献速览
           </button>
           <div class="side-items" id="libList"></div>
-        </section>
-
-        <section class="side-section">
-          <button class="side-head" data-toggle="skill">
-            <span class="chev">▾</span> Skill <span class="count" id="skillCount"></span>
-          </button>
-          <div class="side-items" id="skillList">
-            <div class="side-empty" id="skillEmpty">尚未添加 Skill</div>
-            <button class="side-item" data-view="skills">
-              <span class="ico">⚙</span><span class="label">管理 Skill</span>
-            </button>
-          </div>
         </section>
 
       </div>
 
       <div class="side-footer">
+        <button class="side-item" data-view="skills"><span data-icon="skills"></span><span class="label">研究技能</span><span class="count" id="skillCount"></span></button>
         <button class="side-item" data-view="settings">
-          <span class="ico">⚙</span><span class="label">设置</span>
+          <span data-icon="settings"></span><span class="label">设置</span>
         </button>
       </div>
     </aside>
@@ -80,17 +74,20 @@
           <div class="page-head">
             <div class="row">
               <div>
-                <div class="page-title">知识库</div>
+                <div class="eyebrow">YOUR RESEARCH LIBRARY</div>
+                <h1 class="page-title">从可靠的文献开始</h1>
                 <div class="page-sub" id="libSub">—</div>
               </div>
               <div class="spacer"></div>
-              <div class="search-box" style="width:260px">
-                <span class="ico">⌕</span>
-                <input id="libSearch" placeholder="搜索标题、作者…">
+              <div class="search-box library-search">
+                <span data-icon="search"></span>
+                <input id="libSearch" placeholder="搜索标题、作者…" aria-label="搜索论文标题或作者">
               </div>
             </div>
           </div>
-          <div class="card">
+          <div class="library-summary" id="libSummary"></div>
+          <div class="section-heading"><h2>全部文献</h2><span>核验状态随文献保留</span></div>
+          <div class="card library-card">
             <div class="list" id="paperList"></div>
           </div>
         </section>
@@ -202,14 +199,17 @@
     </main>
 
     <!-- ==================== 右侧检视面板 ==================== -->
-    <aside class="inspector">
+    <aside class="inspector" id="inspector" aria-label="证据与详情" inert>
+      <div class="inspector-heading"><span>证据与详情</span><button class="tb-btn" id="btnCloseInspector" aria-label="关闭证据与详情"><span data-icon="close"></span></button></div>
       <div class="insp-tabs" id="inspTabs">
-        <button class="insp-tab active" data-insp="context">上下文</button>
-        <button class="insp-tab" data-insp="graph">图谱</button>
+        <button class="insp-tab active" data-insp="sources">来源</button>
+        <button class="insp-tab" data-insp="context">会话</button>
+        <button class="insp-tab" data-insp="graph">关联</button>
         <button class="insp-tab" data-insp="deliv">交付物</button>
       </div>
       <div class="insp-body">
-        <div class="insp-pane active" data-insp-pane="context" id="inspContext"></div>
+        <div class="insp-pane active" data-insp-pane="sources" id="inspSources"></div>
+        <div class="insp-pane" data-insp-pane="context" id="inspContext"></div>
         <div class="insp-pane" data-insp-pane="graph" id="inspGraph"></div>
         <div class="insp-pane" data-insp-pane="deliv" id="inspDeliv"></div>
       </div>

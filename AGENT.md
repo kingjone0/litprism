@@ -2,7 +2,7 @@
 
 > **给接手的 agent 看的第一份文档。**
 > 这里记录的是**实测过的现状**，不是设计意图。凡标「推断」的都是未验证的，请先验证再行动。
-> 最后更新：2026-10-17 21:45（本次实测基线：506 测试通过、单文件 exe 三项 spike 全部通过、重启后数据不丢）
+> 最后更新：2026-10-17（研究工作台改造：523 项测试通过；本轮验证源码 sidecar 与无窗口前端，未重打 exe）
 
 ---
 
@@ -21,7 +21,7 @@
 PY="C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
 cd E:/aicoding/paper-research-agent
 
-# 测试（基线：506 passed，约 13s）
+# 测试（基线：523 passed；路径单测要求测试进程不带 LITPRISM_HOME）
 $PY -m pytest tests -q
 
 # CLI
@@ -78,6 +78,25 @@ curl -s --noproxy '*' -H "X-LitPrism-Token: $T" http://127.0.0.1:8899/api/status
 ---
 
 ## 3. 进度矩阵（截至 2026-10-17）
+
+### 本轮增量：研究工作台与多轮问答接线
+
+- 界面资源实际位于 `src/litprism/web/static/`（下表的 `web/static/` 是简称）。
+- Electron 保留原生窗口标题栏，页面工具栏移除仿 macOS 三色圆点；菜单默认隐藏，可按 Alt 调出。
+- 默认两栏：左侧研究导航 + 中间阅读/问答；右侧「证据与详情」按需展开，默认页签为来源。
+  小于 1180px 时详情面板浮于工作区，可关闭，不再强制隐藏导致无法查看。
+- Ctrl+B 切换导航、Ctrl+Alt+B 切换详情、Ctrl+K 搜索知识库；主题与布局偏好保存在本机窗口缓存。
+- 文献概览与列表、固定输入区、统一 SVG 图标；引用错误仍明确展示（包括重开会话后的历史记录）。
+- `context/dialogue.py` 接入聊天：只注入可见历史与活跃压缩摘要，按 Meter 估算的剩余预算裁减；
+  偏好经 LayeredStrategy 与强制守卫注入，历史 P 编号不沿用，回答只校验本轮检索原文。
+  无召回仍直接拒答；TurnView 冻结历史 ref、偏好 id 与原文 chunk id，支持审计。
+- 明确追问的检索会补充最近的问题，属于启发式指代处理，尚未做真实模型的长对话效果评估。
+- 新增来源数据使用 GenUI 从数据库回填原文与页码；界面统计如实标注会话可见内容估算，不冒充完整模型请求用量。
+- 本轮验证：改前 515 项 / 改后 523 项；headless 前端交互、深浅主题、1000×660 布局通过，未开应用窗口。
+  源码 sidecar 使用 `E:/codex-litprism-data`，curl `--noproxy '*'` 验证 ping、鉴权 401/200、页面与资源 200；已回收测试进程。
+- 可复用前端验收：`node tools/check_workbench.cjs`（需可解析 `playwright/test` 和已安装 Chrome；
+  无窗口、临时独立浏览器配置、拦截 API 使用示例数据；可设 `LITPRISM_UI_OUTPUT` 保存截图）。
+- 原有打包产物不会自动更新。需 `python packaging/build.py` 重新生成 sidecar，才会把本轮 Python 与静态资源带入桌面打包版。
 
 | 阶段 | 状态 | 证据 |
 |---|---|---|
@@ -272,7 +291,7 @@ Tauri 的 WebView2 与 Electron 用的是同一个 Chromium 底座，所以两�
 ## 8. 接手自检清单
 
 ```bash
-$PY -m pytest tests -q                       # 期望 506 passed
+$PY -m pytest tests -q                       # 期望 523 passed；测试进程清除 LITPRISM_HOME
 $PY run.py init                              # 期望 papers=3 chunks=389（示例库）
 $PY packaging/build.py                       # 约 2min，产物固定落 packaging/dist/
 ./packaging/dist/litprism-sidecar.exe --port 8899 &

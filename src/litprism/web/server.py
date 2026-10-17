@@ -355,6 +355,18 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(404, "会话不存在")
         return {"ok": kb.delete_conversation(conv["id"])}
 
+    def citation_sources(citations):
+        """来源面板也走 GenUI 数据库回填，不信任模型或历史保存的页码。"""
+        from ..genui import process as genui_process
+
+        if isinstance(citations, str):
+            citations = json.loads(citations)
+        ids = [c["chunk_id"] for c in (citations or []) if c.get("chunk_id")]
+        if not ids:
+            return []
+        fence = "```lit-ui\n" + json.dumps({"v": 1, "type": "citation-list", "chunk_ids": ids}) + "\n```"
+        return genui_process(fence, kb).segments
+
     @app.get("/api/conversations/{conv_id}/messages")
     def messages(conv_id: str):
         from ..genui import process as genui_process
@@ -366,7 +378,8 @@ def create_app(cfg: Config) -> FastAPI:
         # 每条消息附带 segments（组件已由框架注入核验状态与页码）
         for m in items:
             m["segments"] = genui_process(m.get("content") or "", kb).segments
-        return {"conversation": conv, "items": items}
+        latest = next((m for m in reversed(items) if m["role"] == "assistant"), {})
+        return {"conversation": conv, "items": items, "sources": citation_sources(latest.get("citations"))}
 
     @app.post("/api/chat/{conv_id}")
     def chat(conv_id: str, req: dict):
@@ -407,7 +420,10 @@ def create_app(cfg: Config) -> FastAPI:
             chat_llm = llm
 
         try:
-            ans = QAAgent(kb, cfg, chat_llm).ask(question, top_k=int(req.get("top_k") or 8))
+            ans = QAAgent(kb, cfg, chat_llm).ask(
+                question, top_k=int(req.get("top_k") or 8),
+                conversation_id=conv["id"], before_seq=user_msg["seq"],
+            )
         except Exception as e:  # noqa: BLE001
             kb.append_message(
                 conv["id"], "assistant",
@@ -503,6 +519,7 @@ def create_app(cfg: Config) -> FastAPI:
             "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict},
             "confidence": getattr(ans, "confidence", None),
             "insufficient_evidence": bool(getattr(ans, "insufficient_evidence", False)),
+            "sources": citation_sources(cites),
             "issues": proc.issues,
             "auto_compact": auto_compact,
         }
