@@ -152,7 +152,8 @@ def test_output_limit_stops_paid_reviews_and_preserves_pending_candidates():
     assert not report['passed'] and not report['coverage']['complete'] and not supported_fields(report)
 
 
-def test_cross_output_limit_stops_all_later_tile_pairs():
+def test_cross_output_limit_stops_after_three_consecutive_failures():
+    """连续失败才放弃；单次失败只作废它自己那一对（见下一个测试）。"""
     from litprism.llm import OutputLimitError
     class Limited(Reviewer):
         def chat_json(self, *args, **kwargs):
@@ -167,8 +168,35 @@ def test_cross_output_limit_stops_all_later_tile_pairs():
         items.append(item)
     model = Limited()
     _, coverage = reconcile(items,cfg,model)
-    assert model.calls == ['semantic_cross_review'] and not coverage['complete']
-    assert all(i['status'] == 'needs_review' for i in items)
+    assert len(model.calls) == 3 and not coverage['complete']
+    assert coverage['error'] == 'output_limit'
+
+
+def test_single_cross_failure_does_not_invalidate_other_claims():
+    """一次偶发失败不能把整篇连坐成待审（实测踩过：19 条全红）。"""
+    from litprism.llm import OutputLimitError
+    class Flaky(Reviewer):
+        def __init__(self):
+            super().__init__()
+            self.cross = 0
+        def chat_json(self, messages, task='', **kwargs):
+            if task == 'semantic_cross_review':
+                self.cross += 1
+                if self.cross == 1:
+                    raise OutputLimitError('transient')
+                self.calls.append((task, json.loads(messages[-1]['content'])))
+                return {'differences': []}
+            return super().chat_json(messages, task=task, **kwargs)
+    items = []
+    for i in range(6):
+        item = units()[0]
+        item.update(id=f'cl{i}', text='claim '+str(i), status='machine_supported')
+        items.append(item)
+    _, coverage = reconcile(items, Config(), Flaky())
+    statuses = [u['status'] for u in items]
+    assert coverage['complete'] is False
+    assert statuses[:3] == ['needs_review']*3      # 失败那一对的陈述
+    assert statuses[3:] == ['machine_supported']*3  # 其余照常成立
 
 
 def test_value_index_retains_both_sides_but_separates_conditions():
@@ -273,3 +301,119 @@ def test_semantic_transport_failure_preserves_previous_analysis_and_concepts(env
     with pytest.raises(TimeoutError):
         analyze_paper(kb,cfg,model,pid,force=True,with_concepts=False)
     assert kb.get_analysis(pid)['payload'] == {'old':'frozen'} and kb.list_concepts(pid) == before
+
+
+# ---------------------------------------------------------------------------
+# 预算拆段：同一 tag 的多个片段必须一起进复核，否则前半段证据凭空消失
+# ---------------------------------------------------------------------------
+
+def _split_excerpts():
+    """模拟 reading_batches 因预算把同一个 chunk 拆成两段（tag 相同）。"""
+    head = {**EXCERPT, 'text': 'Table 2 reports hidden size settings. Embedding size 128, '}
+    tail = {**EXCERPT, 'text': 'hidden size 256 for the second column.'}
+    return [head, tail]
+
+
+def test_review_payload_keeps_every_fragment_of_a_split_tag():
+    payload = []
+    class Echo(Reviewer):
+        def chat_json(self, messages, task='', **kwargs):
+            payload.append(json.loads(messages[-1]['content']))
+            return super().chat_json(messages, task=task, **kwargs)
+    review_units(units(), _split_excerpts(), Config(), Echo())
+    text = payload[0]['sources'][0]['text']
+    assert 'Embedding size 128' in text and 'hidden size 256' in text
+
+
+def test_quote_from_first_fragment_is_not_lost():
+    model = Reviewer(quote='Table 2 reports hidden size settings. Embedding size 128')
+    result = review_units(units(), _split_excerpts(), Config(), model)
+    assert result[0]['status'] == 'machine_supported'
+
+
+# ---------------------------------------------------------------------------
+# 相邻片段补足：引用片段在表格/段落边界被切断时，把同论文下一段一并送复核
+# ---------------------------------------------------------------------------
+
+def _chain(texts, paper='paper1'):
+    return [{'tag': f'P{i}', 'id': f'chunk{i}', 'paper_id': paper, 'page': 4,
+             'paper_title': 'Study', 'text': t} for i, t in enumerate(texts, 1)]
+
+
+def test_truncated_citation_gets_the_next_chunk_as_adjacent_source():
+    excerpts = _chain(['Table 2 lists hidden sizes', 'Hidden size 256 reaches 71.8 on SuperGLUE.'])
+    built = make_units([('key_conclusions', 'Hidden size 256 is used [P1 p.4]。', ['P1 p.4'])], excerpts, 1)
+    assert built[0]['candidate_tags'] == ['P1', 'P2']
+    assert built[0]['adjacent_tags'] == ['P2']
+
+
+def test_adjacent_source_is_visible_to_the_reviewer_payload():
+    excerpts = _chain(['Table 2 lists hidden sizes', 'Hidden size 256 reaches 71.8 on SuperGLUE.'])
+    payload = []
+    class Echo(Reviewer):
+        def chat_json(self, messages, task='', **kwargs):
+            payload.append(json.loads(messages[-1]['content']))
+            return super().chat_json(messages, task=task, **kwargs)
+    review_units(make_units([('key_conclusions', 'Hidden size 256 is used [P1 p.4]。', ['P1 p.4'])],
+                            excerpts, 1), excerpts, Config(), Echo())
+    claim = payload[0]['claims'][0]
+    assert claim['adjacent_sources'] == ['P2']
+    assert any(s['tag'] == 'P2' for s in payload[0]['sources'])
+
+
+def test_adjacent_expansion_never_crosses_papers_or_exceeds_three_sources():
+    excerpts = _chain(['Table 2 lists hidden sizes', 'Hidden size 256.']) + [
+        {'tag': 'P3', 'id': 'chunk3', 'paper_id': 'other', 'page': 1,
+         'paper_title': 'Other', 'text': 'Unrelated paper.'}]
+    built = make_units([('key_conclusions', 'Claim [P3 p.1]。', ['P3 p.1'])], excerpts, 1)
+    assert built[0]['adjacent_tags'] == []
+
+    three = _chain(['Truncated table row', 'B', 'C', 'D'])
+    full = make_units([('key_conclusions', 'Claim [P1 p.4] [P2 p.4] [P3 p.4]。', ['P1 p.4'])], three, 1)
+    assert full[0]['candidate_tags'] == ['P1', 'P2', 'P3']
+    assert full[0]['adjacent_tags'] == []
+
+
+def test_complete_citation_is_not_expanded():
+    excerpts = _chain(['Hidden size 256 is used.', 'Other content.'])
+    built = make_units([('key_conclusions', 'Hidden size 256 is used [P1 p.4]。', ['P1 p.4'])], excerpts, 1)
+    assert built[0]['adjacent_tags'] == []
+
+
+def test_split_fragments_do_not_produce_duplicate_citation_tags():
+    from litprism.evidence import citations_for
+    cites = citations_for(_split_excerpts())
+    assert [c['tag'] for c in cites] == ['P1']
+    assert cites[0]['chunk_id'] == 'chunk1'
+
+
+# ---------------------------------------------------------------------------
+# 跨批比较的分桶范围：只在同字段内比较，预算不足时按字段如实报告
+# ---------------------------------------------------------------------------
+
+def test_cross_scope_is_limited_to_same_field():
+    items = []
+    for field in ('key_conclusions', 'methodology'):
+        unit = units()[0]
+        unit.update(id=field, field=field, text='claim', status='machine_supported')
+        items.append(unit)
+    model = Reviewer()
+    _, coverage = reconcile(items, Config(), model)
+    assert model.calls == []                       # 每桶只有 1 条 → 无对可比
+    assert coverage['method'] == 'by_field_tile_pairs'
+    assert coverage['complete'] and not coverage['fields_pending']
+
+
+def test_budget_exhaustion_only_marks_unfinished_fields(monkeypatch):
+    import litprism.semantics as sem
+    monkeypatch.setattr(sem, 'MAX_CROSS_CALLS', 1)
+    small = [dict(units()[0], id=f's{i}', field='key_conclusions', text='s', status='machine_supported')
+             for i in range(3)]
+    big = [dict(units()[0], id=f'b{i}', field='methodology', text='b', status='machine_supported')
+           for i in range(6)]
+    _, coverage = reconcile(small+big, Config(), Reviewer())
+    assert coverage['fields_done'] == ['key_conclusions']
+    assert coverage['fields_pending'] == ['methodology']
+    assert [u['status'] for u in small] == ['machine_supported']*3
+    assert all(u['status'] == 'needs_review' for u in big)
+    assert coverage['complete'] is False

@@ -402,6 +402,7 @@ async function loadPaperDetail() {
               ${p.doi ? `<span class="mono muted">DOI: ${esc(p.doi)}</span>` : ''}
               <span class="mono muted">${d.chunks ?? 0} 个分块</span>
             </div>
+            ${readingModeNote(d.analysis?._coverage)}
           </div>
           <span style="flex:1"></span>
           <div class="row" style="gap:6px">
@@ -526,6 +527,59 @@ async function loadPaperText(pid) {
   } catch (e) {
     body.innerHTML = `<div class="empty"><div class="desc">${esc(e.message)}</div></div>`;
   }
+}
+
+/**
+ * 解读模式提示：整篇装得下还是分批。
+ *
+ * 这不只是信息展示 —— 「全文驻留」意味着所有指令共享同一份缓存前缀，
+ * 成本和跨段一致性都完全不同。用户有权知道这次是哪种。
+ */
+function readingModeNote(cov) {
+  if (!cov) return '';
+  const plan = cov.plan || {};
+  const win = cov.window || {};
+  const tokens = plan.context_tokens;
+  const window = win.window;
+
+  const parts = [];
+  if (plan.mode === 'whole') {
+    parts.push(`<span class="badge ok">全文驻留</span>`);
+    parts.push(`<span>${(plan.directives || []).length} 条指令共享同一上下文前缀</span>`);
+  } else if (plan.mode === 'batched') {
+    parts.push(`<span class="badge warn">分批读取</span>`);
+    parts.push(`<span>${cov.batches || '?'} 批（窗口不足，缓存前缀不可复用）</span>`);
+  }
+  if (tokens && window) {
+    parts.push(`<span class="mono muted">${fmtNum(tokens)} / ${fmtNum(window)} token（${Math.round(tokens / window * 100)}%）</span>`);
+  } else if (tokens) {
+    parts.push(`<span class="mono muted">${fmtNum(tokens)} token</span>`);
+  }
+  if (cov.total_chunks) parts.push(`<span class="muted">${cov.total_chunks} 块</span>`);
+
+  // 缓存命中率是"上下文是否真的固定"的体检指标
+  const u = cov.usage || {};
+  if (u.calls) {
+    if (u.cached_ratio == null) {
+      parts.push(`<span class="muted" title="提供商未报告缓存字段">缓存命中率不可知</span>`);
+    } else {
+      const r = Math.round(u.cached_ratio * 100);
+      const cls = r >= 50 ? 'ok' : r >= 10 ? 'warn' : 'danger';
+      parts.push(`<span class="badge ${cls}">缓存命中 ${r}%</span>`);
+    }
+    parts.push(`<span class="mono muted">${u.calls} 次调用 · ${fmtNum(u.input)} 入 / ${fmtNum(u.output)} 出</span>`);
+  }
+
+  let html = `<div class="row wrap" style="gap:8px;margin-top:8px;font-size:11.5px;color:var(--text-2)">
+    ${parts.join('<span class="muted">·</span>')}
+  </div>`;
+
+  // 跨指令重复：条数正常但内容全是别人的
+  const overlaps = cov.overlaps || [];
+  if (overlaps.length) {
+    html += `<div class="lui-degraded" style="margin-top:8px">${overlaps.map(o => '⚠️ ' + esc(o.detail)).join('<br>')}</div>`;
+  }
+  return html;
 }
 
 function analysisSection(label, text) {
@@ -1222,6 +1276,13 @@ function settingsBody(key, c) {
     case 'about':
       return row('版本', '应用与数据库 schema 版本。',
           `<div class="mono" style="font-size:12px">v1.0.0 · schema v${S.status?.schema_version ?? '—'}</div>`) +
+        row('上下文窗口', '当前生效模型的窗口。决定长论文能否「全文驻留」—— 只有驻留时，多次调用才能共享缓存前缀。',
+          `<div class="row" style="gap:6px">
+            <span class="mono" style="font-size:12px">${fmtNum(S.status?.window?.window)} token</span>
+            <span class="badge ${S.status?.window?.source === 'model' ? 'ok' : 'neutral'}">
+              ${S.status?.window?.source === 'model' ? '来自模型' : '全局配置'}
+            </span>
+          </div>`) +
         row('知识库', '当前库内数据量。',
           `<div class="mono" style="font-size:11.5px">
             ${S.status?.stats?.papers ?? 0} 篇论文 · ${fmtNum(S.status?.stats?.chunks)} 块
@@ -1368,6 +1429,10 @@ function providerEditor(p) {
     <div class="pm-row">
       <input class="input" data-pm-id placeholder="模型 ID，如 gpt-4o" value="${esc(m.model_id)}">
       <input class="input" data-pm-name placeholder="显示名称" value="${esc(m.display_name)}">
+      <input class="input" data-pm-window type="number" min="1000" step="1000"
+        placeholder="${m.suggested_window ? '建议 ' + (m.suggested_window / 1000) + 'k' : '窗口'} "
+        title="上下文窗口（token）。留空则用全局配置。"
+        value="${m.window_tokens ?? ''}">
       <button class="icon-btn ${m.enabled ? 'on' : ''}" data-pm-toggle
         title="${m.enabled ? '已暴露给对话' : '未暴露给对话'}">${m.enabled ? '◉' : '○'}</button>
       <button class="icon-btn" data-pm-del title="删除">🗑</button>
@@ -1442,6 +1507,7 @@ function bindProviderEditors() {
       div.innerHTML = `
         <input class="input" data-pm-id placeholder="模型 ID">
         <input class="input" data-pm-name placeholder="显示名称">
+        <input class="input" data-pm-window type="number" min="1000" step="1000" placeholder="窗口 token">
         <button class="icon-btn on" data-pm-toggle title="已暴露给对话">◉</button>
         <button class="icon-btn" data-pm-del title="删除">🗑</button>`;
       box.appendChild(div);
@@ -1494,6 +1560,7 @@ function bindProviderEditors() {
       const models = [...card.querySelectorAll('.pm-row')].map(row => ({
         model_id: row.querySelector('[data-pm-id]').value.trim(),
         display_name: row.querySelector('[data-pm-name]').value.trim(),
+        window_tokens: row.querySelector('[data-pm-window]')?.value || null,
         enabled: row.querySelector('[data-pm-toggle]').classList.contains('on'),
       })).filter(m => m.model_id);
 

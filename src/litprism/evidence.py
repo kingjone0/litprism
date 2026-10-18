@@ -31,6 +31,23 @@ def citation_issues(text: str, excerpts: list[dict], *, required: bool = True) -
     return list(dict.fromkeys(issues))
 
 
+def citations_for(excerpts: list[dict]) -> list[dict]:
+    """把片段清单转成引用清单，按 tag 去重并保留首个。
+
+    ``reading_batches`` 在预算不足时会把一个 chunk 拆成多段、沿用同一个 tag，
+    直接逐条转换会产生重复 tag —— 而 ``stored_excerpts`` 对重复编号是直接报错的，
+    等于这类论文在导出/复核时硬失败。这里按 tag 收敛成一条引用。
+    """
+    out, seen = [], set()
+    for e in excerpts:
+        tag = e.get('tag')
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append({'tag': tag, 'chunk_id': e['id'], 'paper_id': e['paper_id'], 'page': e['page']})
+    return out
+
+
 def stored_excerpts(kb, citations: list[dict]) -> list[dict]:
     """重新读取引用，不信任调用方、缓存或模型保存的原文与页码。"""
     result = []

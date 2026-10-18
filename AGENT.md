@@ -2,7 +2,7 @@
 
 > **给接手的 agent 看的第一份文档。**
 > 这里记录的是**实测过的现状**，不是设计意图。凡标「推断」的都是未验证的，请先验证再行动。
-> 最后更新：2026-10-18。当前回归 **633 passed**，schema **v5**。本轮按用户明确要求整理交接并提交；未重新打包，F3 暂停，不增加本地 embedding。
+> 最后更新：2026-10-18（第二轮）。当前回归 **639 passed / 1 skipped**，schema **v5**。本轮修掉「预算拆段导致复核丢失前半段证据」与「拆段产生重复引用编号导致导出硬失败」，并加了同论文相邻片段补足；未跑真实模型，未打包，F3 暂停。
 
 ## 当前接手摘要（优先于下方历史记录）
 
@@ -11,8 +11,12 @@
 - **真实有限验收**：18 条真实来源正反例两轮共 36/36 完整（18 正例支持、18 负例阻止），5 个明确互斥/不应冲突控制例通过。这些是固定开发样本，不能推导一般准确率或服务稳定性；失败试验仍保留在实测记录中。
 - **短论文边界**：五页 fastText 完整路径 22 条中 19 条机器支持、3 条待审；35 组有效差异检查完整且无截断。整篇仍 `passed=false`，有来源片段不完整和机器误报。一次有效路径为 58 个逻辑调用、99429 token；不是全部试验总成本，不继续无目标扩大模型调用。
 - **尚未保证**：长论文整体学术质量、复杂表格完全恢复、相邻片段语义完整性。语义守卫当前覆盖解读六字段与对比，不能扩展宣称术语、问答、Skill 同等通过。旧缓存分析需重跑，旧文献需从原 PDF 重导入；未自动改写旧块或迁移用户主库。
-- **下一步顺序**：先处理待审项的相邻原文补足和误报，再降低复核成本、补真实验收覆盖；随后回到功能缺口清单逐项验收。继续暂停 F3 与打包；按用户决定不增加本地 embedding、不装模型、不建向量库。
-- **验证**：完整 Python 回归 633 项通过（1 个第三方 Starlette 弃用警告），相关 Python 静态检查、前端语法检查与无窗口工作流通过。无窗口流程覆盖来源右栏、人工修正入库/撤销、主题、窄屏与持久化。测试用隔离数据，不启动可见桌面窗口。
+- **本轮修复（证据装配层，未改判定标准）**：① `merge_fragments` 把同一 tag 被预算拆开的片段按原序拼回，复核不再只看到最后一段（此前会因此把"证据不完整"判成"不符"）；② `evidence.citations_for` 按 tag 去重，修掉拆段导致的重复引用编号硬失败；③ 截断片段补同论文下一段，列在该条陈述的 `adjacent_sources`，提示词明确"片段不完整不构成不符"。详见 [相邻证据补足](docs/相邻证据补足-2026-10-18.md)。真实模型定向实测（`tools/check_live_adjacent.py`，4 条合成用例，约 1100 token）：拆段与相邻两类边界由「待审」变为「支持」，相反陈述仍判不符、原文没有仍待审 —— 护栏未放宽。整篇实论文（fastText v3，19 条）已重测：见下一行的跨批修复结果。
+- **跨批核查连坐已修**：一次 `OutputLimitError` 原先会把**全部**陈述标成未覆盖（实测一篇 5 页论文因此 19/19 待审）。现在只作废当前那一对，连续 3 次才放弃。修复后同一篇：跨批 27/27 对完成、0 差异、覆盖完整 → 17 条支持 / 2 条待审（2 条是自身原因：1 条来源超 3、1 条证据不足）。详见 [跨批核查与预算](docs/跨批核查与预算-2026-10-18.md)。**注意**：跨批层是主要成本（27 次调用 88k token，completion 占 70k，几乎全是推理思考）。
+- **可调参数（默认不变）**：`LITPRISM_REVIEW_MAX_TOKENS`（默认 4096）、`LITPRISM_REVIEW_READ_TIMEOUT`（默认 60s）、`LITPRISM_CROSS_MAX_CALLS`（默认 40）。推理模型的思考也计入输出额度，撞顶会熔断整篇复核。
+- **跨批比较已按字段分桶**（`method: by_field_tile_pairs`），跨批优先、距离近的优先。实测：5 页 19 条 → 11 次调用（原 27），覆盖完整。**但长论文仍不可行**：240 条 → 82 tile，预算放到 400 次仍核不完（每次约 2600 completion token ≈ 百万 token）。瓶颈是策略不是预算 → 见 docs 里三条方向（选择性核对 / 摘要级核对 / 界面承担不确定性）。
+- **下一步顺序**：长论文的 tile 数是几十量级，`MAX_CROSS_CALLS=40` 仍是硬约束 → 需要「同字段/同指标分桶」策略改造；随后回到功能缺口清单逐项验收。继续暂停 F3 与打包；按用户决定不增加本地 embedding、不装模型、不建向量库。
+- **验证**：完整 Python 回归 **640 passed / 1 skipped**（1 个第三方 Starlette 弃用警告），相关 Python 静态检查、前端语法检查与无窗口工作流通过。无窗口流程覆盖来源右栏、人工修正入库/撤销、主题、窄屏与持久化。测试用隔离数据，不启动可见桌面窗口。
 
 先读 [有界复核与短论文实测](docs/有界复核与短论文实测-2026-10-18.md) 的预算、复现入口和失败边界，再读 [证据交互契约](docs/证据交互契约.md) 与 [剩余功能缺口](docs/剩余功能缺口分析-2026-10-18.md)。密钥仅存 SecretStore；`_selftest.*` 的 PDF、原始调用、数据库和截图不提交。
 
@@ -44,8 +48,15 @@ cd E:/codex-litprism
 # 应用运行必须隔离数据；测试时单独清除此变量
 export LITPRISM_HOME=E:/codex-litprism-data
 
-# 测试（当前：633 passed；路径单测要求测试进程不带 LITPRISM_HOME）
-env -u LITPRISM_HOME "$PY" -m pytest tests -q
+# 测试（当前：639 passed / 1 skipped；路径单测要求测试进程不带 LITPRISM_HOME）
+# ⚠️ 不要再加 -q：pyproject 里 addopts 已经是 -q，再传一次等于 -qq，
+#    汇总行会被吞掉，看起来像"没跑"（rc 仍是 0，最容易误判）
+env -u LITPRISM_HOME "$PY" -m pytest tests
+
+# 真实模型定向实测（4 条合成用例，~1100 token；凭据从 ProviderStore 读，不打印）
+env -u LITPRISM_HOME "$PY" tools/check_live_adjacent.py
+# 真实模型全流程冒烟（会真实计费）
+env -u LITPRISM_HOME "$PY" tools/check_live_provider.py
 
 # CLI
 $PY run.py init
@@ -350,7 +361,7 @@ Tauri 的 WebView2 与 Electron 用的是同一个 Chromium 底座，所以两�
 ## 8. 接手自检清单
 
 ```bash
-$PY -m pytest tests -q                       # 期望 523 passed；测试进程清除 LITPRISM_HOME
+$PY -m pytest tests                          # 期望 639 passed / 1 skipped；测试进程清除 LITPRISM_HOME
 $PY run.py init                              # 期望 papers=3 chunks=389（示例库）
 $PY packaging/build.py                       # 约 2min，产物固定落 packaging/dist/
 ./packaging/dist/litprism-sidecar.exe --port 8899 &

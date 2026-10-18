@@ -108,11 +108,19 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.get("/api/status")
     def status():
+        import copy as _copy
+
+        from ..providers import apply_active_window
+
+        # 用副本探测：查询状态不该改写运行中的配置
+        probe = _copy.deepcopy(cfg)
+        window_info = apply_active_window(probe, kb)
         return {
             "app": cfg.app.name,
             "stats": kb.stats(),
             "llm": llm_status(cfg),
             "sources": verifier.enabled_sources(),
+            "window": window_info,
             "config": config_to_dict(cfg),
             'schema_version': kb._con.execute('PRAGMA user_version').fetchone()[0],
         }

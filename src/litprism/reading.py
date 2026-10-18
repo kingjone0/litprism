@@ -11,6 +11,43 @@ def excerpt_text(excerpts: list[dict]) -> str:
         + f" chunk_id={e['id']}\n{e['text']}" for e in excerpts)
 
 
+# ---------------------------------------------------------------------------
+# 缓存友好的上下文布局
+#
+# 前缀缓存匹配的是**最长公共前缀**。要命中，必须满足两条：
+#   1. 原文在前、指令在后（变化的只有尾部）；
+#   2. 原文序列化字节稳定（同样的片段必然渲染出同样的字符串）。
+#
+# 旧布局是 `instruction + '\n\n' + 原文`，指令在最前面 —— 每次调用
+# 从第一个 token 起就不匹配，缓存永远不命中。
+# ---------------------------------------------------------------------------
+PAPER_HEADER = '以下为论文原文（按阅读顺序编号）。\n'
+TASK_SEPARATOR = '\n\n=== 本次任务 ===\n'
+
+
+def excerpt_context(excerpts: list[dict]) -> str:
+    """把原文渲染成**字节稳定**的缓存前缀。
+
+    稳定性来自两处：片段顺序由调用方保证（按 chunk 序号），
+    渲染用固定格式、不含时间戳/随机量。
+    """
+    return PAPER_HEADER + excerpt_text(excerpts)
+
+
+def build_messages(system: str, paper_text: str, directive: str) -> list[dict]:
+    """构造缓存友好的消息：system 固定、原文固定、只有 directive 变化。"""
+    return [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': paper_text + TASK_SEPARATOR + directive},
+    ]
+
+
+def prefix_of(messages: list[dict], directive: str) -> str:
+    """取出「除指令外的公共前缀」，供测试与缓存键计算使用。"""
+    user = messages[-1]['content']
+    return user[: len(user) - len(directive)] if directive else user
+
+
 def reading_batches(kb, cfg, papers: list[dict], system: str, instruction: str = ''):
     meter = Meter(cfg)
     available = cfg.context.available_tokens
@@ -24,10 +61,12 @@ def reading_batches(kb, cfg, papers: list[dict], system: str, instruction: str =
             if i < len(chunks):
                 c = chunks[i]
                 items.append(dict(c, tag=f'P{len(items)+1}', paper_title=paper['title'], document_tag=f'D{j}'))
+    # 预算按**实际消息布局**估算：system 固定 + 原文 + 任务分隔 + 指令。
+    # 布局改了估算不改，就会出现"估得下、实际装不下"的偏差。
+    _fixed = meter.estimate_text(system) + meter.estimate_text(PAPER_HEADER + TASK_SEPARATOR + instruction)
+
     def cost(batch):
-        return sum(meter.estimate_message(m) for m in [
-            {'role': 'system', 'content': system},
-            {'role': 'user', 'content': instruction+'\n\n'+excerpt_text(batch)}])
+        return _fixed + meter.estimate_text(excerpt_text(batch))
     batches, current = [], []
     for item in items:
         remaining = item['text']

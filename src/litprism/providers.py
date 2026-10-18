@@ -81,9 +81,54 @@ DEFAULT_MODELS = {
     "ollama": [("qwen2.5:7b", "Qwen2.5 7B")],
 }
 
+# 常见模型的上下文窗口（token）。仅作**填写提示**，不参与任何判定 ——
+# 以用户填写的值为准，因为同名模型的窗口也可能随版本变化。
+KNOWN_WINDOWS: list[tuple[str, int]] = [
+    ("gpt-4o", 128_000),
+    ("gpt-4.1", 1_000_000),
+    ("gpt-5", 400_000),
+    ("o3", 200_000),
+    ("deepseek-chat", 128_000),
+    ("deepseek-reasoner", 128_000),
+    ("claude", 200_000),
+    ("qwen", 128_000),
+    ("qwen-long", 1_000_000),
+    ("glm-4", 128_000),
+    ("moonshot", 128_000),
+    ("kimi", 200_000),
+    ("gemini", 1_000_000),
+    ("llama", 128_000),
+]
+
+
+def guess_window(model_id: str) -> int | None:
+    """按模型名猜一个窗口，仅用于界面预填。
+
+    **按前缀长度降序匹配** —— 否则 ``qwen``（128k）会先于 ``qwen-long``（1M）命中，
+    给出错误的预填值。越具体的名字必须优先。
+    """
+    m = (model_id or "").lower()
+    if not m:
+        return None
+    for prefix, window in sorted(KNOWN_WINDOWS, key=lambda kv: -len(kv[0])):
+        if m.startswith(prefix) or prefix in m:
+            return window
+    return None
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _as_int(value: Any) -> int | None:
+    """把界面上传来的窗口值转成 int；空值/非法值一律视为未配置。"""
+    if value is None or value == "":
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
 
 
 @dataclass
@@ -92,6 +137,7 @@ class ProviderModel:
     display_name: str = ""
     enabled: bool = True
     sort_order: int = 0
+    window_tokens: int | None = None
 
     @property
     def label(self) -> str:
@@ -103,6 +149,8 @@ class ProviderModel:
             "display_name": self.label,
             "enabled": self.enabled,
             "sort_order": self.sort_order,
+            "window_tokens": self.window_tokens,
+            "suggested_window": guess_window(self.model_id),
         }
 
 
@@ -120,6 +168,7 @@ class Provider:
     status: str = "unconfigured"
     status_note: str = ""
     checked_at: str = ""
+    window_tokens: int | None = None
     models: list[ProviderModel] = field(default_factory=list)
 
     @property
@@ -151,6 +200,7 @@ class Provider:
             "status_label": self.status_label,
             "status_note": self.status_note,
             "checked_at": self.checked_at,
+            "window_tokens": self.window_tokens,
             "models": [m.to_dict() for m in self.models],
             "enabled_models": [m.to_dict() for m in self.models if m.enabled],
         }
@@ -299,6 +349,7 @@ class ProviderStore:
                     "display_name": str(m.get("display_name") or mid).strip(),
                     "enabled": 1 if m.get("enabled", True) else 0,
                     "sort_order": i,
+                    "window_tokens": _as_int(m.get("window_tokens")),
                 }
             )
 
@@ -308,10 +359,11 @@ class ProviderStore:
             for m in cleaned:
                 con.execute(
                     "INSERT INTO provider_models (id, provider_id, model_id, display_name,"
-                    " enabled, sort_order, created_at) VALUES (?,?,?,?,?,?,?)",
+                    " enabled, sort_order, window_tokens, created_at) VALUES (?,?,?,?,?,?,?,?)",
                     (
                         f"pm_{uuid.uuid4().hex[:10]}", pid, m["model_id"],
-                        m["display_name"], m["enabled"], m["sort_order"], now,
+                        m["display_name"], m["enabled"], m["sort_order"],
+                        m["window_tokens"], now,
                     ),
                 )
         return len(cleaned)
@@ -343,10 +395,11 @@ class ProviderStore:
                 existing.add(mid)
                 con.execute(
                     "INSERT INTO provider_models (id, provider_id, model_id, display_name,"
-                    " enabled, sort_order, created_at) VALUES (?,?,?,?,?,?,?)",
+                    " enabled, sort_order, window_tokens, created_at) VALUES (?,?,?,?,?,?,?,?)",
                     (
                         f"pm_{uuid.uuid4().hex[:10]}", pid, mid,
-                        str(m.get("display_name") or mid).strip(), 1, 1000 + i, now,
+                        str(m.get("display_name") or mid).strip(), 1, 1000 + i,
+                        _as_int(m.get("window_tokens")), now,
                     ),
                 )
                 added.append(mid)
@@ -477,6 +530,21 @@ class ProviderStore:
             )
         return True
 
+    def active_window(self) -> int | None:
+        """当前生效模型的上下文窗口。
+
+        查找顺序：模型级 → 提供商级 → ``None``（调用方回落到全局配置）。
+        ``None`` 和"0"必须区分开 —— 前者是"没配"，后者是非法值，
+        都不能悄悄当成某个默认窗口用。
+        """
+        provider, model_id = self.get_active()
+        if provider is None:
+            return None
+        for m in provider.models:
+            if m.model_id == model_id and m.window_tokens:
+                return int(m.window_tokens)
+        return int(provider.window_tokens) if provider.window_tokens else None
+
     def chat_options(self) -> list[dict]:
         """暴露给 chat 的模型选择器：所有启用的模型，按提供商分组。"""
         out = []
@@ -513,6 +581,7 @@ class ProviderStore:
                 display_name=m.get("display_name") or m["model_id"],
                 enabled=bool(m.get("enabled", 1)),
                 sort_order=int(m.get("sort_order") or 0),
+                window_tokens=m.get("window_tokens"),
             )
             for m in model_rows
         ]
@@ -530,6 +599,7 @@ class ProviderStore:
             status=d.get("status") or "unconfigured",
             status_note=d.get("status_note") or "",
             checked_at=d.get("checked_at") or "",
+            window_tokens=d.get("window_tokens"),
             models=models,
         )
 
@@ -550,3 +620,35 @@ def format_providers(providers: list[Provider]) -> str:
 
 def dump_presets() -> list[dict]:
     return PRESETS
+
+
+def apply_active_window(cfg: Any, kb: Any) -> dict:
+    """把**当前生效模型**的窗口写进 ``cfg.context``，返回解析结果。
+
+    为什么必须在这里做：`context.window_tokens` 原本是全局 32000，
+    与模型无关。换 128k/1M 的模型不会自动放大，长论文就永远进不了
+    「全文驻留」模式 —— 缓存前缀根本建立不起来。
+
+    解析顺序：模型级 → 提供商级 → 全局配置。任何一步出错都静默回落到配置值，
+    绝不让"读不到窗口"变成"分析失败"。
+    """
+    configured = int(cfg.context.window_tokens)
+    resolved: int | None = None
+    source = "config"
+    try:
+        resolved = ProviderStore(kb, cfg.data_path).active_window()
+    except Exception:  # noqa: BLE001 - 提供商表缺失/损坏都不该阻断分析
+        resolved = None
+
+    if resolved and resolved != configured:
+        cfg.context.window_tokens = resolved
+        source = "model"
+    elif resolved:
+        source = "model"
+
+    return {
+        "window": int(cfg.context.window_tokens),
+        "configured": configured,
+        "source": source,
+        "available": int(cfg.context.available_tokens),
+    }

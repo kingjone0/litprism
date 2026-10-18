@@ -475,12 +475,29 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     ''')
 
 
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """模型窗口随模型走。
+
+    背景：`context.window_tokens` 原本是全局 32000。换 128k/1M 的模型不会自动放大，
+    结果是长论文永远进不了「全文驻留」模式 —— 缓存前缀根本建立不起来。
+    窗口是**模型的属性**，不是应用的属性，所以挂到 provider_models 上；
+    为空时回落到 providers.window_tokens，再回落到全局配置。
+    """
+    for table, col, ddl in (
+        ("provider_models", "window_tokens", "window_tokens INTEGER"),
+        ("providers", "window_tokens", "window_tokens INTEGER"),
+    ):
+        if _table_exists(conn, table) and not _column_exists(conn, table, col):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
     Migration(3, "模型目录 provider_models + providers.protocol", _migrate_v3),
     Migration(4, '知识与网页候选、原文快照及人工审核审计', _migrate_v4),
     Migration(5, '按解读版本保存陈述人工审核与知识入库记录', _migrate_v5),
+    Migration(6, '模型窗口随模型走：provider_models.window_tokens', _migrate_v6),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

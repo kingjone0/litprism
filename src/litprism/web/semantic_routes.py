@@ -39,7 +39,10 @@ def register_semantics(app, kb):
             for ref in payload.get('_citations') or []:
                 chunk = kb._con.execute('SELECT c.*, p.title AS paper_title FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.id=?', (ref.get('chunk_id'),)).fetchone()
                 if chunk:
-                    sources.append({'tag': ref['tag'], 'chunk_id': chunk['id'], 'paper_title': chunk['paper_title'], 'page': chunk['page']})
+                    # 带上原文：右栏要展示并高亮"哪一句"支撑了这条陈述。
+                    # 只回被引用的分块，不整篇回传。
+                    sources.append({'tag': ref['tag'], 'chunk_id': chunk['id'], 'paper_title': chunk['paper_title'],
+                                    'page': chunk['page'], 'section': chunk['section'], 'text': chunk['text']})
             return {'paper_id': paper['id'], 'analysis_hash': digest, 'report': report, 'reviews': records, 'sources': sources}
 
     def write(pid, claim_id, req, run=False):

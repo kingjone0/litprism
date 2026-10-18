@@ -54,7 +54,7 @@ def paper_context(kb: KnowledgeBase, paper: dict, budget: int | None = None) -> 
 def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
                   force: bool = False, with_concepts: bool = True) -> dict:
     from .evidence import citation_issues, require_citable
-    from .reading import excerpt_text, reading_batches
+    from .reading import build_messages, excerpt_context, reading_batches
     paper = kb.get_paper(paper_id)
     if paper is None:
         raise ValueError(f'未找到论文：{paper_id}')
@@ -66,33 +66,91 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     chunks = kb.get_chunks(paper_id)
     if sum(len(c['text']) for c in chunks) < 150:
         raise ValueError('正文过少，无法解读；扫描件需先转写。')
+
+    # 窗口跟着当前模型走：不这样做，换了大窗口模型也不会用上。
+    from .providers import apply_active_window
+    window_info = apply_active_window(cfg, kb)
     extract_system = EXTRACT_SYSTEM + '\n每个非空字段必须在 field_evidence 提供原文标记列表；无依据留空。'
     extract_system += '\n每个独立句子就地附其直接依据，不把多个分号连接的结论统一在段末附一串引用；每句最多 3 个直接来源，复杂内容分成多句。'
     concept_system = CONCEPTS_SYSTEM + '\n每条 definition 必须含本批原文引用 [P# p.N]；无页码不写页码，无依据不生成。'
     # 较长的指令作为分批预算基准，确保两类请求都容纳得下。
     system = max([extract_system, concept_system], key=len)
     instruction = '仅分析本批原文。未读取部分不能称为原文未提及。'
-    batches, all_excerpts, coverage = reading_batches(kb, cfg, [paper], system, instruction)
+
+    # ---- 计划：整篇装得下就共享一份上下文前缀，否则退回分批 ----
+    from .context.meter import Meter
+    from .plan import build_plan
+
+    meter = Meter(cfg)
+    plan = build_plan(
+        paper, chunks, meter,
+        available_tokens=cfg.context.available_tokens,
+        max_tokens=cfg.llm.max_tokens,
+        overhead_tokens=meter.estimate_text(system) + 200,
+    )
+
+    if plan.mode == 'whole':
+        # 整篇进上下文，所有指令共用同一份前缀 —— 这是缓存能命中的前提。
+        all_excerpts = [dict(c, tag=f'P{i}', paper_title=paper['title'], document_tag='D1')
+                        for i, c in enumerate(chunks, 1)]
+        shared_ctx = excerpt_context(all_excerpts)
+        units = [(d, all_excerpts) for d in plan.directives]
+        coverage = {
+            'complete': True, 'batches': len(plan.directives),
+            'total_chunks': len(chunks), 'read_chunks': len(chunks), 'omitted_chunks': [],
+            'sections': sorted({c.get('section') or '正文' for c in chunks}),
+            'basis': 'indexed_chunks', 'reading_mode': 'whole',
+            'note': plan.note + ' 每条指令只提取指定章节；其余章节仅作上下文参考。',
+        }
+    else:
+        batches, all_excerpts, coverage = reading_batches(kb, cfg, [paper], system, instruction)
+        shared_ctx = None
+        units = [(None, b) for b in batches]
+        coverage['reading_mode'] = 'batched'
+    coverage['plan'] = plan.to_dict()
+    coverage['window'] = window_info
+
     results, all_issues, all_concepts, concept_errors, semantic_inputs, batch_notes = [], [], [], [], [], []
+    gate_log: list[dict] = []
+    uncovered: list[str] = []
+    unit_claims: list[tuple[str, list[str]]] = []
+    from .usage import UsageTracker
+
+    tracker = UsageTracker()
     from .tasks import checkpoint
-    for index, excerpts in enumerate(batches, 1):
-        checkpoint(f'解读原文第 {index}/{len(batches)} 批')
-        ctx = instruction+'\n\n'+excerpt_text(excerpts)
-        data = llm.chat_json([{'role': 'system', 'content': extract_system},
-                              {'role': 'user', 'content': ctx}], task='extract')
-        if not isinstance(data, dict):
-            raise ValueError('解读必须返回 JSON 对象。')
-        data, issues = _validate_fields(data, excerpts)
+    for index, (directive, excerpts) in enumerate(units, 1):
+        unit_label = directive.id if directive is not None else f'b{index}'
+        checkpoint(f'解读原文第 {index}/{len(units)} 段')
+        # 原文在前、指令在后：同一篇论文的多次调用共享这段前缀，才能命中缓存。
+        ctx = shared_ctx if shared_ctx is not None else excerpt_context(excerpts)
+        # 整篇模式下引用可以落在任何章节（结论引用方法细节是正常的），
+        # 所以按全篇校验，而不是按本条指令的范围。
+        scope = all_excerpts if shared_ctx is not None else excerpts
+
+        data, issues, gates = _run_with_repair(
+            llm, extract_system, ctx, directive, instruction, scope, unit_label, tracker,
+        )
+        gate_log.append({'unit': unit_label, **gates.to_dict()})
+        if data is None:
+            # 完全没拿到可用结果（例如输出被截断）：如实记未覆盖，不伪造空字段。
+            all_issues.extend(issues)
+            uncovered.append(unit_label)
+            continue
         all_issues.extend(issues)
         results.append(data)
+        from .gates import claim_sentences
+        unit_claims.append((unit_label, claim_sentences(data, _FIELDS)))
         semantic_inputs.append(([(field, data.get(field) or '', (data.get('field_evidence') or {}).get(field) or [])
-                                 for field, _ in _FIELDS], excerpts))
+                                 for field, _ in _FIELDS], scope))
         if isinstance(data.get('field_notes'), str) and data['field_notes'].strip():
             batch_notes.append({'batch': index, 'text': data['field_notes'], 'status': 'unreviewed_model_note'})
         if with_concepts:
             try:
-                cdata = llm.chat_json([{'role': 'system', 'content': concept_system},
-                                       {'role': 'user', 'content': ctx}], task='concepts')
+                cdata = llm.chat_json(
+                    build_messages(concept_system, ctx, '只抽取本批原文出现的术语，逐条给出定义并附原文引用。'),
+                    task='concepts',
+                )
+                tracker.add_from(llm, task='concepts')
                 concepts = cdata.get('concepts') or []
                 if not isinstance(concepts, list):
                     raise ValueError('concepts 必须是数组。')
@@ -101,7 +159,9 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
                                     and not citation_issues(c['definition'], excerpts))
             except Exception as exc:
                 concept_errors.append(f'{type(exc).__name__}: {exc}')
-    merged = dict(results[0])
+    # 所有段落都没产出时不能直接取 results[0]；给一个全空骨架，
+    # 让下游看到"无内容 + 未覆盖"，而不是抛 IndexError 让整次解读失败。
+    merged = dict(results[0]) if results else {k: '' for k, _ in _FIELDS}
     evidence = {}
     for field, _ in _FIELDS:
         parts = []
@@ -134,9 +194,23 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     missing_fields = [label for field, label in _FIELDS if not merged[field]]
     merged['field_notes'] = ('本次未获得可校验依据的字段：'+'、'.join(missing_fields)+'。请核对原文，不能据此断言全文未提及。') if missing_fields else '所有展示字段均保留本批原文引用；内容仍需结合原文核对。'
     merged['_coverage'] = coverage
-    merged['_coverage']['reading_mode'] = 'whole' if len(batches) == 1 else 'batched'
+    coverage['gates'] = gate_log
+    coverage['uncovered_units'] = uncovered
+    coverage['usage'] = tracker.to_dict()
+    # 跨指令重复：条数正常但内容全是别人的 —— 条数闸门抓不到这一类
+    from .gates import overlap_flags
+    overlaps = overlap_flags(unit_claims)
+    if overlaps:
+        coverage['overlaps'] = overlaps
+    if uncovered:
+        # 有段落没拿到可用产出 —— 整体覆盖不完整，不伪装成通过
+        coverage['complete'] = False
+        coverage['note'] = coverage.get('note', '') + (
+            f' 其中 {len(uncovered)} 段未获得可用产出：{"、".join(uncovered)}。'
+        )
     merged['_citation_check'] = {'passed': not all_issues, 'issues': list(dict.fromkeys(all_issues))}
-    merged['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': paper_id, 'page': e['page']} for e in all_excerpts]
+    from .evidence import citations_for
+    merged['_citations'] = citations_for(all_excerpts)
     merged['_model'] = getattr(llm, 'name', 'unknown')
     if not isinstance(merged.get('field'), str) or citation_issues(merged.get('field') or '', all_excerpts):
         merged['field'] = ''
@@ -197,6 +271,52 @@ def _validate_fields(data: dict, excerpts: list[dict]):
     keywords = data.get('keywords')
     data['keywords'] = [v for v in keywords if isinstance(v, str)] if isinstance(keywords, list) else []
     return data, issues
+
+
+def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
+                     scope: list[dict], unit_label: str, tracker=None):
+    """跑一条指令，按闸门结果**有界修复**。
+
+    返回 ``(data | None, issues, gates)``。``data is None`` 表示这条指令
+    没有可用产出（例如输出被截断）—— 此时如实记未覆盖，不伪造空字段。
+
+    修复只针对「疑似漏读」（条数低于期望下限）。截断不自动细分：
+    那需要重新规划指令，留到下一版；这里先保证不崩、不假通过。
+    """
+    from .gates import MAX_REPAIR_ROUNDS, GateReport, GateResult, count_claims, evaluate, repair_text
+    from .llm import OutputLimitError
+    from .reading import build_messages
+
+    text = directive.text if directive is not None else fallback
+    expected = directive.expected if directive is not None else None
+
+    best = None  # (score, data, issues, gates)
+    for attempt in range(MAX_REPAIR_ROUNDS + 1):
+        try:
+            raw = llm.chat_json(build_messages(system, ctx, text), task='extract')
+        except OutputLimitError as exc:
+            if tracker is not None:
+                tracker.add_from(llm, task='extract')
+            gates = GateReport([GateResult('json_complete', False, f'输出被截断：{exc}', 'flag')])
+            if best is None:
+                return None, [f'{unit_label} 输出被截断，该段未覆盖：{exc}'], gates
+            return best[1], best[2], best[3]
+
+        if tracker is not None:
+            tracker.add_from(llm, task='extract')
+        if not isinstance(raw, dict):
+            raise ValueError('解读必须返回 JSON 对象。')
+        data, issues = _validate_fields(raw, scope)
+        gates = evaluate(data, _FIELDS, expected=expected, issues=issues)
+        claims = count_claims(data, _FIELDS)
+        # 先比"有没有闸门失败"，再比"提出多少条" —— 修完更差就不采纳
+        score = (len(gates.failed) == 0, claims)
+        if best is None or score >= best[0]:
+            best = (score, data, issues, gates)
+        if not gates.needs_repair or directive is None or attempt >= MAX_REPAIR_ROUNDS:
+            break
+        text = repair_text(directive, claims)
+    return best[1], best[2], best[3]
 
 
 def analyze_all(

@@ -191,10 +191,13 @@ def test_source_revoked_while_model_is_running_blocks_answer(env):
 def test_schema_upgrade_adds_evidence_without_destroying_papers(env):
     _, kb, _, _ = env
     pid = paper(kb)
-    assert current_version(kb._con) == 5
+    from litprism.schema import MIGRATIONS, apply_migrations
+
+    latest = max(m.version for m in MIGRATIONS)
+    assert current_version(kb._con) == latest
     kb._con.executescript('DROP TABLE evidence_reviews; DROP TABLE evidence_chunks; DROP TABLE evidence_sources; PRAGMA user_version=3;')
-    from litprism.schema import apply_migrations
-    assert len(apply_migrations(kb._con)) == 2
+    expected = len([m for m in MIGRATIONS if m.version > 3])
+    assert len(apply_migrations(kb._con)) == expected
     assert kb.get_paper(pid)
     assert not apply_migrations(kb._con)
 

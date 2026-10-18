@@ -296,7 +296,7 @@ class CompareAgent:
         from .comparison import check_comparison
         from .evidence import require_citable
         from .prompts import SYSTEM_ACADEMIC
-        from .reading import excerpt_text, reading_batches
+        from .reading import build_messages, excerpt_context, reading_batches
         for paper in papers:
             require_citable(paper.get('verify_level'))
         system = SYSTEM_ACADEMIC + "\n仅比较给定原文，不使用先前解读作为事实。维度缺信息写未提及。输出 JSON：summary, dimensions（每项 dimension, values，键为 D1/D2 等论文编号）, convergence, divergence, evidence_map。每个非空学术结论标注 [P# p.N]，P 是原文片段编号；无页码来源不写页码。"
@@ -309,8 +309,8 @@ class CompareAgent:
         from .tasks import checkpoint
         for index, batch in enumerate(batches, 1):
             checkpoint(f'对比原文第 {index}/{len(batches)} 批')
-            raw = self.llm.chat_json([{'role': 'system', 'content': system},
-                                     {'role': 'user', 'content': instruction+'\n\n'+excerpt_text(batch)}], task='compare')
+            raw = self.llm.chat_json(
+                build_messages(system, excerpt_context(batch), instruction), task='compare')
             result, errors = check_comparison(raw, papers, batch)
             issues.extend(errors)
             results.append(result)
@@ -358,8 +358,8 @@ class CompareAgent:
         issues = list(dict.fromkeys(issues))
         data['_coverage'] = coverage
         data['_citation_check'] = {'passed': not issues, 'issues': issues}
-        data['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': e['paper_id'], 'page': e['page']} for e in excerpts]
-        from .evidence import stored_excerpts
+        from .evidence import citations_for, stored_excerpts
+        data['_citations'] = citations_for(excerpts)
         try:
             stored_excerpts(self.kb, data['_citations'])
         except ValueError as exc:

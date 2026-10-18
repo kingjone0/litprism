@@ -265,16 +265,136 @@ function coverageNote(c) {
   return c ? `<div class="insp-note">原文覆盖：${esc(c.read_chunks)} / ${esc(c.total_chunks)} 个分块，${esc(c.batches)} 批；${esc(c.note || '')}</div>` : '';
 }
 
+/**
+ * 证据定位：在原文里找出最可能支撑这条陈述的那一句并高亮。
+ *
+ * 为什么放在前端做：这只是**展示辅助**，不参与任何判定 —— 机器给出的
+ * 支持/不符结论不变，这里只解决"人点进来看哪一句"的问题。
+ * 算法故意保守：分数不够高就不标（宁可不高亮，也不误导性地标错）。
+ */
+function evGrams(text) {
+  const out = new Set();
+  const clean = String(text || '').replace(/\[[^\]]*\]/g, ' ').toLowerCase();
+  (clean.match(/[a-z0-9][a-z0-9.+-]{1,}/g) || []).forEach(w => out.add(w));
+  const cjk = clean.replace(/[^\u4e00-\u9fff]/g, '');
+  for (let i = 0; i < cjk.length - 1; i++) out.add(cjk.slice(i, i + 2));
+  return out;
+}
+
+function evSentences(text) {
+  const s = String(text || ''), parts = [];
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    if ('。！？!?\n'.includes(s[i])) { if (i + 1 > start) parts.push([start, i + 1]); start = i + 1; }
+  }
+  if (start < s.length) parts.push([start, s.length]);
+  return parts.filter(([a, b]) => s.slice(a, b).trim().length > 1);
+}
+
+function evHit(text, claim) {
+  const s = String(text || ''), claimGrams = evGrams(claim);
+  if (!claimGrams.size) return null;
+  let best = null, bestScore = 0;
+  for (const [a, b] of evSentences(s)) {
+    const g = evGrams(s.slice(a, b));
+    if (!g.size) continue;
+    let inter = 0;
+    g.forEach(x => { if (claimGrams.has(x)) inter += 1; });
+    const score = inter / Math.sqrt(g.size * claimGrams.size);
+    if (score > bestScore) { bestScore = score; best = [a, b]; }
+  }
+  return bestScore >= 0.12 ? best : null;
+}
+
+function renderEvidenceText(text, claim) {
+  const s = String(text || '');
+  const hit = evHit(s, claim);
+  if (!hit) return esc(s);
+  return esc(s.slice(0, hit[0])) + '<mark class="ev-hit">' + esc(s.slice(hit[0], hit[1])) + '</mark>' + esc(s.slice(hit[1]));
+}
+
+/**
+ * 字段名的中文标签。与 lit-ui 的解读字段保持一致。
+ */
+const SEM_FIELD_LABELS = {
+  research_question: '研究问题', methodology: '方法', experiment_design: '实验设计',
+  key_conclusions: '主要结论', innovations: '创新点', limitations: '局限',
+};
+
+function semFieldLabel(key) {
+  return SEM_FIELD_LABELS[key] || key || '正文';
+}
+
+/**
+ * 覆盖率详情：**必须让人一眼看出是哪些字段没核完**。
+ *
+ * 只写一句「未覆盖全部陈述」是不够的 —— 用户无法判断自己看到的内容
+ * 在哪些维度上还靠不住。这里把已核完 / 未核完的字段名直接列出来，
+ * 并明确「未覆盖 = 待人工核对」，不写成「通过」。
+ */
+function coverageDetail(c) {
+  if (!c || c.complete !== false) return '';
+  const done = (c.fields_done || []).map(semFieldLabel);
+  const pending = (c.fields_pending || []).map(semFieldLabel);
+  const skipped = (c.skipped_claim_ids || []).length;
+  const totalFields = done.length + pending.length;
+
+  let head = '整体差异核查未覆盖全部陈述';
+  if (totalFields && pending.length) {
+    head += `：已核完 ${done.length}/${totalFields} 个字段，未核完 ${pending.length} 个 —— `;
+  } else if (totalFields) {
+    // 字段都跑完了，但仍有陈述被跳过（例如单对超预算）
+    head += `：${totalFields} 个字段均已比较，但仍有陈述未覆盖`;
+  }
+  const pendText = pending.length
+    ? `<strong>${pending.map(esc).join('、')}</strong>`
+    : '';
+  const doneText = done.length
+    ? `<div style="margin-top:4px;opacity:.85">已核完：${done.map(esc).join('、')}</div>`
+    : '';
+  const skippedText = skipped
+    ? `<div style="margin-top:4px;opacity:.85">涉及 ${skipped} 条陈述，保持「待人工核对」，不会记为通过。</div>`
+    : '';
+  const why = c.error === 'output_limit'
+    ? '（跨批核查的输出/推理预算耗尽）'
+    : (c.calls != null && c.max_calls != null ? `（已用 ${c.calls}/${c.max_calls} 次比较预算）` : '');
+
+  return `<div class="lui-degraded">${esc(head)}${pendText}${esc(why)}${doneText}${skippedText}</div>`;
+}
+
 function semanticReviewPanel(report, entity) {
   if (!report || report.status === 'not_run') return '<p class="source-intro">尚未运行整体语义核查；引用能定位不等于引文支持结论。重新解读后可查看。</p>';
   const items = report.items || [];
-  const pending = items.filter(i => i.status !== 'machine_supported');
-  const link = i => `<p><a href="#semantic-${esc(i.id)}" data-semantic-claim="${esc(i.id)}" data-semantic-kind="${esc(entity.kind)}" data-semantic-id="${esc(entity.id)}">第 ${esc(i.batch)} 批 · ${esc(i.text)}</a></p>`;
+  // 待办排序：机器发现不符的最先，其次是没核完的，最后才是普通待确认。
+  // 目的是让用户先处理"可能出错"的，而不是从头一条条点。
+  const risk = i => (i.status === 'contradicted' ? 0
+    : /未覆盖|预算|差异候选/.test(i.reason || '') ? 1 : 2);
+  const chip = i => (i.status === 'contradicted'
+    ? '<span class="ev-claim-chip bad">机器发现不符</span>'
+    : /未覆盖|预算/.test(i.reason || '') ? '<span class="ev-claim-chip warn">未核对</span>' : '');
+  const pending = items.filter(i => i.status !== 'machine_supported')
+    .sort((a, b) => risk(a) - risk(b));
+  const link = i => `<p><a href="#semantic-${esc(i.id)}" data-semantic-claim="${esc(i.id)}" data-semantic-kind="${esc(entity.kind)}" data-semantic-id="${esc(entity.id)}">第 ${esc(i.batch)} 批 · ${esc(i.text)}</a>${chip(i)}</p>`;
   return `<details class="card" ${pending.length ? 'open' : ''}><summary>语义核查：${esc(report.supported || 0)} 项机器支持 · ${pending.length} 项待核对 · ${(report.differences || []).length} 组差异</summary><div class="card-body"><p class="source-intro">${esc(report.note)}</p>
-    ${report.coverage?.complete === false ? '<p class="lui-degraded">整体差异核查尚未覆盖全部陈述，未覆盖项保持待核对。</p>' : ''}
+    ${coverageDetail(report.coverage)}
     ${entity.id ? pending.slice(0,8).map(link).join('') : ''}
     ${entity.id && pending.length > 8 ? `<details><summary>其余 ${pending.length-8} 项待核对陈述</summary>${pending.slice(8).map(link).join('')}</details>` : ''}
     ${items.some(i => i.status === 'machine_supported') && entity.id ? `<details><summary>查看机器支持项与引文</summary>${items.filter(i => i.status === 'machine_supported').map(link).join('')}</details>` : ''}</div></details>`;
+}
+
+/** 右栏展示候选来源原文，并高亮最可能支撑该陈述的句子。 */
+function renderSourceBlocks(claim) {
+  const candidates = (claim.candidate_tags || []).filter(t => S.semanticSources?.[t]?.text);
+  const quoted = (claim.quotes || []).map(q => q.tag).filter(t => S.semanticSources?.[t]?.text);
+  const order = [...new Set([...quoted, ...candidates])];
+  if (!order.length) return '';
+  const blocks = order.map((t, index) => {
+    const src = S.semanticSources[t];
+    const label = `[${esc(t)}] ${esc(src.paper_title || '原文')}${src.page == null ? '' : ' p.' + esc(src.page)}`;
+    return `<details class="ev-source"${index === 0 ? ' open' : ''}><summary>${label}</summary>`
+      + `<blockquote class="reading-text">${renderEvidenceText(src.text, claim.text)}</blockquote></details>`;
+  }).join('');
+  return `<p class="source-intro">下方原文中高亮的是最可能支撑本条陈述的句子 —— 仅辅助定位，不构成判定。</p>${blocks}`;
 }
 
 function semanticEndpoint(ref) {
@@ -302,10 +422,10 @@ async function loadSemanticDetail(ref) {
     const related = (d.report.differences || []).filter(i => i.claim_ids.includes(claim.id));
     const labels = {machine_supported: '机器支持 · 尚未经人工确认', needs_review: '待人工核对', contradicted: '机器发现不符 · 待人工核对'};
     const fields = {research_question:'研究问题', methodology:'方法', experiment_design:'实验设计', key_conclusions:'主要结论', innovations:'创新点', limitations:'局限', summary:'总体结论', convergence:'一致点', divergence:'分歧点'};
-    const renderClaim = c => `<h4>第 ${esc(c.batch)} 批 · ${esc(fields[c.field] || '对比陈述')}</h4><div class="reading-text">${esc(c.text)}</div><p class="source-intro">${esc(labels[c.status] || c.status)}</p><p>机器核查说明：${esc(c.reason)}</p>${(c.quotes || []).map(q => `<details><summary>引文 [${esc(q.tag)}] ${q.page == null ? '' : 'p.'+esc(q.page)} · ${esc(q.quote.slice(0,70))}${q.quote.length > 70 ? '…' : ''}</summary><blockquote class="reading-text">${esc(q.quote)}</blockquote></details>`).join('')}<p>候选来源：${(c.candidate_tags || []).map(t => {
+    const renderClaim = c => `<h4>第 ${esc(c.batch)} 批 · ${esc(fields[c.field] || '对比陈述')}</h4><div class="reading-text">${esc(c.text)}</div><p class="source-intro">${esc(labels[c.status] || c.status)}</p><p>机器核查说明：${esc(c.reason)}</p>${(c.quotes || []).map(q => `<details><summary>引文 [${esc(q.tag)}] ${q.page == null ? '' : 'p.'+esc(q.page)} · ${esc(q.quote.slice(0,70))}${q.quote.length > 70 ? '…' : ''}</summary><blockquote class="reading-text">${renderEvidenceText(q.quote, c.text)}</blockquote></details>`).join('')}<p>候选来源：${(c.candidate_tags || []).map(t => {
       const stored = S.semanticSources?.[t];
       return stored ? `<a href="#evidence-${esc(stored.chunk_id)}" data-evidence-ref="${esc(stored.chunk_id)}">[${esc(t)}] ${esc(stored.paper_title || '原文')} ${stored.page == null ? '' : 'p.'+esc(stored.page)}</a>` : esc('['+t+']');
-    }).join(' · ')}</p>`;
+    }).join(' · ')}</p>${renderSourceBlocks(c)}`;
     // Resolve original immutable chunk IDs even when the reviewer supplied no valid quote.
     S.semanticSources = {};
     const ids = new Set([claim.id, ...related.flatMap(i => i.claim_ids)]);

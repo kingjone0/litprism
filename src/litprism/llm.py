@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Any
@@ -70,6 +71,31 @@ def parse_json_loose(text: str) -> dict | list | None:
 # ---------------------------------------------------------------------------
 # OpenAI 兼容客户端
 # ---------------------------------------------------------------------------
+def _review_output_cap() -> int:
+    """逐条语义复核的单次输出上限。
+
+    默认 4096 与既有行为一致（不静默提高）。但推理模型的**思考 token 也计入这个额度**，
+    撞到上限会熔断整篇复核（``OutputLimitError`` → 其余陈述全部降级待审）。
+    需要时用 ``LITPRISM_REVIEW_MAX_TOKENS`` 显式放宽，例如小论文实测用 8192。
+    """
+    try:
+        return max(1024, int(os.environ.get('LITPRISM_REVIEW_MAX_TOKENS', '4096')))
+    except ValueError:
+        return 4096
+
+
+def _review_read_timeout(default: int = 60) -> int:
+    """语义复核的读取超时。默认 60 秒不变。
+
+    推理模型偶发卡住超过 60 秒（实测），整篇复核会因此中断。
+    需要放宽时用 ``LITPRISM_REVIEW_READ_TIMEOUT`` 显式指定。
+    """
+    try:
+        return max(10, int(os.environ.get('LITPRISM_REVIEW_READ_TIMEOUT', str(default))))
+    except ValueError:
+        return default
+
+
 class OpenAICompatClient:
     supports_semantic_review = True
     def __init__(self, cfg: LLMConfig):
@@ -93,8 +119,10 @@ class OpenAICompatClient:
             payload["response_format"] = {"type": "json_object"}
         bounded = task in ('semantic_review', 'semantic_cross_review')
         if bounded:
-            payload['max_tokens'] = min(payload['max_tokens'], 8192 if task == 'semantic_cross_review' else 4096)
-        request_timeout = (min(self.cfg.timeout, 10), min(self.cfg.timeout, 60)) if bounded else self.cfg.timeout
+            cap = 8192 if task == 'semantic_cross_review' else _review_output_cap()
+            payload['max_tokens'] = min(payload['max_tokens'], cap)
+        request_timeout = ((min(self.cfg.timeout, 10), min(self.cfg.timeout, _review_read_timeout()))
+                           if bounded else self.cfg.timeout)
         self.last_request_settings = {'task': task, 'max_tokens': payload['max_tokens'],
                                       'temperature': payload['temperature'], 'timeout': request_timeout}
 
@@ -455,8 +483,10 @@ class AnthropicClient:
             payload["system"] = "\n\n".join(system_parts)
         bounded = task in ('semantic_review', 'semantic_cross_review')
         if bounded:
-            payload['max_tokens'] = min(payload['max_tokens'], 8192 if task == 'semantic_cross_review' else 4096)
-        request_timeout = (min(self.cfg.timeout, 10), min(self.cfg.timeout, 60)) if bounded else self.cfg.timeout
+            cap = 8192 if task == 'semantic_cross_review' else _review_output_cap()
+            payload['max_tokens'] = min(payload['max_tokens'], cap)
+        request_timeout = ((min(self.cfg.timeout, 10), min(self.cfg.timeout, _review_read_timeout()))
+                           if bounded else self.cfg.timeout)
         self.last_request_settings = {'task': task, 'max_tokens': payload['max_tokens'],
                                       'temperature': payload['temperature'], 'timeout': request_timeout}
 

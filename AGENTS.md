@@ -23,7 +23,8 @@ Codex 从这里读项目约定。**完整交接文档是 `AGENT.md`（单数）�
 
 - Python：`C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe`
   （**必须用全路径**，系统的 `python` 里没有 pytest）
-- 测试：使用上述 Python 执行 `-m pytest tests -q` —— 当前 **633 passed**；测试进程须清除 `LITPRISM_HOME`，改动前后都要跑
+- 测试：使用上述 Python 执行 `-m pytest tests` —— 当前 **639 passed / 1 skipped**；测试进程须清除 `LITPRISM_HOME`，改动前后都要跑
+  - ⚠️ **不要加 `-q`**：pyproject 的 `addopts` 已有 `-q`，再传一次变 `-qq`，汇总行被吞掉、看起来像"没跑"，但退出码是 0
 - 不要假设 `node_modules` / `packaging/dist` 已生成，需要时自己生成（当前不做打包）：
   - `npm install`（桌面外壳用，约 400MB）
   - `python packaging/build.py`（打 sidecar exe，约 2.5 分钟）
@@ -44,7 +45,7 @@ LITPRISM_HOME=E:/codex-litprism-data
 ```powershell
 # 1. Python 侧单测（仅当前测试进程，不修改用户全局环境）
 Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
-& 'C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe' -m pytest tests -q
+& 'C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe' -m pytest tests
 
 # 2. 直接起后台，用 curl 断言 API
 $env:LITPRISM_HOME='E:/codex-litprism-data'

@@ -66,3 +66,5 @@ packaging/_sidecar_stderr.log
 .DS_Store
 Thumbs.db
 desktop.ini
+_pytest.xml
+_pytest_result.txt

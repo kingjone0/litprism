@@ -167,6 +167,32 @@ async function selfTest() {
     fs.writeFileSync(path.join(__dirname, '..', '_selftest.json'), dom, 'utf8');
     const img = await win.webContents.capturePage();
     fs.writeFileSync(path.join(__dirname, '..', '_selftest.png'), img.toPNG());
+
+    // 界面验收：进到论文解读 → 点开第一条待核对陈述 → 检查右栏原文是否高亮了对应句子。
+    const nav = await win.webContents.executeJavaScript(
+      `(async () => {
+         const sleep = ms => new Promise(r => setTimeout(r, ms));
+         const paper = document.querySelector('[data-paper]');
+         if (paper) { paper.click(); await sleep(2500); }
+         let link = document.querySelector('[data-semantic-claim]');
+         if (!link) {
+           const tab = [...document.querySelectorAll('button')]
+             .find(b => (b.textContent || '').trim() === '解读');
+           if (tab) { tab.click(); await sleep(2500); link = document.querySelector('[data-semantic-claim]'); }
+         }
+         if (!link) return {found: false, body: document.body.innerText.slice(0, 300)};
+         link.click(); await sleep(2500);
+         const box = document.querySelector('#inspSources');
+         return {found: true,
+                 marks: document.querySelectorAll('mark.ev-hit').length,
+                 sources: document.querySelectorAll('.ev-source').length,
+                 text: box ? box.innerText.slice(0, 500) : ''};
+       })()`
+    );
+    fs.writeFileSync(path.join(__dirname, '..', '_selftest_inspector.json'),
+      JSON.stringify(nav, null, 2), 'utf8');
+    const shot = await win.webContents.capturePage();
+    fs.writeFileSync(path.join(__dirname, '..', '_selftest_inspector.png'), shot.toPNG());
   } catch (e) {
     fs.writeFileSync(path.join(__dirname, '..', '_selftest.err'), String(e && e.stack), 'utf8');
   }
