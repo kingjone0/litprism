@@ -1,6 +1,8 @@
 /** 与 check_workflows.py 的真实本地 API 配合，无可见窗口、无真实模型。 */
 const { chromium, expect } = require('playwright/test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 (async () => {
   const base = process.env.LITPRISM_ACCEPTANCE_URL;
@@ -46,6 +48,8 @@ const assert = require('node:assert/strict');
     // 对比 → 保存 → 预览 → 下载归档，均走真实守卫。
     await page.locator('#btnCompareSelected').click();
     await expect(page.locator('#btnSaveComparison')).toBeVisible();
+    await expect(page.locator('#comparisonResult')).toContainText('一致点');
+    await expect(page.locator('#comparisonResult')).toContainText('结论与证据映射');
     await page.locator('#btnSaveComparison').click();
     await page.locator('[data-view=deliverables]').first().click();
     await expect(page.locator('[data-deliv]')).toHaveCount(1);
@@ -59,6 +63,29 @@ const assert = require('node:assert/strict');
     await page.locator('#paperList [data-paper]').first().click();
     await page.locator('#btnReanalyze').click();
     await expect(page.locator('#paperDetail')).toContainText('offline:acceptance-fixture');
+    await expect(page.locator('#paperDetail')).toContainText('1 项待核对');
+    await expect(page.locator('#paperDetail [data-ppane=analysis] > .card').last()).not.toContainText('待核查陈述');
+    await page.locator('[data-semantic-claim]').first().click();
+    await expect(page.locator('#inspSources')).toContainText('陈述与整体差异核对');
+    await expect(page.locator('#inspSources [data-evidence-ref]')).toHaveCount(1);
+    await page.locator('#semanticReview [name=reviewed_text]').fill('semantichumanmarker 人工修正的知识陈述。');
+    await page.locator('#semanticReview [name=note]').fill('离线验收：已查对原文、数字与适用条件。');
+    await page.locator('#semanticReview [value=confirm]').click();
+    await expect(page.locator('#semanticReview [value=confirm]')).toBeDisabled();
+    await expect(page.locator('#inspSources')).toContainText('人工审核历史');
+    if (process.env.LITPRISM_UI_OUTPUT) {
+      fs.mkdirSync(process.env.LITPRISM_UI_OUTPUT, {recursive:true});
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'semantic-review-light.png')});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.setViewportSize({width:850,height:880});
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'semantic-review-dark-narrow.png')});
+      await page.setViewportSize({width:1360,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+    }
+    await page.locator('#semanticReview [name=note]').fill('离线验收撤销');
+    await page.locator('#semanticReview [value=revoke]').click();
+    await expect(page.locator('#semanticReview [value=confirm]')).toBeEnabled();
+    await page.keyboard.press('Escape');
     await page.locator('[data-ptab=concepts]').click();
     await expect(page.locator('[data-ppane=concepts]')).toContainText('alphatopic');
 
@@ -71,7 +98,11 @@ const assert = require('node:assert/strict');
     await page.locator('#btnSend').click();
     await expect(page.locator('.from-assistant')).toHaveCount(1);
     await expect(page.locator('.from-assistant')).toContainText('offline:acceptance-fixture');
-    await page.locator('#btnInspector').click();
+    await page.locator('.answer-sources [data-evidence-ref]').first().click();
+    await expect(page.locator('#inspSources')).toContainText('论文原文');
+    await expect(page.locator('#inspSources')).toContainText('自动核验通过');
+    await expect(page.locator('#inspSources')).toContainText('用于离线验收的原文描述');
+    await page.locator('#btnSourceBack').click();
     await expect(page.locator('#inspSources')).toContainText('引用片段');
     await page.locator('[data-insp=context]').click();
     await page.locator('#btnTurnReads').click();
@@ -79,7 +110,56 @@ const assert = require('node:assert/strict');
     await page.locator('#researchTask [data-cancel]').first().click();
     await page.keyboard.press('Escape');
 
+    // 知识快照：保存候选，在右侧核对并人工确认，再通过回复链接回看。
+    await page.locator('[data-view=knowledge]').first().click();
+    await page.locator('#btnAddKnowledge').click();
+    await page.locator('#researchTask [name=title]').fill('reviewmarker 审核来源');
+    await page.locator('#researchTask [name=content]').fill('reviewmarker 知识快照的测试内容。');
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
+    await expect(page.locator('#inspSources')).toContainText('待人工审核');
+    await page.locator('#evidenceReview [name=note]').fill('测试人员已核对原文与适用范围');
+    await page.locator('#evidenceReview [value=confirm]').click();
+    await expect(page.locator('#inspSources')).toContainText('测试人员已核对原文与适用范围');
+    await expect(page.locator('#knowledgeList')).toContainText('人工确认');
+    await page.locator('#btnNewConv').click();
+    await page.locator('#researchTask [name=title]').fill('知识条目验收');
+    await page.locator('#researchTask [type=submit]').click();
+    await page.locator('#chatInput').fill('reviewmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant .answer-sources')).toContainText('reviewmarker 审核来源');
+    const evidenceRef = await page.locator('.answer-sources [data-evidence-ref]').first().getAttribute('data-evidence-ref');
+    await page.reload();
+    await expect(page.locator('#paperList')).toBeVisible();
+    await page.locator('[data-conv]').filter({ hasText: '知识条目验收' }).click();
+    await page.locator(`.answer-sources [data-evidence-ref="${evidenceRef}"]`).click();
+    await expect(page.locator('#inspSources')).toContainText('知识条目快照');
+    const output = process.env.LITPRISM_UI_OUTPUT;
+    if (output) {
+      fs.mkdirSync(output, { recursive: true });
+      await expect(page.locator('#toasts .toast')).toHaveCount(0);
+      await page.screenshot({ path: path.join(output, 'evidence-sidebar-light.png') });
+    }
+    await page.locator('#evidenceReview [name=note]').fill('测试撤销');
+    await page.locator('#evidenceReview [value=revoke]').click();
+    await expect(page.locator('#inspSources')).toContainText('已撤销');
+    await page.keyboard.press('Escape');
+
     // 偏好创建、编辑、删除与恢复。
+    await page.locator('[data-view=knowledge]').first().click();
+    await page.locator('#btnAddKnowledge').click();
+    await page.locator('#researchTask [name=kind]').selectOption('web');
+    await page.locator('#researchTask [name=title]').fill('网页来源 <b>原文片段</b>');
+    await page.locator('#researchTask [name=url]').fill('https://example.org/evidence-source');
+    await page.locator('#researchTask [name=content]').fill('这是用于验收的网页摘要快照，不是论文全文。');
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#inspSources')).toContainText('网页摘要快照');
+    await expect(page.locator('#inspSources h3')).toHaveText('网页来源 <b>原文片段</b>');
+    await expect(page.locator('#inspSources h3 b')).toHaveCount(0);
+    await expect(page.locator('#inspSources a[target=_blank]')).toHaveAttribute('href', 'https://example.org/evidence-source');
+    await expect(page.locator('#inspSources')).toContainText('待人工审核');
+    await page.keyboard.press('Escape');
+
     await page.locator('[data-view=memories]').first().click();
     await page.locator('#btnAddMemory').click();
     await page.locator('#researchTask [name=value]').fill('请使用简短中文。');
@@ -103,6 +183,13 @@ const assert = require('node:assert/strict');
     await page.locator('#researchTask [name=topic]').fill('alphatopic');
     await page.locator('#researchTask [type=submit]').click();
     await expect(page.locator('#skillRunResult')).toContainText('用于离线验收');
+    await page.locator('[data-run-skill]').click();
+    await page.locator('#researchTask [name=topic]').fill('alphatopic delaymarker');
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask .task-progress')).toBeVisible();
+    await page.locator('#researchTask .task-progress button').click();
+    await expect(page.locator('#researchTask .task-error')).toContainText('取消');
+    await page.locator('#researchTask [data-cancel]').first().click();
 
     await page.locator('[data-view=recommend]').first().click();
     await page.locator('#recommendTopic').fill('alphatopic');
@@ -137,6 +224,18 @@ const assert = require('node:assert/strict');
     await expect(page.locator('#collectionFilter')).toHaveValue('');
     await expect(page.locator('#paperList .list-item')).toHaveCount(2);
 
+    // 输出预算有真实可保存的设置入口，避免报错后无处调整。
+    await page.locator('[data-view=settings]').first().click();
+    await page.locator('#settingsNav [data-set=retrieval]').click();
+    await page.locator('[data-cfg="context.output_reserve_tokens"]').fill('8192');
+    await page.locator('[data-cfg="llm.max_tokens"]').fill('8192');
+    const [savedConfig] = await Promise.all([
+      page.waitForResponse(r => r.url().endsWith('/api/config') && r.request().method() === 'PATCH'),
+      page.locator('#btnSaveCfg').click(),
+    ]);
+    assert.equal(savedConfig.status(), 200);
+    await page.locator('#btnCloseSettings').click();
+
     // 新工作流在深色主题与桌面最小窗口内保持可操作。
     await page.setViewportSize({ width: 1000, height: 660 });
     await page.locator('#btnTheme').click();
@@ -149,8 +248,24 @@ const assert = require('node:assert/strict');
     const [bib] = await Promise.all([page.waitForEvent('download'), page.locator('#researchTask [type=submit]').click()]);
     assert.equal(bib.suggestedFilename(), 'litprism.bib');
     await expect(page.locator('#researchTask')).toHaveCount(0);
+    if (output) {
+      await page.locator('[data-conv]').filter({ hasText: '知识条目验收' }).click();
+      await page.locator('.answer-sources [data-evidence-ref]').first().click();
+      await expect(page.locator('#inspSources')).toContainText('已撤销');
+      await expect(page.locator('#toasts .toast')).toHaveCount(0);
+      await page.screenshot({ path: path.join(output, 'evidence-sidebar-dark-narrow.png') });
+    }
+    await page.keyboard.press('Escape');
+    await page.locator('[data-conv]').filter({ hasText: '知识条目验收' }).click();
+    await page.locator('#chatInput').fill('alphatopic delaymarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.task-progress')).toBeVisible();
+    await page.locator('.task-progress button').click();
+    await expect(page.locator('.task-progress')).toHaveCount(0);
+    await expect(page.locator('#chatStream')).toContainText('任务已取消');
+    await expect(page.locator('#btnSend')).toBeEnabled();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(errors, []);
-    console.log('Real API workflow acceptance passed: import guard + confirmation, groups, comparison, export, analysis, scoped chat, snapshots, preferences, skills, recommendations, recycle bin.');
+    console.log('Real API workflow acceptance passed: research tasks, reply source links, sidebar review/revoke, persistent provenance, web snapshots, cancellation, themes and narrow layout.');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -381,6 +381,8 @@ def _validate(cfg: Config) -> None:
     """
     from .invariants import ContextConfigView, check_config
 
+    if any(not isinstance(v, int) or isinstance(v, bool) for v in (cfg.llm.max_tokens, cfg.context.window_tokens, cfg.context.output_reserve_tokens, cfg.retrieval.top_k)):
+        raise ValueError('窗口、输出预算和召回数必须是整数。')
     view = ContextConfigView(
         window_tokens=cfg.context.window_tokens,
         step_tokens=cfg.context.step_tokens,
@@ -397,6 +399,10 @@ def _validate(cfg: Config) -> None:
     if not result.ok:
         detail = "\n  ".join(str(v) for v in result.errors)
         raise ValueError(f"上下文管理配置不合法：\n  {detail}")
+    if cfg.llm.max_tokens <= 0 or cfg.context.output_reserve_tokens <= 0:
+        raise ValueError('最大输出和输出预留必须为正。')
+    if not 1 <= cfg.retrieval.top_k <= 50:
+        raise ValueError('召回数必须在 1–50 之间。')
 
     if cfg.memory.resident_token_budget <= 0:
         raise ValueError(
@@ -471,7 +477,7 @@ def load_config(path: str | Path | None = None) -> Config:
         if cand.exists():
             if yaml is None:
                 raise RuntimeError("缺少 PyYAML，请先执行：python -m pip install PyYAML")
-            with open(cand, "r", encoding="utf-8") as f:
+            with open(cand, encoding="utf-8") as f:
                 raw = yaml.safe_load(f) or {}
             used = cand
             break

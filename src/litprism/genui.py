@@ -284,6 +284,8 @@ def enrich(comp: dict, kb: Any) -> dict:
                         "page": chunk.get("page"),
                         "section": chunk.get("section"),
                         "text": sanitize_text(chunk.get("text")),
+                        'source_kind': chunk.get('source_kind', 'paper'), 'url': chunk.get('url'),
+                        'trust_level': chunk.get('trust_level'), 'citable': chunk.get('citable'),
                     }
                 )
             else:
@@ -332,11 +334,16 @@ def _get_chunk(kb: Any, chunk_id: Any) -> dict | None:
         return None
     try:
         row = kb._con.execute(
-            "SELECT c.id AS chunk_id, c.paper_id, c.page, c.section, c.text, p.title AS paper_title"
+            "SELECT c.id AS chunk_id, c.paper_id, c.page, c.section, c.text, p.title AS paper_title, p.url, p.verify_level AS trust_level, p.deleted_at"
             " FROM chunks c LEFT JOIN papers p ON p.id = c.paper_id WHERE c.id = ?",
             (str(chunk_id),),
         ).fetchone()
-        return dict(row) if row else None
+        if row:
+            data = dict(row)
+            data['citable'] = not data['deleted_at'] and data['trust_level'] in ('verified', 'manual_confirmed')
+            return data
+        from .knowledge import source_chunk
+        return source_chunk(kb, str(chunk_id))
     except Exception:  # noqa: BLE001
         return None
 

@@ -38,10 +38,11 @@ const assert = require('node:assert/strict');
       if (url.pathname.endsWith('/messages')) data = { conversation: { title: '示例研究对话' }, items: [], sources: [] };
       if (url.pathname === '/api/paper/p_demo1/text') data = { pages: [{ page: 3, chunks: [{ section: '方法', text: '用于界面验收的原文。' }] }] };
       if (url.pathname === '/api/paper/p_demo1') data = { paper: papers[0], concepts: [] };
-      if (url.pathname.startsWith('/api/chat/')) {
+      if (url.pathname === '/api/tasks') data = { id: 'fixture-job' };
+      if (url.pathname === '/api/tasks/fixture-job') {
         sends++;
         await new Promise(r => setTimeout(r, 100));
-        data = { user: { role: 'user', content: '示例问题' }, assistant: { role: 'assistant', content: '这是界面验收回复。[P1 p.3]', citation_check: { passed: false, issues: ['示例校验提示'] } }, sources };
+        data = { status: 'succeeded', result: { user: { role: 'user', content: '示例问题' }, assistant: { role: 'assistant', content: '这是界面验收回复。[P1 p.3]', citation_check: { passed: false, issues: ['示例校验提示'] } }, sources } };
       }
       return route.fulfill({ json: data });
     });

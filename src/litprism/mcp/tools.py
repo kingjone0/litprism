@@ -149,6 +149,7 @@ class LitPrismTools:
                     "section": h.get("section"),
                     "text": h.get("text"),
                     "score": h.get("score"),
+                    'source_kind': h.get('source_kind', 'paper'), 'source_id': h.get('source_id'), 'url': h.get('url'),
                 }
                 for h in hits
             ]

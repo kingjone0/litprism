@@ -1007,3 +1007,14 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
 .task-error { padding: 0 24px 12px; color: var(--danger); }
 .reading-report { padding: 24px 0; line-height: 1.9; overflow-wrap: anywhere; }
 #recommendResults, #memoryList, #trashList { margin-top: 24px; }
+.task-progress { position: fixed; z-index: 200; bottom: 16px; right: 16px; max-width: min(520px, 90vw); padding: 12px; display: flex; gap: 12px; align-items: center; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-2); }
+.answer-sources { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 10px 0; font-size: 12px; }
+.answer-sources a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.evidence-excerpt { margin: 14px 0; padding: 12px; background: var(--panel-2); border-left: 3px solid var(--accent); }
+.source-url { overflow-wrap: anywhere; font-size: 12px; color: var(--text-2); }
+#knowledgeList, #collectionChips { margin-top: 16px; }
+.side-item-wrap [data-conv-manage] { position: absolute; right: 28px; top: 50%; transform: translateY(-50%); width: 20px; height: 20px; padding: 0; opacity: 0; pointer-events: none; }
+.side-item-wrap:hover [data-conv-manage], .side-item-wrap:focus-within [data-conv-manage] { opacity: 1; pointer-events: auto; }
+.side-item-wrap .side-item .meta { margin-right: 40px; }
+.side-item-wrap:focus-within .conv-del { display: grid; }
+.task-progress-inline { position: static; max-width: 100%; margin-top: 12px; box-shadow: none; }

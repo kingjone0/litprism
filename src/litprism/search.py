@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from .config import Config
 from .db import KnowledgeBase
 from .query import build_or_fts_query, expand_query
-from .textutil import normalize_doi, normalize_title, title_similarity, truncate
-from .verify import ArxivSource, OpenAlexSource, PaperVerifier, SourceRecord, VerificationResult
+from .textutil import normalize_doi, normalize_title, title_similarity
+from .verify import PaperVerifier, SourceRecord, VerificationResult
 from .whitelist import is_citable
 
 
@@ -31,20 +29,26 @@ def search_local(
     """
     if paper_ids is not None and not paper_ids:
         return []
+    include_knowledge = paper_ids is None
+    def finish(hits):
+        if include_knowledge:
+            from .knowledge import search_knowledge
+            hits = hits + search_knowledge(kb, query, top_k)
+        return sorted([h for h in hits if h['score'] >= kb.cfg.retrieval.min_score], key=lambda h: -h['score'])[:top_k]
     if citable_only:
         allowed = [r['id'] for r in kb._con.execute(
             "SELECT id FROM papers WHERE verify_level IN ('verified','manual_confirmed') AND deleted_at IS NULL"
         ) if paper_ids is None or r['id'] in paper_ids]
         if not allowed:
-            return []
+            return finish([])
         paper_ids = allowed
     if not expand:
         hits = kb.search_chunks(query, paper_ids=paper_ids, top_k=top_k)
-        return [h for h in hits if h['score'] >= kb.cfg.retrieval.min_score]
+        return finish(hits)
     terms = expand_query(query, llm)
     match = build_or_fts_query(terms)
     hits = kb.search_match(match, paper_ids=paper_ids, top_k=top_k, fallback_terms=terms)
-    return [h for h in hits if h['score'] >= kb.cfg.retrieval.min_score]
+    return finish(hits)
 
 
 def search_local_papers(kb: KnowledgeBase, query: str, limit: int = 10) -> list[dict]:
@@ -286,7 +290,7 @@ def import_record(
         # verify_status 与 verify_level 保持同一取值，避免两套状态互相打架
         verify_status=level or "verified",
         verify_level=level or "verified",
-        verify_confidence=float((verification.confidence if verification else 1.0)),
+        verify_confidence=float(verification.confidence if verification else 1.0),
         verify_evidence=vr_dict,
     )
     existing = kb.get_paper(pid)

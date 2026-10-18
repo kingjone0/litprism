@@ -1,0 +1,74 @@
+{
+  "source": {
+    "title": "Language Models are Few-Shot Learners",
+    "arxiv_id": "2005.14165v4",
+    "url": "https://arxiv.org/pdf/2005.14165v4",
+    "sha256": "97fd272f1fdfc18677462d0292f5fbf26ca86b4d1b485c2dba03269b643a0e83",
+    "physical_pages": 75
+  },
+  "review_method": "人工逐项对照解析文本；PTB、SuperGLUE、训练模型表、污染局限和示例图另对照 PDF 页面图像。此清单不是完整论文的事实准确率标注。",
+  "anchors": [
+    {
+      "id": "model-scale",
+      "physical_pages": [1, 8],
+      "expected": {"largest_parameters_billion": 175, "model_count": 8, "context_tokens": 2048},
+      "qualifiers": "175B 为正文模型规模；附录中的 200B 原文表述另作来源差异处理。"
+    },
+    {
+      "id": "evaluation-no-updates",
+      "physical_pages": [1, 6, 7, 19],
+      "expected": "任务评估时不更新权重；不能由此推导预训练不更新权重。"
+    },
+    {
+      "id": "ptb-direction",
+      "physical_pages": [11],
+      "expected": {"metric": "perplexity", "gpt3_zero_shot": 20.50, "prior_sota": 35.8, "better_direction": "lower"},
+      "qualifiers": "正文把领先幅度表述为 15 points；不能改写成困惑度比旧 SOTA 更高。"
+    },
+    {
+      "id": "lambada-nonmonotonic",
+      "physical_pages": [12, 13],
+      "expected": {"accuracy_zero_shot": 76.2, "accuracy_one_shot": 72.5, "accuracy_few_shot": 86.4},
+      "qualifiers": "不能概括为每个任务从 zero 到 one 到 few 都单调改善；不同设置采用不同提示格式，且有污染提醒。"
+    },
+    {
+      "id": "closed-book-triviaqa",
+      "physical_pages": [5, 13],
+      "expected": {"gpt3_few_shot": 71.2, "setting": "closed-book; no task-specific fine-tuning"},
+      "qualifiers": "表中检索型 RAG 是比较基线，不能把其检索机制归给 GPT-3。"
+    },
+    {
+      "id": "superglue-column-binding",
+      "physical_pages": [19, 20],
+      "expected": {
+        "average": {"gpt3_few_shot": 71.8, "fine_tuned_bert_large": 69.0, "fine_tuned_sota": 89.0},
+        "rte_accuracy": {"gpt3_few_shot": 69.0, "fine_tuned_bert_large": 71.7, "fine_tuned_sota": 92.5},
+        "wic_accuracy_gpt3_few_shot": 49.4,
+        "wsc_accuracy_gpt3_few_shot": 80.1
+      },
+      "qualifiers": "Average 与 RTE 是不同列；test 表和 dev 图不能不加说明直接比较。"
+    },
+    {
+      "id": "contamination-uncertainty",
+      "physical_pages": [32, 33, 44],
+      "expected": "PIQA 与 Winograd 结果有污染警示；clean 子集与原数据分布相同并无保证，不能写成已证明无污染影响。"
+    },
+    {
+      "id": "limitations-retention",
+      "physical_pages": [33, 34],
+      "expected": "作者讨论长文本重复与不连贯、自回归结构限制、预训练样本效率、few-shot 是否学到新任务的不确定性、推理成本和偏见。",
+      "qualifiers": "已读取这些片段不等于最终局限字段保留了这些信息。"
+    },
+    {
+      "id": "source-internal-differences",
+      "physical_pages": [8, 10, 17, 22, 46],
+      "expected": "正文 175B 与部分段落 200B、PIQA 表格 80.5 与正文 81.0、三位数加法表格 80.4 与正文 80.2 应分别归属来源，不能无说明选值统一。",
+      "qualifiers": "需要区分 dev/test、四舍五入、不同实验条件和真正版本差异，尚不能统一判为论文笔误。"
+    },
+    {
+      "id": "example-caption-binding",
+      "physical_pages": [61],
+      "expected": "Figure G.41 是罗马尼亚语到英语示例；算式 (2 * 4) * 6 属于 Figure G.42，不能当作 G.41 的内容不一致。"
+    }
+  ]
+}

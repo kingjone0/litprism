@@ -14,7 +14,54 @@ from ..deliverables import DeliverableStore, _safe_filename
 from ..evidence import require_citable
 
 
-def register_workflows(app, kb, cfg, task_llm):
+def register_workflows(app, kb, cfg, task_llm, verifier):
+    @app.patch('/api/conversations/{cid}')
+    def update_conversation(cid: str, req: dict):
+        current = kb.resolve_conversation(cid)
+        if current is None:
+            raise HTTPException(404, '会话不存在')
+        cid = current['id']
+        with kb.tx() as con:
+            if 'title' in req:
+                title = str(req['title']).strip()
+                if not title:
+                    raise HTTPException(400, '会话名不能为空')
+                con.execute('UPDATE conversations SET title=? WHERE id=?', (title, cid))
+            if 'pinned' in req:
+                con.execute('UPDATE conversations SET pinned=? WHERE id=?', (bool(req['pinned']), cid))
+        return {'ok': True}
+
+    @app.post('/api/library/batch')
+    def batch_papers(req: dict):
+        from ..scope import paper_scope
+        try:
+            ids = paper_scope(kb, {'paper_ids': req.get('paper_ids', [])})
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not ids or req.get('operation') not in ('delete', 'reverify'):
+            raise HTTPException(400, '请选择文献及有效操作')
+        results = []
+        from ..tasks import checkpoint
+        for index, pid in enumerate(ids, 1):
+            checkpoint(f'批量处理第 {index}/{len(ids)} 篇')
+            if req['operation'] == 'delete':
+                with kb.tx() as con:
+                    con.execute('UPDATE papers SET deleted_at=? WHERE id=?', (datetime.now().isoformat(), pid))
+                results.append({'paper_id': pid, 'deleted': True})
+            else:
+                p = kb.get_paper(pid)
+                vr = verifier.verify(title=p['title'], doi=p.get('doi'))
+                checkpoint()
+                kb.update_paper(pid, verify_level=vr.level, verify_status=vr.level,
+                                verify_confidence=vr.confidence, verify_evidence=vr.to_dict())
+                results.append({'paper_id': pid, 'level': vr.level})
+        return {'items': results}
+
+    @app.delete('/api/deliverables/{did}')
+    def delete_deliverable(did: str):
+        if not DeliverableStore(kb).delete(did):
+            raise HTTPException(404, '产出不存在')
+        return {'ok': True}
     @app.post('/api/skills/{skill_id}/run')
     def run_skill(skill_id: str, req: dict):
         from ..skills.runner import SkillRunner
@@ -153,9 +200,12 @@ def register_workflows(app, kb, cfg, task_llm):
         if not name:
             raise HTTPException(400, '分组名称不能为空')
         cid = 'col_'+uuid.uuid4().hex[:12]
+        parent = req.get('parent_id') or None
+        if parent and not kb._con.execute('SELECT id FROM collections WHERE id=? AND deleted_at IS NULL', (parent,)).fetchone():
+            raise HTTPException(400, '父分组不存在')
         with kb.tx() as con:
-            con.execute('INSERT INTO collections (id,name,sort_order,created_at) VALUES (?,?,?,?)',
-                        (cid, name, int(req.get('sort_order') or 0), datetime.now().isoformat()))
+            con.execute('INSERT INTO collections (id,name,parent_id,sort_order,created_at) VALUES (?,?,?,?,?)',
+                        (cid, name, parent, int(req.get('sort_order') or 0), datetime.now().isoformat()))
         return {'id': cid}
 
     @app.patch('/api/collections/{cid}')
@@ -170,12 +220,19 @@ def register_workflows(app, kb, cfg, task_llm):
                 con.execute('UPDATE collections SET name=? WHERE id=?', (name, cid))
             if 'sort_order' in req:
                 con.execute('UPDATE collections SET sort_order=? WHERE id=?', (int(req['sort_order']), cid))
+            if 'parent_id' in req:
+                from ..scope import collection_ids
+                parent = req['parent_id'] or None
+                if parent and (parent in collection_ids(kb, cid) or not kb._con.execute('SELECT id FROM collections WHERE id=? AND deleted_at IS NULL', (parent,)).fetchone()):
+                    raise HTTPException(400, '父分组不存在或会形成循环')
+                con.execute('UPDATE collections SET parent_id=? WHERE id=?', (parent, cid))
         return {'ok': True}
 
     @app.delete('/api/collections/{cid}')
     def delete_collection(cid: str):
         with kb.tx() as con:
             con.execute('UPDATE papers SET collection_id=NULL WHERE collection_id=?', (cid,))
+            con.execute('UPDATE collections SET parent_id=(SELECT parent_id FROM collections WHERE id=?) WHERE parent_id=?', (cid, cid))
             con.execute('UPDATE collections SET deleted_at=? WHERE id=?', (datetime.now().isoformat(), cid))
         return {'ok': True}
 

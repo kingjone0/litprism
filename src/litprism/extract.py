@@ -26,7 +26,7 @@ _FIELDS = [
 ]
 
 
-def paper_context(kb: KnowledgeBase, paper: dict, budget: int = 24000) -> str:
+def paper_context(kb: KnowledgeBase, paper: dict, budget: int | None = None) -> str:
     """为 LLM 拼装论文上下文：按章节重要性取原文，超预算时按比例截断。"""
     chunks = kb.get_chunks(paper["id"])
     by_sec: dict[str, list[str]] = {}
@@ -48,45 +48,123 @@ def paper_context(kb: KnowledgeBase, paper: dict, budget: int = 24000) -> str:
         text = "\n".join(by_sec[sec])
         body.append(f"\n### {sec}\n{text}")
     blob = "\n".join(parts) + "\n" + "\n".join(body)
-    return truncate(blob, budget, ellipsis="\n…（正文过长，已截断）")
+    return blob if budget is None else truncate(blob, budget, ellipsis="\n…（正文过长，已截断）")
 
 
-def analyze_paper(
-    kb: KnowledgeBase,
-    cfg: Config,
-    llm,
-    paper_id: str,
-    *,
-    force: bool = False,
-    with_concepts: bool = True,
-) -> dict:
-    """对单篇论文做结构化解读，写入 analyses / concepts 表。"""
-    paper = kb.get_paper(paper_id)
-    if not paper:
-        raise ValueError(f"未找到论文：{paper_id}")
+def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
+                  force: bool = False, with_concepts: bool = True) -> dict:
     from .evidence import citation_issues, require_citable
+    from .reading import excerpt_text, reading_batches
+    paper = kb.get_paper(paper_id)
+    if paper is None:
+        raise ValueError(f'未找到论文：{paper_id}')
     require_citable(paper.get('verify_level'))
     if not force:
         cached = kb.get_analysis(paper_id)
-        if cached and cached.get("payload"):
-            return cached["payload"]
-
-    ctx = paper_context(kb, paper)
-    if len(ctx) < 200:
-        raise ValueError(f"论文 {paper_id} 正文过少，无法解读（可能是扫描版 PDF，需先 OCR）")
-
-    messages = [
-        {"role": "system", "content": EXTRACT_SYSTEM + '\n每个非空解读字段必须在 field_evidence 中提供来源标记列表，例如 {"methodology":["P1 p.3"]}。只用本次给定的 P 编号和页码；没有依据的字段留空。'},
-        {"role": "user", "content": f"请解析下面这篇论文：\n\n{ctx}"},
-    ]
-    from .context.meter import Meter
-    if sum(Meter(cfg).estimate_message(m) for m in messages) > cfg.context.available_tokens:
-        raise ValueError('解读原文超过上下文预算，请调整窗口或分块。')
-    data = llm.chat_json(messages, task="extract")
+        if cached and cached.get('payload'):
+            return cached['payload']
     chunks = kb.get_chunks(paper_id)
-    excerpts = [dict(c, tag=f'P{i}') for i, c in enumerate(chunks, 1)
-                if f"chunk_id={c['id']} " in ctx]
+    if sum(len(c['text']) for c in chunks) < 150:
+        raise ValueError('正文过少，无法解读；扫描件需先转写。')
+    extract_system = EXTRACT_SYSTEM + '\n每个非空字段必须在 field_evidence 提供原文标记列表；无依据留空。'
+    extract_system += '\n每个独立句子就地附其直接依据，不把多个分号连接的结论统一在段末附一串引用；每句最多 3 个直接来源，复杂内容分成多句。'
+    concept_system = CONCEPTS_SYSTEM + '\n每条 definition 必须含本批原文引用 [P# p.N]；无页码不写页码，无依据不生成。'
+    # 较长的指令作为分批预算基准，确保两类请求都容纳得下。
+    system = max([extract_system, concept_system], key=len)
+    instruction = '仅分析本批原文。未读取部分不能称为原文未提及。'
+    batches, all_excerpts, coverage = reading_batches(kb, cfg, [paper], system, instruction)
+    results, all_issues, all_concepts, concept_errors, semantic_inputs, batch_notes = [], [], [], [], [], []
+    from .tasks import checkpoint
+    for index, excerpts in enumerate(batches, 1):
+        checkpoint(f'解读原文第 {index}/{len(batches)} 批')
+        ctx = instruction+'\n\n'+excerpt_text(excerpts)
+        data = llm.chat_json([{'role': 'system', 'content': extract_system},
+                              {'role': 'user', 'content': ctx}], task='extract')
+        if not isinstance(data, dict):
+            raise ValueError('解读必须返回 JSON 对象。')
+        data, issues = _validate_fields(data, excerpts)
+        all_issues.extend(issues)
+        results.append(data)
+        semantic_inputs.append(([(field, data.get(field) or '', (data.get('field_evidence') or {}).get(field) or [])
+                                 for field, _ in _FIELDS], excerpts))
+        if isinstance(data.get('field_notes'), str) and data['field_notes'].strip():
+            batch_notes.append({'batch': index, 'text': data['field_notes'], 'status': 'unreviewed_model_note'})
+        if with_concepts:
+            try:
+                cdata = llm.chat_json([{'role': 'system', 'content': concept_system},
+                                       {'role': 'user', 'content': ctx}], task='concepts')
+                concepts = cdata.get('concepts') or []
+                if not isinstance(concepts, list):
+                    raise ValueError('concepts 必须是数组。')
+                all_concepts.extend(c for c in concepts if isinstance(c, dict)
+                                    and isinstance(c.get('term'), str) and isinstance(c.get('definition'), str)
+                                    and not citation_issues(c['definition'], excerpts))
+            except Exception as exc:
+                concept_errors.append(f'{type(exc).__name__}: {exc}')
+    merged = dict(results[0])
+    evidence = {}
+    for field, _ in _FIELDS:
+        parts = []
+        for result in results:
+            value = result.get(field) or ''
+            refs = (result.get('field_evidence') or {}).get(field) or []
+            if value:
+                # 不做二次生成；每段保留本批字段已检查的依据。
+                part = value+'\n依据：'+' '.join('['+str(r).strip('[]')+']' for r in refs)
+                if part not in parts:
+                    parts.append(part)
+                evidence.setdefault(field, []).extend(refs)
+        merged[field] = '\n\n'.join(parts)
+    merged['field_evidence'] = {k: list(dict.fromkeys(v)) for k, v in evidence.items()}
+    from .semantics import run_review, supported_fields
+    semantic = run_review(semantic_inputs, all_excerpts, cfg, llm)
+    merged['_semantic_review'] = semantic
+    merged['_batch_notes'] = batch_notes
+    if semantic['status'] != 'not_run':
+        safe = supported_fields(semantic)
+        for field, _ in _FIELDS:
+            merged[field] = safe.get(field, '')
+        # Only retained claims may contribute displayed evidence.
+        merged['field_evidence'] = {
+            field: list(dict.fromkeys(q['tag']+(f" p.{q['page']}" if q['page'] is not None else '')
+                                     for item in semantic['items'] if item['field'] == field
+                                     and item['status'] == 'machine_supported' for q in item['quotes']))
+            for field, _ in _FIELDS if merged[field]}
+    merged['keywords'] = list(dict.fromkeys(k for r in results for k in r.get('keywords', []) if isinstance(k, str)))
+    missing_fields = [label for field, label in _FIELDS if not merged[field]]
+    merged['field_notes'] = ('本次未获得可校验依据的字段：'+'、'.join(missing_fields)+'。请核对原文，不能据此断言全文未提及。') if missing_fields else '所有展示字段均保留本批原文引用；内容仍需结合原文核对。'
+    merged['_coverage'] = coverage
+    merged['_coverage']['reading_mode'] = 'whole' if len(batches) == 1 else 'batched'
+    merged['_citation_check'] = {'passed': not all_issues, 'issues': list(dict.fromkeys(all_issues))}
+    merged['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': paper_id, 'page': e['page']} for e in all_excerpts]
+    merged['_model'] = getattr(llm, 'name', 'unknown')
+    if not isinstance(merged.get('field'), str) or citation_issues(merged.get('field') or '', all_excerpts):
+        merged['field'] = ''
+    unique = {(c['term'], c['definition']): c for c in all_concepts}
+    merged['concepts'] = list(unique.values())
+    if concept_errors:
+        merged['_concepts_error'] = '；'.join(concept_errors)
+    # 所有批次成功后原子替换，失败时保留上一版。
+    checkpoint('保存已校验解读')
+    from .evidence import stored_excerpts
+    stored_excerpts(kb, merged['_citations'])
+    with kb.tx() as con:
+        con.execute('DELETE FROM concepts WHERE paper_id=?', (paper_id,))
+        kb.add_concepts(paper_id, merged['concepts'])
+        kb.save_analysis(paper_id, merged, model=merged['_model'])
+    return merged
+
+
+def _validate_fields(data: dict, excerpts: list[dict]):
+    from .evidence import citation_issues
     issues = []
+    allowed = {field for field, _ in _FIELDS} | {'field', 'field_notes', 'field_evidence', 'keywords'}
+    if any(k not in allowed and not k.startswith('_') for k in data):
+        # A loose JSON decoder may recover an object whose broken string became
+        # a giant key. Citation syntax alone must not release that batch.
+        clean = {field: '' for field, _ in _FIELDS}
+        clean.update(field_evidence={}, keywords=[], field_notes='模型返回未知字段或结构损坏，本批字段未放行。')
+        return clean, ['模型返回未知字段或结构损坏，本批字段未放行；请核对原始响应。']
     evidence = data.get('field_evidence') or {}
     if not isinstance(evidence, dict):
         evidence = {}
@@ -116,37 +194,9 @@ def analyze_paper(
         else:
             evidence[field] = refs
     data['field_evidence'] = evidence
-    data['_citation_check'] = {'passed': not issues, 'issues': issues}
-    data['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': paper_id, 'page': e['page']} for e in excerpts]
     keywords = data.get('keywords')
     data['keywords'] = [v for v in keywords if isinstance(v, str)] if isinstance(keywords, list) else []
-    # 术语只能来自本次独立校验，不能信任 extract 顺带返回的 concepts。
-    data['concepts'] = []
-    data["_model"] = getattr(llm, "name", "unknown")
-
-    kb.save_analysis(paper_id, data, model=getattr(llm, "name", "unknown"))
-    with kb.tx() as con:
-        con.execute('DELETE FROM concepts WHERE paper_id = ?', (paper_id,))
-
-    if with_concepts:
-        try:
-            cm = [
-                {"role": "system", "content": CONCEPTS_SYSTEM + '\n每条 definition 必须带本次原文的 [P# p.N] 引用；无页码不写页码。没有原文依据时不要生成该术语。'},
-                {"role": "user", "content": f"论文标题：{paper['title']}\n\n{ctx}"},
-            ]
-            cdata = llm.chat_json(cm, task="concepts")
-            concepts = [c for c in cdata.get('concepts') or []
-                        if isinstance(c, dict) and isinstance(c.get('term'), str)
-                        and isinstance(c.get('definition'), str)
-                        and not citation_issues(c['definition'], excerpts)]
-            if concepts:
-                kb.add_concepts(paper_id, concepts)
-                data["concepts"] = concepts
-        except Exception as e:  # noqa: BLE001
-            data["_concepts_error"] = f"{type(e).__name__}: {e}"
-
-    kb.save_analysis(paper_id, data, model=getattr(llm, 'name', 'unknown'))
-    return data
+    return data, issues
 
 
 def analyze_all(
@@ -197,7 +247,7 @@ def format_analysis(paper: dict, analysis: dict, *, include_concepts: bool = Tru
     for key, field_label in _FIELDS:
         val = (analysis.get(key) or "").strip()
         lines.append(f"## {field_label}")
-        lines.append(val if val else "（原文未明确给出，已留空）")
+        lines.append(val if val else "（当前提取未找到可校验依据，已留空；请核对原文）")
         refs = (analysis.get('field_evidence') or {}).get(key) or []
         if refs:
             lines.append('依据：' + ' '.join('['+str(r).strip('[]')+']' for r in refs))
@@ -227,6 +277,11 @@ def format_analysis(paper: dict, analysis: dict, *, include_concepts: bool = Tru
                      "仅用于演示流程，不构成对该论文的学术解读。配置真实模型后请用 `analyze --force` 重跑。")
     if (analysis.get('_citation_check') or {}).get('passed') is False:
         lines.append('> 引用校验未全部通过，缺少依据的字段已留空。')
+    semantic = analysis.get('_semantic_review') or {}
+    if semantic:
+        lines.append('> '+semantic.get('note', ''))
+        if semantic.get('pending'):
+            lines.append(f"> {semantic['pending']} 条陈述待人工核对，未列入上述结论；请在界面查看双方来源。")
     return "\n".join(lines)
 
 

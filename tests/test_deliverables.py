@@ -147,7 +147,7 @@ class TestExport:
         """⭐ 导出必须带出来源 —— 没有引用清单的交付物是不可追溯的。"""
         cfg, kb = env
         s = DeliverableStore(kb)
-        did = s.add(type="review", title="综述", content="正文内容", citations=CITES)
+        did = s.add(type="review", title="综述", content="正文内容 [P1 p.3]", citations=CITES)
         p = s.export(did, tmp_path / "out.md")
         text = p.read_text(encoding="utf-8")
 
@@ -172,17 +172,17 @@ class TestExport:
     def test_json_export(self, env, tmp_path):
         cfg, kb = env
         s = DeliverableStore(kb)
-        did = s.add(type="comparison", title="对比", content="x", citations=CITES)
+        did = s.add(type="comparison", title="对比", content="x [P1 p.3]", citations=CITES)
         p = s.export(did, tmp_path / "c.json", fmt="json")
         data = json.loads(p.read_text(encoding="utf-8"))
         assert data["type"] == "comparison"
         assert data["citation_count"] == 2
-        assert data["content"] == "x"
+        assert data["content"] == "x [P1 p.3]"
 
     def test_export_promotes_draft_to_exported(self, env, tmp_path):
         cfg, kb = env
         s = DeliverableStore(kb)
-        did = s.add(type="notes", title="笔记", content="x", citations=CITES)
+        did = s.add(type="notes", title="笔记", content="x [P1 p.3]", citations=CITES)
         s.export(did, tmp_path / "a.md")
         assert s.get(did).status == "exported"
 
@@ -190,7 +190,7 @@ class TestExport:
         """定稿状态更「重」，导出不该把它降级。"""
         cfg, kb = env
         s = DeliverableStore(kb)
-        did = s.add(type="notes", title="笔记", content="x", status="final", citations=CITES)
+        did = s.add(type="notes", title="笔记", content="x [P1 p.3]", status="final", citations=CITES)
         s.export(did, tmp_path / "a.md")
         assert s.get(did).status == "final"
 
@@ -202,8 +202,8 @@ class TestExport:
     def test_export_all(self, env, tmp_path):
         cfg, kb = env
         s = DeliverableStore(kb)
-        s.add(type="review", title="综述 A", content="x", citations=CITES)
-        s.add(type="notes", title="笔记 B", content="y", citations=CITES)
+        s.add(type="review", title="综述 A", content="x [P1 p.3]", citations=CITES)
+        s.add(type="notes", title="笔记 B", content="y [P2 p.7]", citations=CITES)
         paths = s.export_all(tmp_path / "out")
         assert len(paths) == 2
         assert all(p.exists() for p in paths)

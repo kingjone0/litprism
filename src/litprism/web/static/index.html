@@ -37,6 +37,7 @@
         <button class="side-item" data-view="verify"><span data-icon="shield"></span><span class="label">真实性核验</span></button>
         <button class="side-item" data-view="recommend"><span data-icon="search"></span><span class="label">发现文献</span></button>
         <button class="side-item" data-view="deliverables"><span data-icon="document"></span><span class="label">研究产出</span></button>
+        <button class="side-item" data-view="knowledge"><span data-icon="library"></span><span class="label">来源与知识</span></button>
       </nav>
 
       <div class="side-scroll">
@@ -47,6 +48,7 @@
           </button>
           <div class="side-items" id="convList">
           </div>
+          <input class="input" id="convSearch" placeholder="搜索会话标题或消息" aria-label="搜索会话">
         </section>
 
         <section class="side-section">
@@ -97,7 +99,10 @@
             <button class="btn" id="btnMovePapers">移动到分组</button>
             <button class="btn" id="btnCompareSelected" disabled>对比所选</button>
             <button class="btn" id="btnPaperExport">导出文献</button>
+            <button class="btn" id="btnBatchDelete">批量移入回收站</button>
+            <button class="btn" id="btnBatchVerify">重新核验所选</button>
           </div>
+          <div id="collectionChips" class="row wrap"></div>
           <div id="importResults" aria-live="polite"></div>
           <div class="library-summary" id="libSummary"></div>
           <div class="section-heading"><h2>全部文献</h2><span>核验状态随文献保留</span></div>
@@ -108,6 +113,11 @@
 
         <section class="pane" data-pane="paper">
           <div id="paperDetail"></div>
+        </section>
+        <section class="pane" data-pane="knowledge">
+          <div class="page-head"><div class="page-title">来源与知识</div><p class="page-sub">候选先审核。确认后进入知识库；网页和知识条目保留原始类型，不冒充论文。</p></div>
+          <div class="row wrap"><button class="btn primary" id="btnAddKnowledge">保存原文候选</button><input class="input" id="webEvidenceQuery" placeholder="搜索网页候选（需要搜索服务配置）"><button class="btn" id="btnSearchEvidence">搜索网页</button></div>
+          <div id="knowledgeList"></div>
         </section>
 
         <section class="pane" data-pane="chat">

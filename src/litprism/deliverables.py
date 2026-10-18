@@ -93,6 +93,10 @@ class Deliverable:
                 bits.append(f"[{c['tag']}]")
             if c.get("chunk_id"):
                 bits.append(f"chunk:{c['chunk_id']}")
+            if c.get('source_kind') and c['source_kind'] != 'paper':
+                bits.append('人工确认的'+('网页快照' if c['source_kind'] == 'web' else '知识条目'))
+            if c.get('url'):
+                bits.append(str(c['url']))
             lines.append(f"{i}. " + " · ".join(bits))
         return "\n".join(lines)
 
@@ -301,13 +305,17 @@ class DeliverableStore:
         if not isinstance(d.citations, list) or not d.citations:
             raise ValueError("没有引用来源，禁止导出学术交付物。")
         excerpts = stored_excerpts(self.kb, d.citations)
-        issues = citation_issues(d.content, excerpts, required=False)
-        if (d.source_scope.get('citation_check') or {}).get('passed') is False:
+        issues = citation_issues(d.content, excerpts)
+        check = d.source_scope.get('citation_check') or {}
+        if not isinstance(check, dict):
+            raise ValueError('引用校验记录格式错误。')
+        if check.get('passed') is False:
             issues.append('生成时的引用校验未通过。')
         if issues:
             raise ValueError('引用校验未通过：' + '；'.join(issues))
         d.citations = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': e['paper_id'],
-                        'paper_title': e['paper_title'], 'page': e['page']} for e in excerpts]
+                        'paper_title': e['paper_title'], 'page': e['page'], 'source_kind': e.get('source_kind', 'paper'),
+                        'source_id': e.get('source_id'), 'url': e.get('url')} for e in excerpts]
 
     def export_all(self, out_dir: str | Path, *, fmt: str = "md") -> list[Path]:
         for d in self.list(limit=1000):

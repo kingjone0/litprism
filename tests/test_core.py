@@ -404,7 +404,9 @@ class TestCitationGuard:
 
         agent, kb = self._agent(tmp_path)
         res = QAAnswer(question="q", answer="结论是 X [P1 p.3]，另一条是 Y [P2 p.7]。")
-        res.excerpts = [{"tag": "P1", "page": 3}, {"tag": "P2", "page": 7}]
+        pid = kb.add_paper(title='Evidence', verify_level='verified')
+        kb.add_chunks(pid, [{'text': 'X', 'page': 3}, {'text': 'Y', 'page': 7}])
+        res.excerpts = [dict(c, chunk_id=c['id'], tag=f'P{i}') for i, c in enumerate(kb.get_chunks(pid), 1)]
         agent._check_citations(res)
         assert res.citation_check_passed is True
         kb.close()

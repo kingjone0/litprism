@@ -42,9 +42,15 @@ def stored_excerpts(kb, citations: list[dict]) -> list[dict]:
             "SELECT c.*, p.verify_level, p.title AS paper_title, p.deleted_at FROM chunks c"
             " JOIN papers p ON p.id=c.paper_id WHERE c.id=?", (cite.get('chunk_id') or cite.get('id'),),
         ).fetchone()
-        if row is None or row['deleted_at'] or not is_citable(row['verify_level']):
-            raise ValueError("引用片段已失效或文献未经核验，禁止导出。")
-        e = dict(row)
+        if row is None:
+            from .knowledge import source_chunk
+            e = source_chunk(kb, cite.get('chunk_id') or cite.get('id'))
+            if e is None or e['trust_level'] != 'manual_confirmed':
+                raise ValueError('引用知识已失效或未经人工确认，禁止导出。')
+        else:
+            if row['deleted_at'] or not is_citable(row['verify_level']):
+                raise ValueError("引用片段已失效或文献未经核验，禁止导出。")
+            e = dict(row)
         if cite.get('paper_id') and cite['paper_id'] != e['paper_id']:
             raise ValueError("引用片段不属于指定论文。")
         e['tag'] = cite.get('tag') or f'P{i+1}'

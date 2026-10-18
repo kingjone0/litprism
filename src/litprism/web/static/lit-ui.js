@@ -202,13 +202,14 @@ const LitUI = (() => {
             ? `<div class="lui-cite"><div class="lui-missing">片段 ${esc(i.chunk_id)} 已失效</div></div>`
             : `<div class="lui-cite">
                 <div class="lui-cite-head" data-cite="${idx}">
-                  <span class="pg">p.${i.page ?? '?'}</span>
+                  <span class="pg">${i.page == null ? '无页码' : 'p.'+esc(i.page)}</span>
                   ${i.section ? `<span class="sec">${esc(i.section)}</span>` : ''}
                   <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                     ${esc(i.paper_title || i.paper_id || '')}
                   </span>
                   <span class="toggle">▾</span>
                 </div>
+                ${i.citable === false ? '<div class="lui-degraded">当前来源不可作为事实证据，请在来源详情核对状态。</div>' : ''}
                 <div class="lui-cite-text" data-cite-text="${idx}">${esc(i.text || '')}</div>
               </div>`).join('')}
         </div>

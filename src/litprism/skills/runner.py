@@ -120,6 +120,14 @@ class SkillRunner:
 
         m = entry.manifest
         inputs = dict(inputs or {})
+        for inp in m.inputs:
+            if inp.type in ('papers', 'collection') and inp.key in inputs:
+                value = inputs[inp.key]
+                # 可选范围的空表单不代表全库；显式空列表表示不选任何文献。
+                if value != '':
+                    inputs['paper_ids' if inp.type == 'papers' else 'collection_id'] = value
+                elif not inp.required:
+                    inputs.pop(inp.key, None)
 
         # ---- ① 输入契约校验 ----
         missing = [i.key for i in m.inputs if i.required and not str(inputs.get(i.key, "")).strip()]
@@ -166,9 +174,17 @@ class SkillRunner:
             )
 
         # ---- ⑥ 引用校验（框架执行，不依赖 Skill 作者）----
+        from ..tasks import checkpoint
+        checkpoint('检查 Skill 引用与保存产出')
         check = CitationCheck()
         if m.citation_required:
             check = self._check_citations(answer, excerpts)
+            from ..evidence import stored_excerpts
+            try:
+                stored_excerpts(self.kb, [{'tag': e['tag'], 'chunk_id': e.get('id') or e.get('chunk_id'), 'paper_id': e.get('paper_id')} for e in excerpts])
+            except ValueError as exc:
+                check.passed = False
+                check.issues.append(str(exc))
 
         # ---- ⑦ 落库 ----
         result = SkillRunResult(
@@ -194,6 +210,8 @@ class SkillRunner:
     def _prefetch(self, m: SkillManifest, inputs: dict) -> tuple[dict, list[dict]]:
         """按 context 声明取上下文。**只调用白名单内的能力。**"""
         allowed = set(m.capabilities)
+        from ..scope import paper_scope
+        paper_scope(self.kb, inputs)  # 范围错误须终止，不能吞掉后继续全库预取。
         out: dict[str, Any] = {}
         excerpts: list[dict] = []
 
@@ -205,6 +223,7 @@ class SkillRunner:
             if cap not in CAPABILITIES:
                 continue
             args = {k: _render_value(v, inputs) for k, v in spec.args.items()}
+            paper_scope(self.kb, inputs, args)
             try:
                 data = self._dispatch(cap, args, inputs)
             except Exception as e:  # noqa: BLE001 - 单个能力失败不应中断整体
@@ -218,19 +237,23 @@ class SkillRunner:
         return out, excerpts
 
     def _dispatch(self, cap: str, args: dict, inputs: dict) -> Any:
+        from ..scope import paper_scope
         from ..search import search_local
+        scope = paper_scope(self.kb, inputs, args)
 
         if cap == "search_passages":
             query = str(args.get("query") or inputs.get("topic") or inputs.get("focus") or "")
             top_k = int(args.get("top_k") or 8)
             if not query:
                 return []
-            return search_local(self.kb, query, top_k=top_k, citable_only=True)
+            return search_local(self.kb, query, top_k=top_k, citable_only=True, paper_ids=scope)
 
         if cap == "search_papers":
             query = str(args.get("query") or "")
             limit = int(args.get("limit") or 10)
             papers = self.kb.list_papers()
+            if scope is not None:
+                papers = [p for p in papers if p['id'] in scope]
             if query:
                 q = query.lower()
                 papers = [p for p in papers if q in (p.get("title") or "").lower()]
@@ -240,12 +263,16 @@ class SkillRunner:
             pid = args.get("paper_id") or inputs.get("paper_id")
             if not pid:
                 return []
+            if scope is not None and pid not in scope:
+                return []
+            if self.kb.get_paper(str(pid)) is None:
+                return []
             a = self.kb.get_analysis(str(pid))
             return [a] if a else []
 
         if cap == "list_collections":
             rows = self.kb._con.execute(
-                "SELECT id, name, parent_id FROM collections ORDER BY sort_order, name"
+                "SELECT id, name, parent_id FROM collections WHERE deleted_at IS NULL ORDER BY sort_order, name"
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -253,7 +280,8 @@ class SkillRunner:
             from ..relations import compute_relations
 
             threshold = float(args.get("threshold") or 0.25)
-            return compute_relations(self.kb, threshold=threshold, persist=False)
+            edges = compute_relations(self.kb, threshold=threshold, persist=False)
+            return [e for e in edges if scope is None or (e['paper_a'] in scope and e['paper_b'] in scope)]
 
         if cap == "verify_paper":
             from ..verify import PaperVerifier
@@ -274,7 +302,7 @@ class SkillRunner:
             for pid in ids:
                 a = self.kb.get_analysis(str(pid))
                 p = self.kb.get_paper(str(pid))
-                if p:
+                if p and (scope is None or pid in scope):
                     out.append({"paper": p, "analysis": a})
             return out
 
@@ -322,6 +350,8 @@ class SkillRunner:
             parts.append("【检索到的原文片段】")
             for e in excerpts:
                 head = f"[{e['tag']}] {e.get('paper_title') or e.get('paper_id')}"
+                if e.get('source_kind') and e['source_kind'] != 'paper':
+                    head += f" · 人工确认的{e['source_kind']}快照 · {e.get('url') or '用户知识条目'}（不是自动核验论文）"
                 if e.get("page") is not None:
                     head += f" 第 {e['page']} 页"
                 if e.get("section"):
@@ -425,6 +455,9 @@ def _render_template(template: str, inputs: dict) -> str:
 
 def _render_value(value: Any, inputs: dict) -> Any:
     if isinstance(value, str):
+        exact = _VAR_RE.fullmatch(value)
+        if exact and exact.group(1) in inputs:
+            return inputs[exact.group(1)]
         return _render_template(value, inputs)
     return value
 

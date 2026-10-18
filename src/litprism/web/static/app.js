@@ -181,9 +181,11 @@ const VIEW_TITLES = {
   library: '知识库', paper: '论文', chat: '对话', compare: '对比',
   recommend: '发现文献', memories: '研究偏好', trash: '回收站',
   verify: '核验', deliverables: '交付物', skills: 'Skill', settings: '设置',
+  knowledge: '来源与知识',
 };
 
 function openView(view, opts = {}) {
+  S.evidenceRef = null;
   S.activeView = view;
   $('#tbTitle').textContent = VIEW_TITLES[view] || view;
   $$('.pane').forEach(p => p.classList.toggle('active', p.dataset.pane === view));
@@ -206,6 +208,7 @@ function openView(view, opts = {}) {
     library: loadLibrary, paper: loadPaperDetail, chat: loadChat,
     deliverables: loadDeliverables, skills: loadSkills, verify: loadVerify,
     compare: loadComparison, memories: loadMemories, trash: loadTrash,
+    knowledge: loadKnowledge,
   }[view];
   if (loader) loader().catch(e => toast(e.message, true));
   refreshInspector();
@@ -244,7 +247,7 @@ function renderTabs() {
 async function loadSidebar() {
   const [papers, convs, skills] = await Promise.all([
     api('/api/papers').catch(() => ({ items: [] })),
-    api('/api/conversations').catch(() => ({ items: [] })),
+    api('/api/conversations?q='+encodeURIComponent($('#convSearch')?.value || '')).catch(() => ({ items: [] })),
     api('/api/skills').catch(() => ({ items: [], stats: {} })),
   ]);
   S.papers = papers.items || [];
@@ -265,12 +268,14 @@ async function loadSidebar() {
       <div class="side-item-wrap">
         <button class="side-item ${c.id === S.activeConv ? 'active' : ''}" data-conv="${esc(c.id)}">
           ${icon('chat')}
-          <span class="label">${esc(short(c.title, 16))}</span>
+          <span class="label">${c.pinned ? '★ ' : ''}${esc(short(c.title, 16))}</span>
           <span class="meta">${c.message_count || 0}</span>
         </button>
         <button class="conv-del" data-conv-del="${esc(c.id)}" title="删除会话">✕</button>
+        <button class="btn sm" data-conv-manage="${esc(c.id)}" title="会话名称与置顶">⋯</button>
       </div>`).join('') : '<div class="side-empty">新建对话，开始一次有据可查的研究。</div>';
   $('#btnNewConv').onclick = newConversation;
+  $$('[data-conv-manage]', convBox).forEach(b => b.onclick = () => editConversation(S.conversations.find(c => c.id === b.dataset.convManage)));
   $$('[data-conv]', convBox).forEach(b => b.onclick = () => openView('chat', { convId: b.dataset.conv }));
   $$('[data-conv-del]', convBox).forEach(b => b.onclick = async e => {
     e.stopPropagation();
@@ -319,7 +324,7 @@ async function loadLibrary() {
         (p.authors || []).some(a => (a || '').toLowerCase().includes(q)))
     : S.papers;
   const group = $('#collectionFilter').value;
-  if (group) items = items.filter(p => p.collection_id === group);
+  if (group) items = items.filter(p => collectionDescendants(group).includes(p.collection_id));
 
   const st = S.status?.stats || {};
   $('#libSub').textContent =
@@ -341,7 +346,7 @@ async function loadLibrary() {
   }
 
   box.innerHTML = items.map(p => `
-    <div class="list-item">
+    <div class="list-item" draggable="true" data-drag-paper="${esc(p.id)}">
       <input type="checkbox" data-select-paper="${esc(p.id)}" aria-label="选择 ${esc(p.title)}" ${S.selectedPapers?.has(p.id) ? 'checked' : ''}>
       <span class="paper-mark">${icon('document')}</span>
       <button class="list-main paper-link" data-paper="${esc(p.id)}">
@@ -357,6 +362,7 @@ async function loadLibrary() {
     </div>`).join('');
 
   $$('[data-paper]', box).forEach(b => b.onclick = () => openView('paper', { paperId: b.dataset.paper }));
+  $$('[data-drag-paper]', box).forEach(row => row.ondragstart = e => e.dataTransfer.setData('application/litprism-paper', row.dataset.dragPaper));
   $$('[data-select-paper]', box).forEach(cb => cb.onchange = () => {
     if (cb.checked) S.selectedPapers.add(cb.dataset.selectPaper); else S.selectedPapers.delete(cb.dataset.selectPaper);
     $('#btnCompareSelected').disabled = S.selectedPapers.size < 2;
@@ -412,6 +418,9 @@ async function loadPaperDetail() {
       </div>
 
       <div data-ppane="analysis">
+        ${coverageNote(a._coverage)}
+        ${semanticReviewPanel(a._semantic_review, {kind: 'paper', id: p.id})}
+        ${a._concepts_error ? `<div class="lui-degraded">术语提取未完成：${esc(a._concepts_error)}</div>` : ''}
         ${a._mock ? '<div class="lui-degraded">离线占位模型（mock）：仅演示流程，不构成真实学术解读。配置模型后请重新解读。</div>' : ''}
         ${a._model ? `<div class="source-intro">生成模型：${esc(a._model)}</div>` : ''}
         ${a._citation_check?.passed === false ? `<div class="lui-degraded">部分解读字段缺少可回溯证据，已留空：${esc((a._citation_check.issues || []).join('；'))}</div>` : ''}
@@ -482,7 +491,7 @@ async function loadPaperDetail() {
     $('#btnReanalyze').onclick = async () => {
       try {
         toast('正在解读…');
-        await api(`/api/analyze/${encodeURIComponent(S.activePaper)}?force=true`, { method: 'POST' });
+        await runTask('analyze', { paper_id: S.activePaper });
         toast('解读完成');
         loadPaperDetail();
       } catch (e) { toast(e.message, true); }
@@ -523,7 +532,7 @@ function analysisSection(label, text) {
   const field = { '研究问题': 'research_question', '方法': 'methodology', '实验设计': 'experiment_design',
     '主要结论': 'key_conclusions', '创新点': 'innovations', '局限': 'limitations' }[label];
   const refs = (S.paperAnalysis?.field_evidence || {})[field] || [];
-  if (!text) return `<div class="source-intro">${esc(label)}：原文依据不足，已留空。</div>`;
+  if (!text) return `<div class="source-intro">${esc(label)}：未获得可展示的核查结果，请查看待核对项与原文。</div>`;
   return `<div style="margin-bottom:16px">
     <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:5px">${label}</div>
     <div class="reading-text">${esc(text)}</div>
@@ -545,6 +554,7 @@ async function loadChat() {
     </div>`;
     return;
   }
+  box.innerHTML = '<p role="status">正在加载会话与来源…</p>';
 
   try {
     const d = await api(`/api/conversations/${encodeURIComponent(convId)}/messages`);
@@ -560,7 +570,7 @@ async function loadChat() {
           <div class="row">
             <div>
               <div class="page-title">${esc(d.conversation.title)}</div>
-              <div class="page-sub">基于本地文献 · 引用可回溯</div>
+              <div class="page-sub">基于当前范围内的可引用原文 · 来源可回溯</div>
             </div>
           </div>
         </div>
@@ -582,6 +592,7 @@ async function loadChat() {
               <span class="muted" style="font-size:11.5px">模型</span>
               <select class="select" id="chatModel"
                 style="width:auto;min-width:210px;font-size:12px;padding:4px 9px"></select>
+              <label class="source-intro"><input type="checkbox" id="chatWebSearch"> 同时搜索网页候选（需人工审核）</label>
             </div>
             <div class="row" style="gap:8px;align-items:flex-end">
               <textarea class="textarea" id="chatInput" rows="2"
@@ -640,9 +651,7 @@ async function askQuestion() {
   stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
 
   try {
-    const r = await api(`/api/chat/${encodeURIComponent(convId)}`, {
-      method: 'POST', body: { question: q },
-    });
+    const r = await runTask('chat', { conv_id: convId, request: { question: q, web_search: !!$('#chatWebSearch')?.checked } });
     if (S.activeConv !== convId || S.activeView !== 'chat' || !stream.isConnected) return;
     S.messages.push(r.user, r.assistant);
     S.sources = r.sources || [];
@@ -664,8 +673,8 @@ async function askQuestion() {
     if (!stream.isConnected) return;
     $('#pending')?.remove();
     stream.insertAdjacentHTML('beforeend', `
-      <div class="lui-degraded">回答失败：${esc(e.message)}</div>`);
-    toast(e.message, true);
+      <div class="lui-degraded">${e.cancelled ? '任务已取消' : '回答失败'}：${esc(e.message)}</div>`);
+    toast(e.message, !e.cancelled);
   } finally {
     S.sending = false;
     sendButton.disabled = false;
@@ -721,7 +730,7 @@ function renderMessage(m, fresh = false) {
   // 组件段优先；没有 segments 时退回纯文本
   let body;
   if (!isUser && Array.isArray(m.segments) && m.segments.length) {
-    body = LitUI.renderSegments(m.segments);
+    body = LitUI.renderSegments(m.segments.filter(s => s.component?.type !== 'citation-list'));
   } else if (isCheckpoint) {
     body = `<div style="font-family:var(--mono);font-size:11.5px;color:var(--text-2);white-space:pre-wrap">${esc(short(m.content, 400))}</div>`;
   } else {
@@ -740,6 +749,9 @@ function renderMessage(m, fresh = false) {
         ${isCheckpoint ? `<div class="badge accent" style="margin-bottom:6px">压缩检查点</div>` : ''}
         <div class="chat-bubble ${isUser ? 'user' : ''}">${body}</div>
         ${checkWarn}
+        ${!isUser && (m.source_links || []).length ? `<div class="answer-sources" aria-label="回答来源">来源：${m.source_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">[${esc(s.tag || '')}] ${esc(s.title || '原文来源')}${s.page == null ? '' : ' · p.'+esc(s.page)}</a>`).join(' ')}</div>` : ''}
+        ${!isUser && (m.candidate_links || []).length ? `<div class="answer-sources">待人工审核的网页候选（尚未作为事实依据）：${m.candidate_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">${esc(s.title)}</a>`).join(' ')}</div>` : ''}
+        ${!isUser && m.source_warning ? `<p class="lui-degraded">网页候选搜索未完成：${esc(m.source_warning)}</p>` : ''}
         <div style="margin-top:4px;font-size:10.5px;color:var(--muted);text-align:${isUser ? 'right' : 'left'}">
           ${isUser ? '你' : '文献棱镜'}${m.model ? ' · ' + esc(m.model) : ''}${m.created_at ? ' · ' + esc(m.created_at.slice(0, 16).replace('T', ' ')) : ''}
         </div>
@@ -784,10 +796,18 @@ async function loadDeliverables() {
         </select>
         <button class="btn sm" data-dexport="${esc(x.id)}">导出</button>
         <button class="btn sm" data-deliv="${esc(x.id)}">查看</button>
+        <button class="btn sm" data-dedit="${esc(x.id)}">编辑</button>
+        <button class="btn sm" data-ddelete="${esc(x.id)}">删除</button>
       </div>
     </div>`).join('');
 
   $$('[data-deliv]', box).forEach(b => b.onclick = () => showDeliverable(b.dataset.deliv));
+  $$('[data-dedit]', box).forEach(b => b.onclick = () => editDeliverable(b.dataset.dedit));
+  $$('[data-ddelete]', box).forEach(b => b.onclick = async () => {
+    if (!confirm('删除此研究产出？文献与原文不受影响。')) return;
+    try { await api('/api/deliverables/'+b.dataset.ddelete, { method: 'DELETE' }); await loadDeliverables(); }
+    catch (e) { toast(e.message, true); }
+  });
   $$('[data-dstat]', box).forEach(s => s.onchange = async () => {
     try {
       await api(`/api/deliverables/${encodeURIComponent(s.dataset.dstat)}`, {
@@ -1180,8 +1200,12 @@ function settingsBody(key, c) {
           `<input class="input" type="number" step="0.01" min="0" max="1"
             data-cfg="retrieval.min_score" data-type="number"
             value="${c.retrieval?.min_score ?? 0}">`) +
-        row('上下文预算', '压缩在「新增量」上动手，不在「窗口位置」上动手。',
-          `<div class="mono" style="font-size:11.5px">window ${c.context?.window_tokens ?? '—'} · step ${c.context?.step_tokens ?? '—'}</div>`) +
+        row('模型窗口 token', '按服务商模型限制填写；输入和输出共同占用窗口。',
+          `<input class="input" type="number" min="1024" data-cfg="context.window_tokens" data-type="number" value="${c.context?.window_tokens ?? 32000}">`) +
+        row('输出预留 token', '为正文和推理共同预留；必须小于窗口。',
+          `<input class="input" type="number" min="1" data-cfg="context.output_reserve_tokens" data-type="number" value="${c.context?.output_reserve_tokens ?? 4096}">`) +
+        row('单次最大输出 token', '实际取此值与输出预留的较小值。推理模型若截断，可同时提高两者。',
+          `<input class="input" type="number" min="1" data-cfg="llm.max_tokens" data-type="number" value="${c.llm?.max_tokens ?? 4096}">`) +
         row('启用扫描件转写', '需要支持图像输入的多模态模型。一期暂缓，开启后不生效。',
           `<span class="badge neutral">暂缓</span>`);
 
@@ -1197,17 +1221,17 @@ function settingsBody(key, c) {
 
     case 'about':
       return row('版本', '应用与数据库 schema 版本。',
-          `<div class="mono" style="font-size:12px">v1.0.0 · schema v3</div>`) +
+          `<div class="mono" style="font-size:12px">v1.0.0 · schema v${S.status?.schema_version ?? '—'}</div>`) +
         row('知识库', '当前库内数据量。',
           `<div class="mono" style="font-size:11.5px">
             ${S.status?.stats?.papers ?? 0} 篇论文 · ${fmtNum(S.status?.stats?.chunks)} 块
           </div>`) +
         row('当前模型', '对话使用的模型。可在「模型」页切换。',
           `<div class="mono" style="font-size:11.5px">${esc(llm.provider || '—')} / ${esc(llm.model || '—')}</div>`) +
-        row('MCP 服务', '一期只做对外 Server。默认只读，随应用启动按配置决定是否拉起。',
+        row('MCP 服务', '独立 stdio Server，需由 MCP 客户端启动；桌面不自动拉起。',
           `<div class="row" style="gap:6px">
             <span class="badge ${c.mcp?.readonly ? 'ok' : 'warn'}">${c.mcp?.readonly ? '只读' : '读写'}</span>
-            <span class="badge neutral">${c.mcp?.enabled ? '随应用启动' : '未启用'}</span>
+            <span class="badge neutral">${c.mcp?.enabled ? '已配置 · 需独立启动' : '未启用'}</span>
           </div>`) +
         row('系统提示词', '学术规范与防幻觉约束为框架内置，不在此处暴露 —— 防止无意改坏可信度地基。',
           `<span class="badge neutral">不可更改</span>`);
@@ -1660,6 +1684,7 @@ function renderModelSelector() {
         method: 'POST', body: { model_id: mid },
       });
       S.activeModel = { provider_id: pid, model: mid };
+      S.compareKey = null;
       toast(`已切换到 ${mid}`);
     } catch (e) { toast(e.message, true); }
   };
@@ -1758,6 +1783,8 @@ async function loadInspectorContext() {
 }
 
 async function loadInspectorSources() {
+  if (S.semanticRef) return loadSemanticDetail(S.semanticRef);
+  if (S.evidenceRef) return loadEvidenceDetail(S.evidenceRef);
   const box = $('#inspSources');
   const view = S.activeView;
   const paperId = S.activePaper;

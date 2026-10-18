@@ -22,11 +22,14 @@ except ImportError:  # pragma: no cover
     requests = None  # type: ignore[assignment]
 
 from .config import Config, LLMConfig
+from .tasks import TaskCancelled, checkpoint
 from .textutil import truncate
 
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message='', *, http_status=None):
+        super().__init__(message)
+        self.http_status = http_status
 
 
 class ContextWindowError(LLMError):
@@ -68,6 +71,7 @@ def parse_json_loose(text: str) -> dict | list | None:
 # OpenAI 兼容客户端
 # ---------------------------------------------------------------------------
 class OpenAICompatClient:
+    supports_semantic_review = True
     def __init__(self, cfg: LLMConfig):
         if requests is None:
             raise LLMError("缺少 requests 依赖：python -m pip install requests")
@@ -87,20 +91,29 @@ class OpenAICompatClient:
         }
         if json_mode and self.cfg.json_mode:
             payload["response_format"] = {"type": "json_object"}
+        bounded = task in ('semantic_review', 'semantic_cross_review')
+        if bounded:
+            payload['max_tokens'] = min(payload['max_tokens'], 8192 if task == 'semantic_cross_review' else 4096)
+        request_timeout = (min(self.cfg.timeout, 10), min(self.cfg.timeout, 60)) if bounded else self.cfg.timeout
+        self.last_request_settings = {'task': task, 'max_tokens': payload['max_tokens'],
+                                      'temperature': payload['temperature'], 'timeout': request_timeout}
 
         headers = {"Content-Type": "application/json"}
         if self.cfg.api_key:
             headers["Authorization"] = f"Bearer {self.cfg.api_key}"
 
         last_err: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(2 if bounded else 3):
+            self.last_request_settings['attempts'] = attempt+1
             try:
+                checkpoint('正在调用模型；最终显示前检查引用')
                 resp = requests.post(
                     f"{self.base_url}/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=self.cfg.timeout,
+                    timeout=request_timeout,
                 )
+                checkpoint()
                 if resp.status_code >= 400:
                     if any(w in resp.text.lower() for w in ('context_length', 'maximum context', 'too many tokens')):
                         raise ContextWindowError('context_length_exceeded')
@@ -108,25 +121,36 @@ class OpenAICompatClient:
                     if resp.status_code in (400, 404, 422) and "response_format" in payload:
                         payload.pop("response_format", None)
                         continue
-                    raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}")
+                    raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}", http_status=resp.status_code)
                 data = resp.json()
                 self.last_usage = data.get('usage')
                 if data['choices'][0].get('finish_reason') == 'length':
                     raise OutputLimitError('模型达到输出 token 上限，结果不完整；请提高输出预算（推理模型的思考也占用此预算）或缩小任务。')
                 return data["choices"][0]["message"]["content"] or ""
-            except (ContextWindowError, OutputLimitError):
+            except (ContextWindowError, OutputLimitError, TaskCancelled):
                 raise
             except Exception as e:  # noqa: BLE001
                 last_err = e
+                if bounded:
+                    if isinstance(e, requests.exceptions.ConnectTimeout) and attempt == 0:
+                        time.sleep(.5)
+                        continue
+                    break
                 if attempt < 2:
                     time.sleep(1.5 * (attempt + 1))
-        raise LLMError(f"调用大模型失败（{self.name}）：{last_err}")
+        raise LLMError(f"调用大模型失败（{self.name}）：{last_err}", http_status=getattr(last_err, 'http_status', None)) from last_err
 
     def chat_json(self, messages: list[dict], *, task: str | None = None) -> dict:
         text = self.chat(messages, json_mode=True, task=task)
-        parsed = parse_json_loose(text)
-        if parsed is None:
-            raise LLMError(f"模型未返回可解析的 JSON：{truncate(text, 300)}")
+        if task in ('semantic_review', 'semantic_cross_review'):
+            try:
+                parsed = json.loads(text)
+            except (ValueError, TypeError) as exc:
+                raise LLMError('语义复核没有返回完整严格 JSON，未放行。') from exc
+        else:
+            parsed = parse_json_loose(text)
+        if not isinstance(parsed, dict):
+            raise LLMError('模型未返回合法的 JSON 对象，请重试或检查模型的结构化输出能力。')
         return parsed  # type: ignore[return-value]
 
 
@@ -394,6 +418,7 @@ class MockClient:
 
 # ---------------------------------------------------------------------------
 class AnthropicClient:
+    supports_semantic_review = True
     """Anthropic Messages 协议的最小实现。
 
     与 OpenAI 兼容协议的差异：system 单独一个字段、认证用 x-api-key、
@@ -428,6 +453,12 @@ class AnthropicClient:
         }
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
+        bounded = task in ('semantic_review', 'semantic_cross_review')
+        if bounded:
+            payload['max_tokens'] = min(payload['max_tokens'], 8192 if task == 'semantic_cross_review' else 4096)
+        request_timeout = (min(self.cfg.timeout, 10), min(self.cfg.timeout, 60)) if bounded else self.cfg.timeout
+        self.last_request_settings = {'task': task, 'max_tokens': payload['max_tokens'],
+                                      'temperature': payload['temperature'], 'timeout': request_timeout}
 
         headers = {
             "Content-Type": "application/json",
@@ -436,27 +467,37 @@ class AnthropicClient:
         }
 
         last_err: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(2 if bounded else 3):
+            self.last_request_settings['attempts'] = attempt+1
             try:
+                checkpoint('正在调用模型；最终显示前检查引用')
                 resp = requests.post(
                     f"{self.base_url}/messages", headers=headers, json=payload,
-                    timeout=self.cfg.timeout,
+                    timeout=request_timeout,
                 )
+                checkpoint()
                 if resp.status_code >= 400:
                     if any(w in resp.text.lower() for w in ('context_length', 'maximum context', 'too many tokens')):
                         raise ContextWindowError('context_length_exceeded')
-                    raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}")
+                    raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}", http_status=resp.status_code)
                 data = resp.json()
                 self.last_usage = data.get('usage')
                 blocks = data.get("content") or []
+                if data.get('stop_reason') == 'max_tokens':
+                    raise OutputLimitError('模型达到输出 token 上限，结果不完整；请提高输出预算或缩小任务。')
                 return "".join(b.get("text") or "" for b in blocks if b.get("type") == "text")
-            except ContextWindowError:
+            except (ContextWindowError, OutputLimitError, TaskCancelled):
                 raise
             except Exception as e:  # noqa: BLE001
                 last_err = e
+                if bounded:
+                    if isinstance(e, requests.exceptions.ConnectTimeout) and attempt == 0:
+                        time.sleep(.5)
+                        continue
+                    break
                 if attempt < 2:
                     time.sleep(1.5 * (attempt + 1))
-        raise LLMError(f"调用大模型失败（{self.name}）：{last_err}")
+        raise LLMError(f"调用大模型失败（{self.name}）：{last_err}", http_status=getattr(last_err, 'http_status', None)) from last_err
 
 
 def build_llm(cfg: Config):

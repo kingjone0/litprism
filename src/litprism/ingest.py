@@ -23,6 +23,9 @@ SUPPORTED_EXT = {".pdf", ".docx", ".doc", ".html", ".htm", ".txt", ".md", ".mark
 class Page:
     number: int
     text: str
+    # Raw text remains in full_text; only recovered layouts enter reading chunks.
+    reading_text: str | None = None
+    tables: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -184,7 +187,9 @@ def _load_pdf(path: Path) -> tuple[list[Page], dict]:
     doc = fitz.open(str(path))
     meta = dict(doc.metadata or {})
     for i, pg in enumerate(doc, 1):
-        pages.append(Page(i, clean_text(pg.get_text("text") or "")))
+        from .pdf_layout import reading_layout
+        reading, tables = reading_layout(pg)
+        pages.append(Page(i, clean_text(pg.get_text("text") or ""), reading, tables))
     if doc.page_count:
         meta["_font_title"] = _title_by_font(doc[0])
     doc.close()
@@ -350,7 +355,7 @@ def _extract_metadata(pages: list[Page], raw_meta: dict) -> dict:
     if raw_author and not _NOISE_TITLE.search(raw_author):
         authors = [a.strip() for a in re.split(r"[;,]|\band\b", raw_author) if a.strip() and len(a.strip()) > 2]
     if not authors:
-        lines = [l.strip() for l in first.split("\n")[:18]]
+        lines = [line.strip() for line in first.split("\n")[:18]]
         for ln in lines:
             if _NOISE_TITLE.search(ln):
                 continue
@@ -409,7 +414,18 @@ def detect_sections(pages: list[Page]) -> list[Section]:
         buf = []
 
     for pg in pages:
-        for line in pg.text.split("\n"):
+        text = pg.reading_text if pg.reading_text is not None else pg.text
+        lines = text.split('\n')
+        # TOC entries are locators, not body sections or scientific evidence.
+        toc = any(re.fullmatch(r'\s*(?:contents|table of contents|目录)\s*', ln, re.I) for ln in lines[:8])
+        toc |= sum(bool(re.search(r'\.{4,}', ln)) for ln in lines) >= 3
+        if toc:
+            flush()
+            sections.append(Section(name='目录', text=text, start_page=pg.number,
+                                    lines=[(pg.number, ln) for ln in lines]))
+            current = None
+            continue
+        for line in lines:
             canon = _is_heading_line(line)
             if canon:
                 flush()
@@ -431,16 +447,14 @@ def detect_sections(pages: list[Page]) -> list[Section]:
             )
         ]
 
-    # 合并同名章节（论文常有多个 "3.1/3.2 ... Method" 子节），保持首次出现顺序
+    # Only adjacent sections may merge; distant names must never reorder the source.
     merged: list[Section] = []
-    index: dict[str, Section] = {}
     for s in sections:
-        if s.name in index:
-            tgt = index[s.name]
+        if merged and merged[-1].name == s.name:
+            tgt = merged[-1]
             tgt.lines = tgt.lines + s.lines
             tgt.text = clean_text(tgt.text + "\n\n" + s.text)
             continue
-        index[s.name] = s
         merged.append(s)
 
     # 丢掉只是标题/作者/版权块的"正文"段（太短且已有其它章节）
@@ -455,27 +469,31 @@ def detect_sections(pages: list[Page]) -> list[Section]:
 def chunk_document(doc: Document, chunk_size: int = 900, overlap: int = 150) -> list[dict]:
     """按章节 → 段落聚合分块。
 
-    **逐行携带页码**，每块的页码取该块首行的真实页码——这样回答里给出的
-    ``[P1 p.7]`` 能精确回原文定位，而不是笼统地标成章节起始页。
+    每块严格限于一个物理页，重叠尾部也不跨页；不混合远距离同名章节。
     """
     chunks: list[dict] = []
     chunk_size = max(300, chunk_size)
     overlap = max(0, min(overlap, chunk_size // 2))
 
     for sec in doc.sections:
+        if sec.name in ('参考文献', '目录'):
+            continue
         src: list[tuple[int | None, str]] = sec.lines or [(sec.start_page, sec.text)]
+        substantial = sum(len(t) for _, t in src) >= 60
         buf: list[tuple[int | None, str]] = []
         buf_len = 0
 
-        def flush() -> None:
+        def flush(section_name=sec.name, keep_short=substantial) -> None:
             nonlocal buf, buf_len
             if buf:
                 text = "\n".join(t for _, t in buf).strip()
-                if text:
-                    chunks.append({"text": text, "section": sec.name, "page": buf[0][0]})
+                if text and (len(text) >= 60 or keep_short and any(c.isalpha() for c in text)):
+                    chunks.append({"text": text, "section": section_name, "page": buf[0][0]})
             buf, buf_len = [], 0
 
         for pgno, line in src:
+            if buf and pgno != buf[0][0]:
+                flush()
             if not line.strip():
                 # 段落边界：块已足够大就断开，否则保留空行维持可读性
                 if buf_len >= chunk_size * 0.6:
@@ -503,16 +521,7 @@ def chunk_document(doc: Document, chunk_size: int = 900, overlap: int = 150) -> 
             buf_len += len(line) + 1
         flush()
 
-    # 过滤噪声块（参考文献列表、纯页码、过短碎片）
-    out: list[dict] = []
-    for c in chunks:
-        t = c["text"]
-        if len(t) < 60:
-            continue
-        if c["section"] == "参考文献":
-            continue
-        out.append(c)
-    return out
+    return chunks
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +550,10 @@ def load_document(path: str | Path) -> Document:
     doc.arxiv_id = meta["arxiv_id"]
     doc.meta = meta["raw_meta"]
     doc.sections = detect_sections(pages)
+    for page in pages:
+        pending = sum(t['status'] == 'needs_review' for t in page.tables)
+        if pending:
+            doc.warnings.append(f'第 {page.number} 页有 {pending} 个表格区域未可靠恢复行列；原始文本仍保留，该区域数值未纳入可引用片段。')
 
     if not doc.title or len(doc.title) < 8:
         doc.warnings.append("未能可靠识别标题，已使用文件名代替，建议人工确认。")

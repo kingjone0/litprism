@@ -23,8 +23,8 @@ Codex 从这里读项目约定。**完整交接文档是 `AGENT.md`（单数）�
 
 - Python：`C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe`
   （**必须用全路径**，系统的 `python` 里没有 pytest）
-- 测试：`python -m pytest tests -q` —— 基线 **515 passed**，改动前后都要跑
-- 本目录没有 `node_modules` / `packaging/dist`，需要时自己生成：
+- 测试：使用上述 Python 执行 `-m pytest tests -q` —— 当前 **633 passed**；测试进程须清除 `LITPRISM_HOME`，改动前后都要跑
+- 不要假设 `node_modules` / `packaging/dist` 已生成，需要时自己生成（当前不做打包）：
   - `npm install`（桌面外壳用，约 400MB）
   - `python packaging/build.py`（打 sidecar exe，约 2.5 分钟）
 
@@ -41,13 +41,17 @@ LITPRISM_HOME=E:/codex-litprism-data
 
 这是个 **GUI 应用**，而 Codex 是终端环境，**不要试图去开窗口验证**。有效的验证路径是：
 
-```bash
-# 1. Python 侧单测
-python -m pytest tests -q
+```powershell
+# 1. Python 侧单测（仅当前测试进程，不修改用户全局环境）
+Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
+& 'C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe' -m pytest tests -q
 
 # 2. 直接起后台，用 curl 断言 API
-PYTHONPATH=src python -m litprism.sidecar --port 8899   # 输出一行 LITPRISM_READY {...}
-curl -s --noproxy '*' http://127.0.0.1:8899/api/ping    # 免 token
+$env:LITPRISM_HOME='E:/codex-litprism-data'
+$env:PYTHONPATH='src'
+& 'C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe' -m litprism.sidecar --port 8899
+# 输出一行 LITPRISM_READY {...}；在另一终端验证，ping 免 token
+curl.exe -s --noproxy '*' http://127.0.0.1:8899/api/ping
 ```
 
 `curl` 打本机端口**必须加 `--noproxy '*'`**，否则会被系统代理劫持、看起来像"服务没起来"。
@@ -63,4 +67,15 @@ curl -s --noproxy '*' http://127.0.0.1:8899/api/ping    # 免 token
 
 ## 提交
 
-改完**不要自行 commit**，把改动讲清楚，等人确认。
+改完**不要自行 commit**，把改动讲清楚，等人确认。用户明确要求“提交”即授权本轮提交，无需重复确认；不包含 push 或打包。
+
+## 当前接手边界（2026-10-18）
+
+- 当前 schema v5。新增来源快照、人工审核与语义复核记录；不要为检查配置而打开用户主知识库触发迁移。测试和真实服务验收使用独立子数据根。
+- 回复来源链接与右栏审核已接通。机器支持不等于人工确认；待审、冲突、撤销和来源失效不能作为正常结论进入正文、对比或导出。
+- 长论文按物理页保留原文定位，复杂表格无法恢复时明确待核对；旧文献需重新导入，不能自动重写旧块 ID。
+- 有界语义复核覆盖解读六字段及对比，不能将其保证扩展到术语、问答或 Skill。严格 JSON、来源白名单、预算上限、失败保留待审均不能削弱。
+- 真实固定样本 18 条两轮与 5 个差异控制例通过有限门槛；fastText 全流程 22 条中 19 条机器支持、3 条待审，整篇仍 `passed=false`。优先处理相邻原文不足、误报与成本，不能宣称长论文整体语义已通过。
+- 不增加本地 embedding、不装模型、不建向量库；F3 与打包继续暂停。扩大付费调用前先明确验收目标和调用预算，实测入口及边界见 `docs/有界复核与短论文实测-2026-10-18.md`。
+- 密钥仅走 SecretStore；不得写入源码、文档、日志或提交。`_selftest.*` 下的 PDF、原始调用、数据库与截图仅留本地，不能强制加入 Git。
+- UI 兼容性使用 `tools/check_workflows.py` 的无窗口流程验证；语义审核和撤销也须覆盖。不要启动可见桌面窗口。

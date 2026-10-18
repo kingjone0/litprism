@@ -1,0 +1,242 @@
+{
+  "version": 1,
+  "papers": {
+    "fasttext": {
+      "url": "https://arxiv.org/pdf/1607.01759v3",
+      "sha256": "6cbcf620c2537ed54dfb9ed0d843a83689b82dc41dcd305bfb2e82425d4d7906"
+    },
+    "rmsnorm": {
+      "url": "https://arxiv.org/pdf/1910.07467v1",
+      "sha256": "a38ab771022fc10525d2b6b23de40307b2ca7b2bf463f5219da6a0ba1c41225f"
+    },
+    "gpt3": {
+      "url": "https://arxiv.org/pdf/2005.14165v4",
+      "sha256": "97fd272f1fdfc18677462d0292f5fbf26ca86b4d1b485c2dba03269b643a0e83"
+    }
+  },
+  "sources": {
+    "ptb": {
+      "paper": "gpt3",
+      "page": 11,
+      "text": "the 4 Wikipedia-related tasks in that work because they are entirely contained in our training data, and we also omit the\none-billion word benchmark due to a high fraction of the dataset being contained in our training set. PTB escapes these\nissues due to predating the modern internet. Our largest model sets a new SOTA on PTB by a substantial margin of 15\npoints, achieving a perplexity of 20.50. Note that since PTB is a traditional language modeling dataset it does not have\na clear separation of examples to deﬁne one-shot or few-shot evaluation around, so we measure only zero-shot.\n3.1.2\nLAMBADA\nThe LAMBADA dataset [PKL+16] tests the modeling of long-range dependencies in text – the model is asked to\npredict the last word of sentences which require reading a paragraph of context. It has recently been suggested that the",
+      "original_tag": "P51"
+    },
+    "superglue": {
+      "paper": "gpt3",
+      "page": 19,
+      "text": "【表格行】p.19 表格区域1 邻近表题：Table 3.8: Performance of GPT-3 on SuperGLUE compared to ﬁne-tuned baselines and SOTA. All results are reported {\"行\": \"Fine-tuned BERT-Large\", \"SuperGLUE Average\": \"69.0\", \"BoolQ Accuracy\": \"77.4\", \"CB Accuracy\": \"83.6\", \"CB F1\": \"75.7\", \"COPA Accuracy\": \"70.6\", \"RTE Accuracy\": \"71.7\"}\n【表格行】p.19 表格区域1 邻近表题：Table 3.8: Performance of GPT-3 on SuperGLUE compared to ﬁne-tuned baselines and SOTA. All results are reported {\"行\": \"GPT-3 Few-Shot\", \"SuperGLUE Average\": \"71.8\", \"BoolQ Accuracy\": \"76.4\", \"CB Accuracy\": \"75.6\", \"CB F1\": \"52.0\", \"COPA Accuracy\": \"92.0\", \"RTE Accuracy\": \"69.0\"}",
+      "original_tag": "P88"
+    },
+    "rmsnorm": {
+      "paper": "rmsnorm",
+      "page": 1,
+      "text": "Layer normalization (LayerNorm) has been successfully applied to various deep\nneural networks to help stabilize training and boost model convergence because\nof its capability in handling re-centering and re-scaling of both inputs and weight\nmatrix. However, the computational overhead introduced by LayerNorm makes\nthese improvements expensive and signiﬁcantly slows the underlying network, e.g.\nRNN in particular. In this paper, we hypothesize that re-centering invariance in\nLayerNorm is dispensable and propose root mean square layer normalization, or\nRMSNorm. RMSNorm regularizes the summed inputs to a neuron in one layer according to root mean square (RMS), giving the model re-scaling invariance property\nand implicit learning rate adaptation ability. RMSNorm is computationally simpler\nand thus more efﬁcient than LayerNorm. We also present partial RMSNorm, or\nand thus more efﬁcient than LayerNorm. We also present partial RMSNorm, or\npRMSNorm where the RMS is estimated from p% of the summed inputs without\nbreaking the above properties. Extensive experiments on several tasks using diverse network architectures show that RMSNorm achieves comparable performance\nagainst LayerNorm but reduces the running time by 7%∼64% on different models.\nSource code is available at https://github.com/bzhangGo/rmsnorm.\n1"
+    },
+    "fasttext": {
+      "paper": "fasttext",
+      "page": 1,
+      "text": "This paper explores a simple and efﬁcient\nbaseline for text classiﬁcation.\nOur experiments show that our fast text classiﬁer fastText is often on par with deep\nlearning classiﬁers in terms of accuracy, and\nmany orders of magnitude faster for training\nand evaluation. We can train fastText on\nmore than one billion words in less than ten\nminutes using a standard multicore CPU, and\nclassify half a million sentences among 312K\nclasses in less than a minute.\n1"
+    }
+  },
+  "cases": [
+    {
+      "id": "ptb-setting-positive",
+      "split": "development",
+      "source_ids": [
+        "ptb"
+      ],
+      "text": "GPT-3 的 PTB 困惑度为 20.50，论文仅进行了 zero-shot 评估。",
+      "expected": "supported",
+      "rationale": "原文 only zero-shot；指标 20.50。",
+      "negative_origin": ""
+    },
+    {
+      "id": "ptb-setting-negative",
+      "split": "development",
+      "source_ids": [
+        "ptb"
+      ],
+      "text": "GPT-3 在 PTB 上报告了 few-shot 困惑度 20.50。",
+      "expected": "blocked",
+      "rationale": "原文 only zero-shot；指标 20.50。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    },
+    {
+      "id": "ptb-direction-positive",
+      "split": "development",
+      "source_ids": [
+        "ptb"
+      ],
+      "text": "论文报告最大模型在 PTB 上达到困惑度 20.50，以 15 点幅度刷新 SOTA。",
+      "expected": "supported",
+      "rationale": "困惑度方向与百分点单位，不能按百分比解释。",
+      "negative_origin": ""
+    },
+    {
+      "id": "ptb-direction-negative",
+      "split": "development",
+      "source_ids": [
+        "ptb"
+      ],
+      "text": "论文报告 GPT-3 将 PTB 困惑度提高到 20.50，改善了 15 个百分点。",
+      "expected": "blocked",
+      "rationale": "困惑度方向与百分点单位，不能按百分比解释。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    },
+    {
+      "id": "superglue-column-positive",
+      "split": "development",
+      "source_ids": [
+        "superglue"
+      ],
+      "text": "GPT-3 Few-Shot 的 SuperGLUE Average 为 71.8，RTE Accuracy 为 69.0。",
+      "expected": "supported",
+      "rationale": "按完整行列绑定，不能交换平均值和 RTE。",
+      "negative_origin": ""
+    },
+    {
+      "id": "superglue-column-negative",
+      "split": "development",
+      "source_ids": [
+        "superglue"
+      ],
+      "text": "GPT-3 Few-Shot 的 SuperGLUE Average 为 69.0，RTE Accuracy 为 71.8。",
+      "expected": "blocked",
+      "rationale": "按完整行列绑定，不能交换平均值和 RTE。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    },
+    {
+      "id": "rms-runtime-positive",
+      "split": "development",
+      "source_ids": [
+        "rmsnorm"
+      ],
+      "text": "RMSNorm 在不同模型上减少运行时间 7% 到 64%，性能与 LayerNorm 相当。",
+      "expected": "supported",
+      "rationale": "runtime 不是 accuracy；different models 范围不是所有模型固定上限。",
+      "negative_origin": ""
+    },
+    {
+      "id": "rms-runtime-negative",
+      "split": "development",
+      "source_ids": [
+        "rmsnorm"
+      ],
+      "text": "RMSNorm 在所有模型上提高准确率 64%。",
+      "expected": "blocked",
+      "rationale": "runtime 不是 accuracy；different models 范围不是所有模型固定上限。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    },
+    {
+      "id": "rms-invariance-positive",
+      "split": "development",
+      "source_ids": [
+        "rmsnorm"
+      ],
+      "text": "作者假设 LayerNorm 的 re-centering invariance 可舍弃，RMSNorm 保留 re-scaling invariance。",
+      "expected": "supported",
+      "rationale": "属性方向不可反转。",
+      "negative_origin": ""
+    },
+    {
+      "id": "rms-invariance-negative",
+      "split": "development",
+      "source_ids": [
+        "rmsnorm"
+      ],
+      "text": "RMSNorm 的主要贡献是保留 re-centering invariance 并去掉 re-scaling invariance。",
+      "expected": "blocked",
+      "rationale": "属性方向不可反转。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    },
+    {
+      "id": "rms-partial-positive",
+      "split": "development",
+      "source_ids": [
+        "rmsnorm"
+      ],
+      "text": "pRMSNorm 从输入之和的 p% 估计 RMS，论文称不破坏上述性质。",
+      "expected": "supported",
+      "rationale": "p% 不能改写为全部输入的必要条件。",
+      "negative_origin": ""
+    },
+    {
+      "id": "rms-partial-negative",
+      "split": "development",
+      "source_ids": [
+        "rmsnorm"
+      ],
+      "text": "pRMSNorm 必须使用全部输入计算 RMS，否则会破坏上述性质。",
+      "expected": "blocked",
+      "rationale": "p% 不能改写为全部输入的必要条件。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    },
+    {
+      "id": "fasttext-hardware-positive",
+      "split": "holdout",
+      "source_ids": [
+        "fasttext"
+      ],
+      "text": "作者报告 fastText 可用标准多核 CPU 在不到十分钟内训练超过十亿词。",
+      "expected": "supported",
+      "rationale": "原文是 standard multicore CPU，不是必须 GPU。",
+      "negative_origin": ""
+    },
+    {
+      "id": "fasttext-hardware-negative",
+      "split": "holdout",
+      "source_ids": [
+        "fasttext"
+      ],
+      "text": "作者报告 fastText 必须使用 GPU 才能在不到十分钟内训练超过十亿词。",
+      "expected": "blocked",
+      "rationale": "原文是 standard multicore CPU，不是必须 GPU。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    },
+    {
+      "id": "fasttext-classes-positive",
+      "split": "holdout",
+      "source_ids": [
+        "fasttext"
+      ],
+      "text": "fastText 可在不到一分钟内将五十万句子分到 312K 个类别。",
+      "expected": "supported",
+      "rationale": "312K 不能丢掉 K，类别数量错一千倍。",
+      "negative_origin": ""
+    },
+    {
+      "id": "fasttext-classes-negative",
+      "split": "holdout",
+      "source_ids": [
+        "fasttext"
+      ],
+      "text": "fastText 可在不到一分钟内将五十万句子分到 312 个类别。",
+      "expected": "blocked",
+      "rationale": "312K 不能丢掉 K，类别数量错一千倍。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    },
+    {
+      "id": "fasttext-qualifier-positive",
+      "split": "holdout",
+      "source_ids": [
+        "fasttext"
+      ],
+      "text": "论文称 fastText 的准确率常与深度学习分类器相当，训练与评估快很多。",
+      "expected": "supported",
+      "rationale": "often on par 不是所有任务始终超过。",
+      "negative_origin": ""
+    },
+    {
+      "id": "fasttext-qualifier-negative",
+      "split": "holdout",
+      "source_ids": [
+        "fasttext"
+      ],
+      "text": "论文证明 fastText 在所有任务的准确率都超过所有深度学习分类器。",
+      "expected": "blocked",
+      "rationale": "often on par 不是所有任务始终超过。",
+      "negative_origin": "controlled counterfactual based on real paper; PTB direction/unit and SuperGLUE column mix-up were previously observed"
+    }
+  ],
+  "scope": "frozen real excerpts with manually specified positive and controlled negative claims; not an independent large benchmark"
+}

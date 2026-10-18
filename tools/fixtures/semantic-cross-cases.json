@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "scope": "Manual positive/negative cross-claim controls based on the frozen primary PDFs; conflicting candidates intentionally bypass local review only in this audit.",
+  "cases": [
+    {
+      "id": "superglue-conflict",
+      "expected_conflict": true,
+      "paper": "https://arxiv.org/pdf/2005.14165v4",
+      "page": 19,
+      "claims": [
+        "GPT-3 Few-Shot 的 SuperGLUE Average 为 71.8。",
+        "GPT-3 Few-Shot 的 SuperGLUE Average 为 69.0。"
+      ]
+    },
+    {
+      "id": "ptb-setting-conflict",
+      "expected_conflict": true,
+      "paper": "https://arxiv.org/pdf/2005.14165v4",
+      "page": 11,
+      "claims": [
+        "论文在 PTB 上仅评估 zero-shot，不评估 few-shot。",
+        "论文在 PTB 上评估了 few-shot 并报告 perplexity 20.50。"
+      ]
+    },
+    {
+      "id": "different-metric-control",
+      "expected_conflict": false,
+      "paper": "https://arxiv.org/pdf/2005.14165v4",
+      "page": 19,
+      "claims": [
+        "GPT-3 Few-Shot 的 SuperGLUE Average 为 71.8。",
+        "GPT-3 Few-Shot 的 RTE Accuracy 为 69.0。"
+      ]
+    },
+    {
+      "id": "different-condition-control",
+      "expected_conflict": false,
+      "paper": "https://arxiv.org/pdf/1607.01759v3",
+      "page": 4,
+      "claims": [
+        "YFCC100M 标签预测中，fastText h=50、无 bigram 时 prec@1 为 31.2。",
+        "YFCC100M 标签预测中，fastText h=200、使用 bigram 时 prec@1 为 46.1。"
+      ]
+    },
+    {
+      "id": "comparable-is-not-identical-control",
+      "expected_conflict": false,
+      "paper": "https://arxiv.org/pdf/1607.01759v3",
+      "page": 3,
+      "claims": [
+        "fastText 在情感分析上的准确率与其他方法相当（comparable）。",
+        "fastText 不使用预训练词嵌入，这可解释与比较方法之间约 1% 的准确率差距。"
+      ]
+    }
+  ]
+}

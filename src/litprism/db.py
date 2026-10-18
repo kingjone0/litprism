@@ -16,14 +16,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
-from .config import Config
 from . import schema as _schema
+from .config import Config
 from .refs import make_ref
 from .textutil import build_fts_query, cjk_segment, paper_fingerprint, truncate
 from .whitelist import badge
@@ -60,17 +62,26 @@ class KnowledgeBase:
         self.db_path = Path(db_path) if db_path else self.cfg.db_path
         self._con = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._con.row_factory = sqlite3.Row
+        self._tx_lock = threading.RLock()
+        self._tx_depth = 0
         self.migrations_applied = _schema.init_schema(self._con)
 
     # ------------------------------------------------------------------
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
-        try:
-            yield self._con
-            self._con.commit()
-        except Exception:
-            self._con.rollback()
-            raise
+        with self._tx_lock:
+            outer = self._tx_depth == 0
+            self._tx_depth += 1
+            try:
+                yield self._con
+                if outer:
+                    self._con.commit()
+            except Exception:
+                if outer:
+                    self._con.rollback()
+                raise
+            finally:
+                self._tx_depth -= 1
 
     def close(self) -> None:
         try:
@@ -428,7 +439,7 @@ class KnowledgeBase:
 
     def list_concepts(self, paper_id: str | None = None, term: str | None = None, limit: int = 200) -> list[dict]:
         sql, vals = "SELECT * FROM concepts", []
-        conds = []
+        conds = ['paper_id IN (SELECT id FROM papers WHERE deleted_at IS NULL)']
         if paper_id:
             conds.append("paper_id = ?")
             vals.append(paper_id)
@@ -465,8 +476,9 @@ class KnowledgeBase:
             " JOIN papers pb ON pb.id = r.paper_b"
         )
         vals: list[Any] = []
+        sql += ' WHERE pa.deleted_at IS NULL AND pb.deleted_at IS NULL'
         if paper_id:
-            sql += " WHERE r.paper_a = ? OR r.paper_b = ?"
+            sql += " AND (r.paper_a = ? OR r.paper_b = ?)"
             vals += [paper_id, paper_id]
         sql += " ORDER BY r.score DESC LIMIT ?"
         vals.append(limit)
@@ -508,11 +520,11 @@ class KnowledgeBase:
             )
         return cid
 
-    def list_conversations(self, limit: int = 100) -> list[dict]:
+    def list_conversations(self, limit: int = 100, query: str = '') -> list[dict]:
         rows = self._con.execute(
             "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count"
-            " FROM conversations c ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?",
-            (limit,),
+            " FROM conversations c WHERE (?='' OR c.title LIKE ? OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=c.id AND m.content LIKE ?)) ORDER BY c.pinned DESC, c.updated_at DESC, c.rowid DESC LIMIT ?",
+            (query, '%'+query+'%', '%'+query+'%', limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -626,7 +638,7 @@ class KnowledgeBase:
             "chunks": con.execute("SELECT COUNT(*) n FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
             "analyses": con.execute("SELECT COUNT(*) n FROM analyses a JOIN papers p ON p.id=a.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
             "concepts": con.execute("SELECT COUNT(*) n FROM concepts c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
-            "relations": con.execute("SELECT COUNT(*) n FROM relations").fetchone()["n"],
+            "relations": con.execute('SELECT COUNT(*) n FROM relations r JOIN papers a ON a.id=r.paper_a JOIN papers b ON b.id=r.paper_b WHERE a.deleted_at IS NULL AND b.deleted_at IS NULL').fetchone()['n'],
             "verifications": con.execute("SELECT COUNT(*) n FROM verify_log").fetchone()["n"],
             "by_verify_status": by_status,
             "by_verify_level": by_level,

@@ -51,6 +51,7 @@ class QAAnswer:
                     "paper_id": e["paper_id"], "title": e["title"],
                     "page": e["page"], "section": e["section"], "score": e["score"],
                     "text": truncate(e["text"], 700),
+                    'source_kind': e.get('source_kind', 'paper'), 'source_id': e.get('source_id'), 'url': e.get('url'),
                 }
                 for e in self.excerpts
             ],
@@ -90,7 +91,15 @@ class QAAgent:
 
         dialogue = build_dialogue(self.kb, self.cfg, conversation_id, before_seq) if conversation_id else DialogueContext()
         meter = Meter(self.cfg)
+        def freeze_refusal(outcome, request):
+            if conversation_id:
+                from .memory.view import TurnViewStore
+                TurnViewStore(self.kb).freeze(conversation_id, dialogue.memory, read_refs={
+                    **dialogue.memory.read_refs(), 'question': question, 'request': request,
+                    'outcome': outcome, 'model': getattr(self.llm, 'name', 'unknown'),
+                    'preferences': [m.to_dict() for m in dialogue.memory.resident]})
         if meter.estimate_text(question) > self.cfg.context.available_tokens // 2:
+            freeze_refusal('question_over_budget', [])
             return QAAnswer(question=question, answer='问题过长，请缩短后重试。', insufficient_evidence=True, confidence='none')
         top_k = top_k or self.cfg.retrieval.top_k
         hits = search_local(self.kb, dialogue.query(question), top_k=top_k, paper_ids=paper_ids, llm=self.llm, citable_only=True)
@@ -122,6 +131,7 @@ class QAAgent:
                     "section": h.get("section") or "",
                     "score": h.get("score"),
                     "text": h["text"],
+                    'source_id': h.get('source_id'), 'source_kind': h.get('source_kind', 'paper'), 'url': h.get('url'),
                 }
             )
         res.excerpts = excerpts
@@ -129,6 +139,8 @@ class QAAgent:
         blocks = []
         for e in excerpts:
             head = f"[{e['tag']}] 论文：《{e['title']}》"
+            if e.get('source_kind') != 'paper':
+                head = f"[{e['tag']}] 人工确认的{'网页快照' if e['source_kind'] == 'web' else '知识条目'}：《{e['title']}》 地址：{e.get('url') or '用户知识条目'}（不是自动核验的论文）"
             if e.get("year"):
                 head += f"（{e['year']}）"
             loc = []
@@ -141,7 +153,7 @@ class QAAgent:
             blocks.append(f"{head}\n{e['text']}")
         material = "\n\n---\n\n".join(blocks)
 
-        scope = "本地知识库全部论文"
+        scope = "全库可引用论文与人工确认知识（保留原始来源类型）"
         if paper_ids:
             titles = [self.kb.get_paper(p) for p in paper_ids]
             scope = "指定论文：" + "、".join(truncate(t["title"], 40) for t in titles if t)
@@ -158,6 +170,8 @@ class QAAgent:
                 ),
             },
         ]
+        if any(e.get('source_kind') != 'paper' for e in excerpts):
+            messages[0]['content'] += '\n部分片段是用户人工确认的知识/网页快照。可以依其原文回答，但必须明确称为知识条目或网页快照，不能称为核验论文；人工确认并不证明客观真实性。'
 
         meter = Meter(self.cfg)
         while sum(meter.estimate_message(m) for m in messages) + 8 > self.cfg.context.available_tokens:
@@ -166,6 +180,7 @@ class QAAgent:
                 res.insufficient_evidence = True
                 res.excerpts = []
                 res.confidence = 'none'
+                freeze_refusal('evidence_over_budget', messages)
                 return res
             excerpts.pop()
             old_material = material
@@ -239,8 +254,17 @@ class QAAgent:
 
     def _check_citations(self, res: QAAnswer) -> None:
         """校验回答中的引用标记是否都能对应到真实片段。"""
-        from .evidence import citation_issues
+        from .evidence import citation_issues, stored_excerpts
         res.citation_issues.extend(citation_issues(res.answer, res.excerpts, required=not res.insufficient_evidence))
+        from .textutil import parse_citations
+        used = {tag for tag, _ in parse_citations(res.answer)}
+        try:
+            stored_excerpts(self.kb, [{'tag': e['tag'], 'chunk_id': e.get('chunk_id'), 'paper_id': e.get('paper_id')}
+                                      for e in res.excerpts if e['tag'] in used])
+        except ValueError as exc:
+            res.citation_issues.append(str(exc))
+            res.answer = '来源状态在生成期间发生变化，已阻止展示结论，请核对右栏来源后重试。'
+            res.insufficient_evidence = True
         res.citation_check_passed = not res.citation_issues
         if not res.citation_check_passed:
             res.warnings.append(
@@ -269,66 +293,105 @@ class CompareAgent:
         if len(papers) < 2:
             raise ValueError(f"需要至少 2 篇可识别的论文，当前识别到 {len(papers)} 篇；未找到：{missing}")
 
-        from .context.meter import Meter
-        from .evidence import citation_issues, require_citable
+        from .comparison import check_comparison
+        from .evidence import require_citable
         from .prompts import SYSTEM_ACADEMIC
-        meter = Meter(self.cfg)
-        excerpts, blocks = [], []
-        for index, paper in enumerate(papers, 1):
+        from .reading import excerpt_text, reading_batches
+        for paper in papers:
             require_citable(paper.get('verify_level'))
-            chunks = self.kb.get_chunks(paper['id'])
-            if not chunks:
-                raise ValueError('论文没有可比较的原文证据，请先导入全文或摘要。')
-            selected = chunks[:6]
-            blocks.append(f"论文 D{index}：《{paper['title']}》")
-            for chunk in selected:
-                tag = f'P{len(excerpts)+1}'
-                excerpts.append(dict(chunk, tag=tag))
-                location = f"p.{chunk['page']}" if chunk['page'] is not None else '无页码'
-                blocks.append(f"[{tag}] D{index} {location}\n{chunk['text']}")
-        prompt = '\n\n'.join(blocks)
         system = SYSTEM_ACADEMIC + "\n仅比较给定原文，不使用先前解读作为事实。维度缺信息写未提及。输出 JSON：summary, dimensions（每项 dimension, values，键为 D1/D2 等论文编号）, convergence, divergence, evidence_map。每个非空学术结论标注 [P# p.N]，P 是原文片段编号；无页码来源不写页码。"
         system += '\n严格使用以下结构：{"summary":"结论 [P1 p.3]","dimensions":[{"dimension":"方法","values":{"D1":"方法 [P1 p.3]","D2":"方法 [P2 p.3]"}}],"convergence":["一致点 [P1 p.3][P2 p.3]"],"divergence":["差异 [P1 p.3][P2 p.3]"],"evidence_map":[{"claim":"结论","sources":["P1 p.3","P2 p.3"]}]}。这里页码仅为格式示例，必须替换为实际页码。convergence、divergence、sources 必须是字符串数组，无结论则用空数组。'
+        instruction = '仅比较本批原文，未读取的部分不能写成原文未提及。'
         if aspects:
-            prompt += '\n关注维度：' + '、'.join(aspects)
-        messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}]
-        if sum(meter.estimate_message(m) for m in messages) > self.cfg.context.available_tokens:
-            raise ValueError('对比原文超过上下文预算，请减少论文数量或分批对比。')
-        data = self.llm.chat_json(messages, task='compare')
-        for key in ('convergence', 'divergence'):
-            if isinstance(data.get(key), str):
-                data[key] = [data[key]] if data[key].strip() else []
-        texts = [str(data.get('summary') or '')]
-        for dimension in data.get('dimensions') or []:
-            texts.extend(str(v) for v in (dimension.get('values') or {}).values() if v and v != '未提及')
-        for key in ('convergence', 'divergence'):
-            texts.extend(str(v) for v in data.get(key) or [])
-        issues = []
-        for text in texts:
-            if text.strip():
-                issues.extend(citation_issues(text, excerpts))
-        for item in data.get('evidence_map') or []:
-            refs = item.get('sources') or []
-            if isinstance(refs, str):
-                refs = [refs]
-                item['sources'] = refs
-            issues.extend(citation_issues(' '.join('['+str(v).strip('[]')+']' for v in refs), excerpts))
+            instruction += '\n关注维度：' + '、'.join(aspects)
+        batches, excerpts, coverage = reading_batches(self.kb, self.cfg, papers, system, instruction)
+        results, issues = [], []
+        from .tasks import checkpoint
+        for index, batch in enumerate(batches, 1):
+            checkpoint(f'对比原文第 {index}/{len(batches)} 批')
+            raw = self.llm.chat_json([{'role': 'system', 'content': system},
+                                     {'role': 'user', 'content': instruction+'\n\n'+excerpt_text(batch)}], task='compare')
+            result, errors = check_comparison(raw, papers, batch)
+            issues.extend(errors)
+            results.append(result)
+        checkpoint('校验对比引用与文献归属')
+        data = {'summary': '\n\n'.join(r['summary'] for r in results if isinstance(r.get('summary'), str)),
+                'dimensions': [], 'convergence': [], 'divergence': [], 'evidence_map': []}
+        for result in results:
+            for key in ('dimensions', 'convergence', 'divergence', 'evidence_map'):
+                data[key].extend(result.get(key) or [])
+        dimensions = {}
+        for dimension in data['dimensions']:
+            if not isinstance(dimension, dict) or not isinstance(dimension.get('dimension'), str) or not isinstance(dimension.get('values'), dict):
+                continue
+            merged = dimensions.setdefault(dimension['dimension'], {})
+            for tag, value in dimension['values'].items():
+                if isinstance(value, str) and value and value != '未提及':
+                    parts = merged.setdefault(tag, [])
+                    if value not in parts:
+                        parts.append(value)
+        data['dimensions'] = [{'dimension': name, 'values': {tag: '\n\n'.join(parts) for tag, parts in values.items()}}
+                              for name, values in dimensions.items()]
+        from .semantics import run_review, supported_fields
+        inputs = []
+        for result, batch in zip(results, batches, strict=True):
+            fields = [('summary', result.get('summary') or '', [])]
+            for dimension in result.get('dimensions') or []:
+                for tag, text in dimension['values'].items():
+                    fields.append(('dimension|'+dimension['dimension']+'|'+tag, text, []))
+            for key in ('convergence', 'divergence'):
+                fields.extend((key, text, []) for text in result.get(key) or [])
+            inputs.append((fields, batch))
+        if not issues:
+            semantic = run_review(inputs, excerpts, self.cfg, self.llm)
+            data['_semantic_review'] = semantic
+            if semantic['status'] != 'not_run':
+                safe = supported_fields(semantic)
+                data['summary'] = safe.get('summary', '')
+                data['dimensions'] = [
+                    {'dimension': name, 'values': {tag: safe.get('dimension|'+name+'|'+tag, '') for tag in values}}
+                    for name, values in dimensions.items()]
+                for key in ('convergence', 'divergence'):
+                    data[key] = [u['text'] for u in semantic['items'] if u['field'] == key and u['status'] == 'machine_supported']
+                data['evidence_map'] = [{'claim': u['text'], 'sources': [q['tag'] for q in u['quotes']]}
+                                        for u in semantic['items'] if u['status'] == 'machine_supported']
         issues = list(dict.fromkeys(issues))
+        data['_coverage'] = coverage
         data['_citation_check'] = {'passed': not issues, 'issues': issues}
         data['_citations'] = [{'tag': e['tag'], 'chunk_id': e['id'], 'paper_id': e['paper_id'], 'page': e['page']} for e in excerpts]
+        from .evidence import stored_excerpts
+        try:
+            stored_excerpts(self.kb, data['_citations'])
+        except ValueError as exc:
+            issues.append(str(exc))
+            data['_citation_check'] = {'passed': False, 'issues': issues}
         data['_model'] = getattr(self.llm, 'name', 'unknown')
         data['_papers'] = [{'tag': f'D{i}', 'id': p['id'], 'title': p['title']} for i, p in enumerate(papers, 1)]
+        data['_coverage']['reading_mode'] = 'whole' if len(batches) == 1 else 'batched'
         if issues:
             data = {k: v for k, v in data.items() if k.startswith('_')}
             data['summary'] = '引用校验未通过，已阻止展示无法回溯的对比结论。'
         if missing:
             data['_missing'] = missing
+        if data.get('_semantic_review', {}).get('status') not in (None, 'not_run'):
+            import json
+            import uuid
+
+            from .knowledge import now
+            data['_semantic_run_id'] = 'sm_'+uuid.uuid4().hex[:12]
+            with self.kb.tx() as con:
+                stored_excerpts(self.kb, data['_citations'])
+                con.execute('INSERT INTO semantic_runs VALUES (?,?,?,?)',
+                            (data['_semantic_run_id'], '跨论文对比', json.dumps(data, ensure_ascii=False), now()))
         return data
 
 
 def render_comparison(data: dict) -> str:
     papers = data.get("_papers") or []
     lines = ["# 论文对比分析", ""]
+    semantic = data.get('_semantic_review') or {}
+    lines += ['> '+(semantic.get('note') or '尚未运行整体语义核查。引用存在不等于语义正确。'),
+              f"> 待核对陈述：{semantic.get('pending', '未知')}；待核对项不作为正常结论导出。", '']
     if data.get("summary"):
         lines += ["## 总体结论", str(data["summary"]), ""]
 

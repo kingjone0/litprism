@@ -2,6 +2,42 @@
 S.selectedPapers = new Set();
 S.collections = [];
 
+async function waitTask(id) {
+  const card = document.createElement('div');
+  card.className = 'task-progress';
+  card.innerHTML = '<span role="status">等待任务…</span><button class="btn sm">取消后续处理</button>';
+  const dialog = $('#researchTask[open]');
+  if (dialog) card.classList.add('task-progress-inline');
+  (dialog ? $('.task-body', dialog) : document.body).appendChild(card);
+  const rehome = () => { card.classList.remove('task-progress-inline'); document.body.appendChild(card); };
+  dialog?.addEventListener('close', rehome, { once: true });
+  const label = $('span', card), cancel = $('button', card);
+  cancel.onclick = async () => {
+    cancel.disabled = true;
+    try { await api('/api/tasks/'+id+'/cancel', { method: 'POST' }); label.textContent = '正在取消；等待当前请求返回。已完成导入不会撤销。'; }
+    catch (e) { label.textContent = e.message; cancel.disabled = false; }
+  };
+  try {
+    for (;;) {
+      if (!card.isConnected) rehome();
+      const task = await api('/api/tasks/'+id);
+      if (task.status === 'succeeded') return task.result;
+      if (['failed', 'cancelled'].includes(task.status)) {
+        const error = new Error(task.error || '任务已取消，可重新发起。');
+        error.cancelled = task.status === 'cancelled';
+        throw error;
+      }
+      label.textContent = task.status === 'cancelling' ? '等待当前请求结束后取消；不撤销已完成导入。' : task.progress || '正在处理…';
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+  } finally { dialog?.removeEventListener('close', rehome); card.remove(); }
+}
+
+async function runTask(operation, args) {
+  const task = await api('/api/tasks', { method: 'POST', body: { operation, args } });
+  return waitTask(task.id);
+}
+
 function workflowDialog(title, body, submit, action = '确定') {
   $('#researchTask')?.remove();
   const dialog = document.createElement('dialog');
@@ -19,7 +55,12 @@ function workflowDialog(title, body, submit, action = '确定') {
     const button = $('[type=submit]', dialog);
     if (button.disabled) return;
     button.disabled = true;
-    try { await submit(Object.fromEntries(new FormData(e.target)), dialog); dialog.close(); }
+    try {
+      const data = new FormData(e.target);
+      const values = Object.fromEntries(data);
+      $$('select[multiple][name]', dialog).forEach(s => { values[s.name] = data.getAll(s.name); });
+      await submit(values, dialog); dialog.close();
+    }
     catch (error) { $('.task-error', dialog).textContent = error.message; }
     finally { button.disabled = false; }
   };
@@ -55,13 +96,63 @@ async function refreshCollections() {
   const value = filter.value;
   filter.innerHTML = '<option value="">全部分组</option>' + S.collections.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
   filter.value = S.collections.some(c => c.id === value) ? value : '';
+  $('#collectionChips').innerHTML = S.collections.map(c => `<button class="btn sm" draggable="true" data-group-chip="${esc(c.id)}">${esc(collectionLabel(c.id))}</button>`).join('');
+  $$('[data-group-chip]').forEach(chip => {
+    chip.onclick = () => { filter.value = chip.dataset.groupChip; loadLibrary(); };
+    chip.ondragstart = e => e.dataTransfer.setData('application/litprism-group', chip.dataset.groupChip);
+    chip.ondragover = e => e.preventDefault();
+    chip.ondrop = async e => {
+      e.preventDefault(); e.stopPropagation();
+      const pid = e.dataTransfer.getData('application/litprism-paper');
+      const group = e.dataTransfer.getData('application/litprism-group');
+      try {
+        if (pid) await api('/api/paper/'+pid, { method: 'PATCH', body: { collection_id: chip.dataset.groupChip } });
+        if (group && group !== chip.dataset.groupChip) {
+          const ids = S.collections.map(c => c.id).filter(id => id !== group);
+          ids.splice(ids.indexOf(chip.dataset.groupChip), 0, group);
+          for (const [sort_order, id] of ids.entries()) await api('/api/collections/'+id, { method: 'PATCH', body: { sort_order } });
+        }
+        await refreshCollections(); await refreshLibrary();
+      } catch (err) { toast(err.message, true); }
+    };
+  });
+}
+
+function collectionLabel(id, visited = new Set()) {
+  const c = S.collections.find(v => v.id === id);
+  if (!c || visited.has(id)) return '';
+  visited.add(id);
+  return (c.parent_id ? collectionLabel(c.parent_id, visited)+' / ' : '')+c.name;
+}
+
+function collectionDescendants(id) {
+  const found = new Set([id]);
+  for (let i = 0; i < S.collections.length; i++) S.collections.forEach(c => { if (found.has(c.parent_id)) found.add(c.id); });
+  return [...found];
+}
+
+function editConversation(c) {
+  workflowDialog('管理会话', `<label>名称<input class="input" name="title" value="${esc(c.title)}" required></label><label><input type="checkbox" name="pinned" ${c.pinned ? 'checked' : ''}>置顶</label>`, async v => {
+    await api('/api/conversations/'+c.id, { method: 'PATCH', body: { title: v.title, pinned: v.pinned === 'on' } });
+    await loadSidebar();
+    if (S.activeConv === c.id) $('#tbTitle').textContent = v.title;
+  });
+}
+
+async function editDeliverable(id) {
+  try {
+    const d = await api('/api/deliverables/'+id);
+    workflowDialog('编辑研究产出', `<label>标题<input class="input" name="title" value="${esc(d.title)}" required></label><label>正文<textarea class="textarea" name="content" rows="12" required>${esc(d.content)}</textarea></label><p>保存时重新检查原文来源与正文引用。</p>`, async values => {
+      await api('/api/deliverables/'+id, { method: 'PUT', body: values }); await loadDeliverables();
+    });
+  } catch (e) { toast(e.message, true); }
 }
 
 function showConversationDialog() {
   const options = S.papers.map(p => `<option value="p:${esc(p.id)}">${esc(short(p.display_title || p.title, 42))}</option>`).join('') +
     S.collections.map(c => `<option value="g:${esc(c.id)}">分组：${esc(c.name)}</option>`).join('');
   workflowDialog('新建研究对话', `<label>对话名称<input class="input" name="title" value="新研究对话" required></label>
-    <label>文献范围<select class="select" name="scope"><option value="">全部已核验文献</option>${S.selectedPapers.size ? '<option value="selected">知识库中勾选的文献</option>' : ''}${options}</select></label>`, async values => {
+    <label>文献范围<select class="select" name="scope"><option value="">全部可引用文献与已审核知识</option>${S.selectedPapers.size ? '<option value="selected">知识库中勾选的文献</option>' : ''}${options}</select></label>`, async values => {
     let scope = {};
     if (values.scope === 'selected') scope = { paper_ids: [...S.selectedPapers] };
     else if (values.scope.startsWith('p:')) scope = { paper_ids: [values.scope.slice(2)] };
@@ -83,11 +174,12 @@ async function importFiles(files) {
   try {
     await ENV_READY;
     const env = apiEnv();
-    const res = await fetch((env.base || '') + '/api/upload?analyze=false', {
+    const res = await fetch((env.base || '') + '/api/tasks/upload', {
       method: 'POST', headers: env.token ? { 'X-LitPrism-Token': env.token } : {}, body: form,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || data.error || '导入失败');
+    const started = await res.json();
+    if (!res.ok) throw new Error(started.detail || started.error || '导入失败');
+    const data = await waitTask(started.id);
     $('#importResults').innerHTML = (data.results || []).map(r => `<div class="${r.ok ? 'insp-note' : 'lui-degraded'}">
       <strong>${esc(r.file)}</strong>：${esc(r.ok ? '核验通过，已导入；打开文献可生成解读。' : r.error)}
       ${!r.ok && r.title ? `<button class="btn sm" data-import-verify="${esc(r.title)}">查看核验 / 人工确认</button>` : ''}</div>`).join('');
@@ -104,7 +196,7 @@ async function loadComparison() {
   box.innerHTML = '<div class="insp-note">正在读取原文并对比，完成后检查引用…</div>';
   const key = [...ids].sort().join(',');
   if (S.compareKey !== key) {
-    try { S.comparison = await api('/api/compare', { method: 'POST', body: { refs: ids } }); }
+    try { S.comparison = await runTask('compare', { refs: ids }); }
     catch (error) { box.textContent = error.message; return; }
     S.compareKey = key;
   }
@@ -115,12 +207,16 @@ async function loadComparison() {
   box.innerHTML = `<div class="source-intro">模型：${esc(r.data._model || '未知')}</div>
     ${check.passed === false ? `<div class="lui-degraded">${esc((check.issues || []).join('；'))}</div>` : '<button class="btn" id="btnSaveComparison">保存为对比报告</button>'}
     <div class="reading-report">${LitUI.md(r.data.summary || '')}
+      ${coverageNote(r.data._coverage)}
+      ${semanticReviewPanel(r.data._semantic_review, {kind: 'run', id: r.data._semantic_run_id})}
       ${(r.data.dimensions || []).length ? `<div style="overflow-x:auto"><table class="table"><thead><tr><th>维度</th>${(r.data._papers || []).map(p => `<th>${esc(p.title)}</th>`).join('')}</tr></thead>
-        <tbody>${r.data.dimensions.map(d => `<tr><td>${esc(d.dimension)}</td>${(r.data._papers || []).map(p => `<td>${LitUI.md(String((d.values || {})[p.tag] || '未提及'))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : ''}</div>`;
+        <tbody>${r.data.dimensions.map(d => `<tr><td>${esc(d.dimension)}</td>${(r.data._papers || []).map(p => `<td>${LitUI.md(String((d.values || {})[p.tag] || '当前提取未找到依据'))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : ''}
+      ${['convergence', 'divergence'].map(k => (r.data[k] || []).length ? `<h3>${k === 'convergence' ? '一致点' : '分歧点'}</h3>${r.data[k].map(v => `<p>${LitUI.md(v)}</p>`).join('')}` : '').join('')}
+      ${(r.data.evidence_map || []).length ? `<h3>结论与证据映射</h3>${r.data.evidence_map.map(e => `<p>${esc(e.claim)} — ${esc((e.sources || []).join('、'))}</p>`).join('')}` : ''}</div>`;
   $('#btnSaveComparison')?.addEventListener('click', async () => {
     try {
       await api('/api/deliverables', { method: 'POST', body: { type: 'comparison', title: '论文对比报告', content: r.markdown,
-        citations: r.data._citations, model: r.data._model, source_scope: { citation_check: check } } });
+        citations: r.data._citations, model: r.data._model, source_scope: { citation_check: check, semantic_run_id: r.data._semantic_run_id } } });
       toast('已保存到研究产出');
     } catch (error) { toast(error.message, true); }
   });
@@ -154,14 +250,179 @@ async function recommendPapers(event) {
 
 function showSkillRun(skill) {
   workflowDialog('运行：' + skill.name, (skill.inputs || []).map(i => `<label>${esc(i.label || i.key)}
-    <input class="input" name="${esc(i.key)}" ${i.required ? 'required' : ''} placeholder="${esc(i.type === 'papers' ? '论文 id，以逗号分隔' : i.key)}"></label>`).join('') +
+    ${i.type === 'papers' ? `<select class="select" multiple name="${esc(i.key)}" ${i.required ? 'required' : ''}>${S.papers.map(p => `<option value="${esc(p.id)}">${esc(p.display_title || p.title)}</option>`).join('')}</select>` :
+      i.type === 'collection' ? `<select class="select" name="${esc(i.key)}" ${i.required ? 'required' : ''}><option value="">请选择分组</option>${S.collections.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>` :
+      `<input class="input" name="${esc(i.key)}" ${i.required ? 'required' : ''} placeholder="${esc(i.key)}">`}</label>`).join('') +
     '<p class="source-intro">只执行声明式预取和提示词；没有原文依据时拒绝生成。</p>', async values => {
-      const r = await api(`/api/skills/${encodeURIComponent(skill.id)}/run`, { method: 'POST', body: { inputs: values } });
+      const r = await runTask('skill', { skill_id: skill.id, request: { inputs: values } });
       if (!r.ok) throw new Error(r.error || (r.citation_check?.issues || []).join('；') || '引用检查失败');
       $('#skillRunResult')?.remove();
       $('#skillCards').insertAdjacentHTML('afterbegin', `<div class="card" id="skillRunResult"><div class="card-body">${LitUI.md(r.answer || '')}${r.deliverable_id ? '<p class="insp-note">已保存到研究产出。</p>' : ''}</div></div>`);
     }, '运行并检查引用');
 }
+
+function coverageNote(c) {
+  return c ? `<div class="insp-note">原文覆盖：${esc(c.read_chunks)} / ${esc(c.total_chunks)} 个分块，${esc(c.batches)} 批；${esc(c.note || '')}</div>` : '';
+}
+
+function semanticReviewPanel(report, entity) {
+  if (!report || report.status === 'not_run') return '<p class="source-intro">尚未运行整体语义核查；引用能定位不等于引文支持结论。重新解读后可查看。</p>';
+  const items = report.items || [];
+  const pending = items.filter(i => i.status !== 'machine_supported');
+  const link = i => `<p><a href="#semantic-${esc(i.id)}" data-semantic-claim="${esc(i.id)}" data-semantic-kind="${esc(entity.kind)}" data-semantic-id="${esc(entity.id)}">第 ${esc(i.batch)} 批 · ${esc(i.text)}</a></p>`;
+  return `<details class="card" ${pending.length ? 'open' : ''}><summary>语义核查：${esc(report.supported || 0)} 项机器支持 · ${pending.length} 项待核对 · ${(report.differences || []).length} 组差异</summary><div class="card-body"><p class="source-intro">${esc(report.note)}</p>
+    ${report.coverage?.complete === false ? '<p class="lui-degraded">整体差异核查尚未覆盖全部陈述，未覆盖项保持待核对。</p>' : ''}
+    ${entity.id ? pending.slice(0,8).map(link).join('') : ''}
+    ${entity.id && pending.length > 8 ? `<details><summary>其余 ${pending.length-8} 项待核对陈述</summary>${pending.slice(8).map(link).join('')}</details>` : ''}
+    ${items.some(i => i.status === 'machine_supported') && entity.id ? `<details><summary>查看机器支持项与引文</summary>${items.filter(i => i.status === 'machine_supported').map(link).join('')}</details>` : ''}</div></details>`;
+}
+
+function semanticEndpoint(ref) {
+  return ref.kind === 'run' ? '/api/semantic-runs/'+encodeURIComponent(ref.id) : '/api/paper/'+encodeURIComponent(ref.id)+'/semantic';
+}
+
+function showSemantic(ref) {
+  S.evidenceRef = null; S.semanticRef = ref; S.inspectorTab = 'sources';
+  $$('[data-insp]').forEach(b => b.classList.toggle('active', b.dataset.insp === 'sources'));
+  $$('[data-insp-pane]').forEach(p => p.classList.toggle('active', p.dataset.inspPane === 'sources'));
+  toggleInspector(true);
+}
+
+async function loadSemanticDetail(ref) {
+  const box = $('#inspSources');
+  const seq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
+  box.innerHTML = '<p role="status">正在读取陈述、差异与来源…</p>';
+  try {
+    const d = await api(semanticEndpoint(ref));
+    if (S.semanticRef !== ref || seq !== S.evidenceLoadSeq) return;
+    const claim = (d.report.items || []).find(i => i.id === ref.claimId);
+    if (!claim) throw new Error('陈述不在当前解读版本中，请重新打开核查列表。');
+    const reviews = (d.reviews || []).filter(i => i.claim_id === claim.id);
+    const last = reviews.at(-1);
+    const related = (d.report.differences || []).filter(i => i.claim_ids.includes(claim.id));
+    const labels = {machine_supported: '机器支持 · 尚未经人工确认', needs_review: '待人工核对', contradicted: '机器发现不符 · 待人工核对'};
+    const fields = {research_question:'研究问题', methodology:'方法', experiment_design:'实验设计', key_conclusions:'主要结论', innovations:'创新点', limitations:'局限', summary:'总体结论', convergence:'一致点', divergence:'分歧点'};
+    const renderClaim = c => `<h4>第 ${esc(c.batch)} 批 · ${esc(fields[c.field] || '对比陈述')}</h4><div class="reading-text">${esc(c.text)}</div><p class="source-intro">${esc(labels[c.status] || c.status)}</p><p>机器核查说明：${esc(c.reason)}</p>${(c.quotes || []).map(q => `<details><summary>引文 [${esc(q.tag)}] ${q.page == null ? '' : 'p.'+esc(q.page)} · ${esc(q.quote.slice(0,70))}${q.quote.length > 70 ? '…' : ''}</summary><blockquote class="reading-text">${esc(q.quote)}</blockquote></details>`).join('')}<p>候选来源：${(c.candidate_tags || []).map(t => {
+      const stored = S.semanticSources?.[t];
+      return stored ? `<a href="#evidence-${esc(stored.chunk_id)}" data-evidence-ref="${esc(stored.chunk_id)}">[${esc(t)}] ${esc(stored.paper_title || '原文')} ${stored.page == null ? '' : 'p.'+esc(stored.page)}</a>` : esc('['+t+']');
+    }).join(' · ')}</p>`;
+    // Resolve original immutable chunk IDs even when the reviewer supplied no valid quote.
+    S.semanticSources = {};
+    const ids = new Set([claim.id, ...related.flatMap(i => i.claim_ids)]);
+    const linked = (d.report.items || []).filter(i => ids.has(i.id));
+    const sourceRecords = d.sources || [];
+    sourceRecords.forEach(s => { S.semanticSources[s.tag] = s; });
+    box.innerHTML = `<button class="btn sm" id="btnSemanticBack">返回来源列表</button><h3>陈述与整体差异核对</h3><p class="source-intro">机器核查不等于人工确认。待核对项保留在此处，不作为正常结论。</p>${renderClaim(claim)}
+      ${related.map(diff => `<details open><summary>差异候选：${esc(diff.reason)}</summary>${linked.filter(c => c.id !== claim.id && diff.claim_ids.includes(c.id)).map(renderClaim).join('')}</details>`).join('')}
+      <form id="semanticReview"><label>核对后的知识正文（可修正原陈述）<textarea class="textarea" rows="5" name="reviewed_text" maxlength="20000">${esc(last?.reviewed_text || claim.text)}</textarea></label><label>人工核对依据<textarea class="textarea" name="note" maxlength="5000" required placeholder="核对双方出处、条件、数字与适用范围后填写"></textarea></label><p class="source-intro">确认后单独加入可信知识库，原始解读与论文核验状态保留。</p><div class="row wrap"><button class="btn primary" name="action" value="confirm" ${last?.action === 'confirm' ? 'disabled' : ''}>${last?.action === 'confirm' ? '已人工确认入库' : '确认正文并入库'}</button><button class="btn" name="action" value="reject" ${last?.action === 'reject' ? 'disabled' : ''}>拒绝陈述</button><button class="btn" name="action" value="revoke" ${last?.action !== 'confirm' ? 'disabled' : ''}>撤销入库</button></div><p class="task-error" role="alert"></p></form>
+      ${last?.knowledge_id ? `<p><a href="#evidence-${esc(last.knowledge_id)}" data-evidence-ref="${esc(last.knowledge_id)}">查看知识条目与来源快照</a></p>` : ''}
+      ${reviews.length ? `<details><summary>人工审核历史</summary>${reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm:'确认入库', reject:'拒绝', revoke:'撤销'})[r.action])}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
+    $('#btnSemanticBack').onclick = () => { S.semanticRef = null; refreshInspector(); };
+    $('#semanticReview').addEventListener('submit', async event => {
+      event.preventDefault(); const form = event.currentTarget;
+      const buttons = $$('button', form), disabled = buttons.map(b => b.disabled);
+      const values = Object.fromEntries(new FormData(form));
+      const action = event.submitter?.value;
+      buttons.forEach(b => { b.disabled = true; });
+      try {
+        await api(semanticEndpoint(ref)+'/'+encodeURIComponent(ref.claimId)+'/review', {method:'POST', body:{...values, action, analysis_hash:d.analysis_hash}});
+        toast('人工审核已留档'); await loadSemanticDetail(ref);
+      } catch (error) { $('.task-error', form).textContent = error.message; buttons.forEach((b,i) => {b.disabled=disabled[i];}); }
+    });
+  } catch (error) { if (S.semanticRef === ref && seq === S.evidenceLoadSeq) box.textContent = error.message; }
+}
+
+document.addEventListener('click', event => {
+  const link = event.target.closest('[data-semantic-claim]');
+  if (!link) return;
+  event.preventDefault(); showSemantic({kind:link.dataset.semanticKind, id:link.dataset.semanticId, claimId:link.dataset.semanticClaim});
+});
+
+function trustLabel(level) {
+  return ({ verified: '自动核验通过', manual_confirmed: '人工确认', pending: '待人工审核', likely: '疑似匹配',
+    unchecked: '无法判定', not_found: '未能核到', rejected: '已拒绝 · 不可引用', revoked: '已撤销 · 不可引用', deleted: '已回收 · 不可引用' })[level] || '状态未知';
+}
+
+function safeSourceUrl(url) {
+  try { const u = new URL(url); return ['http:', 'https:'].includes(u.protocol) ? u.href : ''; }
+  catch { return ''; }
+}
+
+function sourceTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+}
+
+async function showEvidence(ref) {
+  S.semanticRef = null;
+  S.evidenceRef = ref;
+  S.inspectorTab = 'sources';
+  $$('[data-insp]').forEach(b => b.classList.toggle('active', b.dataset.insp === 'sources'));
+  $$('[data-insp-pane]').forEach(p => p.classList.toggle('active', p.dataset.inspPane === 'sources'));
+  toggleInspector(true);
+}
+
+async function loadEvidenceDetail(ref) {
+  const loadSeq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
+  const box = $('#inspSources');
+  box.innerHTML = '<p role="status">正在读取来源快照…</p>';
+  try {
+    const d = await api('/api/evidence/'+encodeURIComponent(ref));
+    if (S.evidenceRef !== ref || loadSeq !== S.evidenceLoadSeq) return;
+    const kind = ({ paper: '论文原文', web: '网页摘要快照', knowledge: '知识条目快照' })[d.source_kind] || '来源';
+    const url = safeSourceUrl(d.url || (d.doi ? 'https://doi.org/'+encodeURIComponent(d.doi) : ''));
+    const canReview = d.source_kind !== 'paper' || (!d.citable && d.trust_level !== 'deleted');
+    box.innerHTML = `<button class="btn sm" id="btnSourceBack">查看本轮其他来源</button><h3>${esc(d.title || d.paper_title)}</h3>
+      <div class="source-intro">${esc(kind)} · ${esc(trustLabel(d.trust_level))} · ${d.page == null ? '无页码' : '第 '+esc(d.page)+' 页'}</div>
+      ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">打开原始来源 ↗</a><p class="source-url">${esc(url)}</p>` : '<p class="source-intro">来源：本地文献或用户提供的知识</p>'}
+      ${d.doi ? `<p>DOI：${esc(d.doi)}</p>` : ''}
+      ${d.authors ? `<p>作者：${esc(Array.isArray(d.authors) ? d.authors.join('、') : d.authors)}</p>` : ''}
+      <p class="source-intro">${d.citable ? '当前可以作为证据；人工确认不等于自动核验。' : '当前不可作为知识库回答的事实依据。'}</p>
+      <div class="reading-text evidence-excerpt">${esc(d.text || '')}</div>
+      ${d.content && d.content !== d.text ? `<details><summary>查看完整审核快照（${d.content.length} 字符）</summary><div class="reading-text">${esc(d.content)}</div></details>` : ''}
+      ${d.review_note ? `<p>审核依据：${esc(d.review_note)}</p><p class="source-intro">审核时间（本地）：${esc(sourceTime(d.reviewed_at))}</p>` : ''}
+      ${d.source_kind === 'paper' && d.verify_evidence ? `<details><summary>核验记录</summary><pre class="reading-text">${esc(typeof d.verify_evidence === 'string' ? d.verify_evidence : JSON.stringify(d.verify_evidence, null, 2))}</pre></details>` : ''}
+      ${canReview ? `<form id="evidenceReview"><label>人工审核依据<textarea class="textarea" name="note" required placeholder="核对出处、原文与适用范围后填写"></textarea></label><div class="row wrap"><button class="btn primary" name="action" value="confirm" ${d.citable ? 'disabled' : ''}>${d.citable ? '已加入可信知识库' : '确认可信并加入知识库'}</button>${d.source_kind !== 'paper' ? `<button class="btn" name="action" value="reject" ${d.trust_level === 'rejected' ? 'disabled' : ''}>拒绝</button><button class="btn" name="action" value="revoke" ${!d.citable ? 'disabled' : ''}>撤销可信</button>` : ''}</div><p class="task-error" role="alert"></p></form>` : ''}
+      ${(d.reviews || []).length ? `<details><summary>审核历史</summary>${d.reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm: '确认加入', reject: '拒绝', revoke: '撤销'})[r.action] || r.action)}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
+    $('#btnSourceBack').onclick = () => { S.evidenceRef = null; refreshInspector(); };
+    $('#evidenceReview')?.addEventListener('submit', async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const buttons = $$('button', form);
+      const disabled = buttons.map(b => b.disabled);
+      buttons.forEach(b => { b.disabled = true; });
+      try {
+        await api('/api/evidence/'+encodeURIComponent(ref)+'/review', { method: 'POST', body: {
+          action: e.submitter.value, note: new FormData(form).get('note'), content_hash: d.content_hash } });
+        toast('审核结果已留档'); await loadEvidenceDetail(ref);
+        if (S.activeView === 'knowledge') await loadKnowledge();
+      } catch (error) { $('.task-error', form).textContent = error.message; buttons.forEach((b, i) => { b.disabled = disabled[i]; }); }
+    });
+  } catch (error) { if (S.evidenceRef === ref && loadSeq === S.evidenceLoadSeq) box.textContent = error.message; }
+}
+
+async function loadKnowledge() {
+  const d = await api('/api/evidence');
+  $('#knowledgeList').innerHTML = d.items.length ? d.items.map(s => `<div class="list-item"><div class="list-main"><a href="#evidence-${esc(s.id)}" data-evidence-ref="${esc(s.id)}">${esc(s.title)}</a><p>${esc(s.kind === 'web' ? '网页' : '知识条目')} · ${esc(trustLabel(s.status))}</p></div></div>`).join('') : '<div class="empty">尚无知识或网页候选。保存原文片段后，在右栏人工审核。</div>';
+}
+
+document.addEventListener('click', e => {
+  const link = e.target.closest('[data-evidence-ref]');
+  if (!link) return;
+  e.preventDefault(); showEvidence(link.dataset.evidenceRef);
+});
+
+$('#btnAddKnowledge').onclick = () => workflowDialog('保存待审核原文', '<label>类型<select class="select" name="kind"><option value="knowledge">知识条目</option><option value="web">网页片段</option></select></label><label>标题<input class="input" name="title" required></label><label>原始 URL（网页必填）<input class="input" name="url"></label><label>原文快照<textarea class="textarea" name="content" rows="8" required></textarea></label><p>保存为待审核候选；下一步在右栏核对后确认。</p>', async values => {
+  const source = await api('/api/evidence', { method: 'POST', body: values }); await loadKnowledge(); showEvidence(source.id);
+}, '保存候选');
+
+$('#btnSearchEvidence').onclick = async () => {
+  const b = $('#btnSearchEvidence'); b.disabled = true;
+  try { const r = await api('/api/evidence/search', { method: 'POST', body: { query: $('#webEvidenceQuery').value } }); toast(r.note); await loadKnowledge(); }
+  catch (e) { toast(e.message, true); }
+  finally { b.disabled = false; }
+};
 
 async function loadMemories() {
   const d = await api('/api/memories');
@@ -199,12 +460,14 @@ async function loadTrash() {
 
 async function manageCollections() {
   await refreshCollections();
-  const d = workflowDialog('管理分组', `<label>新分组名称<input class="input" name="name" required></label>` + S.collections.map(c => `<div class="row"><span class="spacer">${esc(c.name)}</span><button type="button" class="btn sm" data-rename-group="${esc(c.id)}">改名</button><button type="button" class="btn sm" data-delete-group="${esc(c.id)}">删除分组</button></div>`).join(''), async v => {
-    await api('/api/collections', { method: 'POST', body: { name: v.name } }); await refreshCollections();
+  const parents = '<option value="">顶层</option>'+S.collections.map(c => `<option value="${esc(c.id)}">${esc(collectionLabel(c.id))}</option>`).join('');
+  const d = workflowDialog('管理分组', `<label>新分组名称<input class="input" name="name" required></label><label>父分组<select class="select" name="parent_id">${parents}</select></label>` + S.collections.map(c => `<div class="row"><span class="spacer">${esc(collectionLabel(c.id))}</span><button type="button" class="btn sm" data-rename-group="${esc(c.id)}">编辑</button><button type="button" class="btn sm" data-delete-group="${esc(c.id)}">删除分组</button></div>`).join(''), async v => {
+    await api('/api/collections', { method: 'POST', body: v }); await refreshCollections();
   }, '创建分组');
   $$('[data-rename-group]', d).forEach(b => b.onclick = () => {
     const c = S.collections.find(x => x.id === b.dataset.renameGroup); d.close();
-    workflowDialog('重命名分组', `<input class="input" name="name" value="${esc(c.name)}" required>`, async v => { await api('/api/collections/' + c.id, { method: 'PATCH', body: v }); await refreshCollections(); await refreshLibrary(); });
+    const descendants = collectionDescendants(c.id);
+    workflowDialog('编辑分组', `<input class="input" name="name" value="${esc(c.name)}" required><label>父分组<select class="select" name="parent_id"><option value="">顶层</option>${S.collections.filter(v => !descendants.includes(v.id)).map(v => `<option value="${esc(v.id)}" ${v.id === c.parent_id ? 'selected' : ''}>${esc(collectionLabel(v.id))}</option>`).join('')}</select></label>`, async v => { await api('/api/collections/' + c.id, { method: 'PATCH', body: v }); await refreshCollections(); await refreshLibrary(); });
   });
   $$('[data-delete-group]', d).forEach(b => b.onclick = async () => {
     if (!confirm('删除此分组？文献会保留在未分组中。')) return;
@@ -219,6 +482,16 @@ $('#collectionFilter').onchange = () => loadLibrary();
 $('#btnCollection').onclick = () => manageCollections().catch(e => toast(e.message, true));
 $('#btnCompareSelected').onclick = () => { S.compareKey = null; openView('compare'); };
 $('#btnAddMemory').onclick = () => editMemory();
+let convSearchTimer;
+$('#convSearch').oninput = () => { clearTimeout(convSearchTimer); convSearchTimer = setTimeout(() => loadSidebar(), 250); };
+for (const [selector, operation] of [['#btnBatchDelete', 'delete'], ['#btnBatchVerify', 'reverify']]) {
+  $(selector).onclick = async () => {
+    if (!S.selectedPapers.size) return toast('请先勾选文献');
+    if (!confirm(operation === 'delete' ? '将所选文献移入回收站？' : '重新核验所选文献？未通过的文献将停止作为引用来源。')) return;
+    try { const r = await runTask('batch', { operation, paper_ids: [...S.selectedPapers] }); toast(`已处理 ${r.items.length} 篇`); await refreshLibrary(); }
+    catch (e) { toast(e.message, true); await refreshLibrary(); }
+  };
+}
 $('#recommendForm').onsubmit = recommendPapers;
 $('#btnExportAll').onclick = () => downloadApi('/api/deliverables-archive', 'litprism-deliverables.zip').catch(e => toast(e.message, true));
 $('#btnMovePapers').onclick = () => {

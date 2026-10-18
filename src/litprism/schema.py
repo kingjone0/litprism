@@ -20,8 +20,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 # ---------------------------------------------------------------------------
 # v1 —— 基础表（已有实现，保持不变）
@@ -441,10 +441,46 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_papers_deleted    ON papers(deleted_at)")
 
 
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS evidence_sources (
+          id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, url TEXT,
+          content TEXT NOT NULL, content_hash TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL,
+          reviewed_at TEXT, review_note TEXT
+        );
+        CREATE TABLE IF NOT EXISTS evidence_chunks (
+          id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES evidence_sources(id),
+          ordinal INTEGER NOT NULL, text TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_evidence_chunks_source ON evidence_chunks(source_id);
+        CREATE TABLE IF NOT EXISTS evidence_reviews (
+          id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES evidence_sources(id),
+          content_hash TEXT NOT NULL, action TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+    ''')
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS semantic_runs (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS semantic_reviews (
+          id TEXT PRIMARY KEY, paper_id TEXT REFERENCES papers(id), run_id TEXT REFERENCES semantic_runs(id),
+          analysis_hash TEXT NOT NULL, claim_id TEXT NOT NULL, action TEXT NOT NULL,
+          note TEXT NOT NULL, reviewed_text TEXT, knowledge_id TEXT, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_semantic_review_version ON semantic_reviews(paper_id,run_id,analysis_hash,claim_id);
+    ''')
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
     Migration(3, "模型目录 provider_models + providers.protocol", _migrate_v3),
+    Migration(4, '知识与网页候选、原文快照及人工审核审计', _migrate_v4),
+    Migration(5, '按解读版本保存陈述人工审核与知识入库记录', _migrate_v5),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)
