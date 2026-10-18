@@ -151,3 +151,46 @@ class TestConstants:
         budget = DEFAULT_QUOTA * CLAIM_TOKENS
         assert 0.65 * 4096 <= budget <= 0.75 * 4096, f"配额占用 {budget}，偏离 70% 过多"
         assert 4.0 <= DENSITY <= 5.0
+
+
+def test_large_section_targets_partition_real_chunks_in_order():
+    chunks = [chunk(i, '结果', 1200) for i in range(1, 15)]
+    plan = build_plan(PAPER, chunks, FakeMeter(), available_tokens=100_000)
+    ids = [cid for d in plan.directives for cid in d.chunk_ids]
+    assert ids == [c['id'] for c in chunks]
+    for d in plan.directives:
+        assert d.est_claims <= d.quota
+        assert d.expected[1] <= d.quota
+        assert all(f"[{span['tag']}]" in d.text for r in d.runs for span in r.spans)
+
+
+def test_single_large_chunk_has_exact_nonoverlapping_source_ranges():
+    original = ('Section result alpha.\n' * 800) + 'UNIQUE_TAIL'
+    c = dict(chunk(1, '结果'), text=original)
+    plan = build_plan(PAPER, [c], FakeMeter(), available_tokens=100_000)
+    spans = [s for d in plan.directives for r in d.runs for s in r.spans]
+    assert len(spans) > 1
+    assert ''.join(s['text'] for s in spans) == original
+    cursor = 0
+    for s in spans:
+        assert s['start'] == cursor
+        assert s['text'] == original[s['start']:s['end']]
+        assert s['tag'] == 'P1' and s['chunk_id'] == 'c1'
+        cursor = s['end']
+    assert cursor == len(original)
+    assert all(d.tokens < FakeMeter().estimate_text(original) for d in plan.directives)
+    assert all(d.est_claims <= d.quota for d in plan.directives)
+    assert 'UNIQUE_TAIL' in plan.directives[-1].text
+
+
+def test_unbroken_table_row_does_not_get_cut_for_claim_quota():
+    c = dict(chunk(1, '表格'), text='【表格行】model=alpha; score='+'1'*8000)
+    plan = build_plan(PAPER, [c], FakeMeter(), available_tokens=100_000)
+    assert plan.mode == 'batched'
+    assert '未切断行列关系' in plan.note
+
+
+def test_small_output_budget_does_not_promise_four_claims():
+    from litprism.plan import quota_for
+    assert quota_for(512) == 1
+    assert quota_for(4096) == 4

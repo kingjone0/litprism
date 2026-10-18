@@ -491,6 +491,25 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS analysis_runs (
+          id TEXT PRIMARY KEY, paper_id TEXT NOT NULL REFERENCES papers(id),
+          binding TEXT NOT NULL, analysis_hash TEXT NOT NULL, budgets TEXT NOT NULL,
+          status TEXT NOT NULL, stage TEXT, stop_reason TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS analysis_run_calls (
+          run_id TEXT NOT NULL REFERENCES analysis_runs(id), step INTEGER NOT NULL,
+          attempt INTEGER NOT NULL, task TEXT NOT NULL, request_hash TEXT NOT NULL,
+          status TEXT NOT NULL, response TEXT, usage TEXT, error_type TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          PRIMARY KEY(run_id, step, attempt)
+        );
+        CREATE INDEX IF NOT EXISTS idx_analysis_runs_paper ON analysis_runs(paper_id, created_at);
+    ''')
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
@@ -498,6 +517,7 @@ MIGRATIONS: list[Migration] = [
     Migration(4, '知识与网页候选、原文快照及人工审核审计', _migrate_v4),
     Migration(5, '按解读版本保存陈述人工审核与知识入库记录', _migrate_v5),
     Migration(6, '模型窗口随模型走：provider_models.window_tokens', _migrate_v6),
+    Migration(7, '持久分析阶段预算、请求结果与安全恢复记录', _migrate_v7),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

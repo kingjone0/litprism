@@ -374,6 +374,7 @@ async function loadLibrary() {
    ========================================================================== */
 async function loadPaperDetail() {
   const box = $('#paperDetail');
+  const requestedPaper = S.activePaper;
   if (!S.activePaper) {
     box.innerHTML = `<div class="empty"><div class="title">未选择论文</div></div>`;
     return;
@@ -382,7 +383,8 @@ async function loadPaperDetail() {
     <div class="skeleton" style="width:40%;height:12px;margin:0 auto"></div></div>`;
 
   try {
-    const d = await api(`/api/paper/${encodeURIComponent(S.activePaper)}`);
+    const d = await api(`/api/paper/${encodeURIComponent(requestedPaper)}`);
+    if (S.activePaper !== requestedPaper) return;
     const p = d.paper || d;
     const a = d.analysis || {};
     S.paperAnalysis = a;
@@ -409,6 +411,7 @@ async function loadPaperDetail() {
             <button class="btn sm" id="btnRename">重命名</button>
             <button class="btn sm danger" id="btnDelete">删除</button>
             <button class="btn sm primary" id="btnReanalyze">重新解读</button>
+            <button class="btn sm" id="btnBudgetAnalyze">分阶段解读</button>
           </div>
         </div>
         <div class="segmented" style="margin-top:14px" id="paperTabs">
@@ -419,6 +422,7 @@ async function loadPaperDetail() {
       </div>
 
       <div data-ppane="analysis">
+        <div id="analysisRuns" aria-live="polite"></div>
         ${coverageNote(a._coverage)}
         ${semanticReviewPanel(a._semantic_review, {kind: 'paper', id: p.id})}
         ${a._concepts_error ? `<div class="lui-degraded">术语提取未完成：${esc(a._concepts_error)}</div>` : ''}
@@ -497,7 +501,10 @@ async function loadPaperDetail() {
         loadPaperDetail();
       } catch (e) { toast(e.message, true); }
     };
+    $('#btnBudgetAnalyze').onclick = () => analysisRunDialog(p.id);
+    loadAnalysisRuns(p.id);
   } catch (e) {
+    if (S.activePaper !== requestedPaper) return;
     box.innerHTML = `<div class="empty"><div class="title">加载失败</div><div class="desc">${esc(e.message)}</div></div>`;
   }
 }
@@ -567,7 +574,11 @@ function readingModeNote(cov) {
       const cls = r >= 50 ? 'ok' : r >= 10 ? 'warn' : 'danger';
       parts.push(`<span class="badge ${cls}">缓存命中 ${r}%</span>`);
     }
-    parts.push(`<span class="mono muted">${u.calls} 次调用 · ${fmtNum(u.input)} 入 / ${fmtNum(u.output)} 出</span>`);
+    parts.push(`<span class="mono muted">${u.calls} 次调用 · 已报告 ${fmtNum(u.input)} 入 / ${fmtNum(u.output)} 出</span>`);
+    if (u.unknown_usage_calls) {
+      parts.push(`<span class="badge warn">${u.unknown_usage_calls} 次用量未知 · 总计不完整</span>`);
+    }
+    if (u.failed_calls) parts.push(`<span class="muted">含 ${u.failed_calls} 次失败调用</span>`);
   }
 
   let html = `<div class="row wrap" style="gap:8px;margin-top:8px;font-size:11.5px;color:var(--text-2)">

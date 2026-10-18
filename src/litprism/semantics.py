@@ -211,7 +211,7 @@ def _cost(cfg, messages):
     return sum(Meter(cfg).estimate_message(m) for m in messages)
 
 
-def review_units(units, excerpts, cfg, llm, *, call_budget=None):
+def review_units(units, excerpts, cfg, llm, *, call_budget=None, tracker=None):
     by_tag = {e['tag']: e for e in merge_fragments(excerpts)}
     groups, current = [], []
     for unit in units:
@@ -235,6 +235,11 @@ def review_units(units, excerpts, cfg, llm, *, call_budget=None):
         groups.append(current)
     from .tasks import checkpoint
     for group_index, group in enumerate(groups):
+        if getattr(llm, 'remaining_calls', 1) <= 0:
+            for pending_group in groups[group_index:]:
+                for unit in pending_group:
+                    unit.update(review_error='call_budget', reason='整体调用预算用尽，未调用项待人工核对。')
+            return units
         if call_budget is not None:
             if call_budget[0] <= 0:
                 for pending_group in groups[group_index:]:
@@ -245,7 +250,8 @@ def review_units(units, excerpts, cfg, llm, *, call_budget=None):
         checkpoint('逐条核对陈述与原文')
         from .llm import OutputLimitError
         try:
-            raw = llm.chat_json(_messages(group, by_tag), task='semantic_review')
+            from .usage import tracked_json
+            raw = tracked_json(llm, _messages(group, by_tag), task='semantic_review', tracker=tracker)
         except OutputLimitError:
             # No blind paid retries. Preserve candidates for explicit human review.
             for pending_group in groups[group_index:]:
@@ -303,7 +309,7 @@ def _value(value):
         return norm(value)
 
 
-def reconcile(units, cfg, llm):
+def reconcile(units, cfg, llm, *, tracker=None):
     """Keep deterministic value differences and bounded all-pairs machine checks.
 
     Every tile pair is considered, including distant first/last batches. If a
@@ -366,6 +372,7 @@ def reconcile(units, cfg, llm):
     from .tasks import checkpoint
     calls = 0
     failures = 0
+    total_failures = 0
     output_limited = False
     total_tiles = 0
     planned = 0
@@ -392,7 +399,7 @@ def reconcile(units, cfg, llm):
             pair = first if i == j else first+tiles[j]
             if len(pair) < 2:
                 continue
-            if output_limited or calls >= MAX_CROSS_CALLS:
+            if output_limited or calls >= MAX_CROSS_CALLS or getattr(llm, 'remaining_calls', 1) <= 0:
                 skipped.extend(u['id'] for u in pair)
                 continue
             checkpoint('核对全文陈述间的差异与限定')
@@ -401,18 +408,21 @@ def reconcile(units, cfg, llm):
                 continue
             from .llm import OutputLimitError
             try:
-                raw = llm.chat_json(message(pair), task='semantic_cross_review')
+                from .usage import tracked_json
+                raw = tracked_json(llm, message(pair), task='semantic_cross_review', tracker=tracker)
             except OutputLimitError:
                 # 只作废**这一对**：整篇连坐会把前面核对干净的陈述一起打死
                 # （实测：一篇 19 条的论文因此 19 条全部变成待审）。
                 # 连续失败 MAX_CROSS_FAILURES 次才放弃后续比较，避免无谓烧钱。
                 failures += 1
+                total_failures += 1
                 calls += 1
                 skipped.extend(u['id'] for u in pair)
                 if failures >= MAX_CROSS_FAILURES:
                     output_limited = True
                 continue
             calls += 1
+            failures = 0  # only consecutive output failures stop the remainder
             items = raw.get('differences') if isinstance(raw, dict) else None
             if not isinstance(items, list):
                 raise ValueError('跨批核查没有返回有效差异列表，未标记完成。')
@@ -440,11 +450,25 @@ def reconcile(units, cfg, llm):
                          'tiles': total_tiles, 'calls': calls, 'method': 'by_field_tile_pairs',
                          'fields_done': sorted(set(done_fields)), 'fields_pending': sorted(set(pending_fields)),
                          'pairs_attempted': planned,
-                         'partial': bool(failures) and not output_limited,
-                         'error': 'output_limit' if output_limited else None}
+                         'partial': bool(total_failures) and not output_limited,
+                         'failed_pairs': total_failures,
+                         'error': ('output_limit' if output_limited else
+                                   'call_budget' if skipped and getattr(llm, 'remaining_calls', 1) <= 0 else None)}
 
 
-def run_review(fields_by_batch, excerpts, cfg, llm):
+def run_review(fields_by_batch, excerpts, cfg, llm, *, tracker=None):
+    from .usage import UsageTracker
+    usage = UsageTracker()
+    try:
+        report = _run_review(fields_by_batch, excerpts, cfg, llm, usage)
+        report['usage'] = usage.to_dict()
+        return report
+    finally:
+        if tracker is not None:
+            tracker.merge(usage)
+
+
+def _run_review(fields_by_batch, excerpts, cfg, llm, tracker):
     if not getattr(llm, 'supports_semantic_review', False):
         return {'version': 1, 'status': 'not_run', 'passed': False, 'items': [], 'differences': [],
                 'note': '此模型未运行语义核查；引用存在不等于语义正确。'}
@@ -457,7 +481,7 @@ def run_review(fields_by_batch, excerpts, cfg, llm):
             for item in items:
                 item.update(review_error='output_limit', reason='前批复核耗尽预算，后续复核已停止；待人工核对。')
         else:
-            review_units(items, sources, cfg, llm, call_budget=call_budget)
+            review_units(items, sources, cfg, llm, call_budget=call_budget, tracker=tracker)
         limited |= any(i.get('review_error') == 'output_limit' for i in items)
         units.extend(items)
     if limited:
@@ -468,7 +492,7 @@ def run_review(fields_by_batch, excerpts, cfg, llm):
         coverage = {'complete': False, 'skipped_claim_ids': [u['id'] for u in units],
                     'method': 'not_run_due_review_output_limit', 'calls': 0, 'max_calls':MAX_CROSS_CALLS, 'tiles':0}
     else:
-        differences, coverage = reconcile(units, cfg, llm)
+        differences, coverage = reconcile(units, cfg, llm, tracker=tracker)
     pending = sum(u['status'] != 'machine_supported' for u in units)
     return {'version': 2, 'protocol': 'source_selection', 'status': ('needs_review' if pending else 'machine_supported') if units else 'no_claims',
             'passed': bool(units) and not pending and coverage['complete'], 'items': units, 'differences': differences,

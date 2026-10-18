@@ -387,6 +387,39 @@ def test_split_fragments_do_not_produce_duplicate_citation_tags():
     assert cites[0]['chunk_id'] == 'chunk1'
 
 
+def test_cross_failure_limit_counts_consecutive_failures_only():
+    from litprism.llm import OutputLimitError
+    from litprism.semantics import reconcile
+    items = make_units([('key_conclusions', ''.join(f'第{i}条陈述 [P1]。' for i in range(9)), [])],
+                       [EXCERPT], 1)
+    for item in items:
+        item['status'] = 'machine_supported'
+    class Alternating:
+        calls = 0
+        def chat_json(self, messages, **kwargs):
+            self.calls += 1
+            if self.calls in (1, 3, 5):
+                raise OutputLimitError('fixture')
+            return {'differences': []}
+    model = Alternating()
+    _, coverage = reconcile(items, Config(), model)
+    assert model.calls == 6
+    assert coverage['partial'] and not coverage['complete']
+    assert coverage['error'] is None
+
+
+def test_global_budget_exhaustion_keeps_unchecked_items_pending():
+    class NoCalls(Reviewer):
+        remaining_calls = 0
+        def chat_json(self, *args, **kwargs):
+            raise AssertionError('Budget exhausted: no request may be sent')
+    fields = [('key_conclusions', '第一条 [P1]。第二条 [P1]。', [])]
+    report = run_review([(fields, [EXCERPT])], [EXCERPT], Config(), NoCalls())
+    assert report['pending'] == 2 and not report['passed']
+    assert report['usage']['calls'] == 0
+    assert not report['coverage']['complete']
+
+
 # ---------------------------------------------------------------------------
 # 跨批比较的分桶范围：只在同字段内比较，预算不足时按字段如实报告
 # ---------------------------------------------------------------------------

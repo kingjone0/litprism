@@ -131,7 +131,8 @@ class OpenAICompatClient:
             headers["Authorization"] = f"Bearer {self.cfg.api_key}"
 
         last_err: Exception | None = None
-        for attempt in range(2 if bounded else 3):
+        single_attempt = getattr(self, 'durable_single_attempt', False)
+        for attempt in range(1 if single_attempt else (2 if bounded else 3)):
             self.last_request_settings['attempts'] = attempt+1
             try:
                 checkpoint('正在调用模型；最终显示前检查引用')
@@ -146,7 +147,7 @@ class OpenAICompatClient:
                     if any(w in resp.text.lower() for w in ('context_length', 'maximum context', 'too many tokens')):
                         raise ContextWindowError('context_length_exceeded')
                     # 端点不支持 response_format 时自动降级重试
-                    if resp.status_code in (400, 404, 422) and "response_format" in payload:
+                    if not single_attempt and resp.status_code in (400, 404, 422) and "response_format" in payload:
                         payload.pop("response_format", None)
                         continue
                     raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}", http_status=resp.status_code)
@@ -159,6 +160,8 @@ class OpenAICompatClient:
                 raise
             except Exception as e:  # noqa: BLE001
                 last_err = e
+                if single_attempt:
+                    break
                 if bounded:
                     if isinstance(e, requests.exceptions.ConnectTimeout) and attempt == 0:
                         time.sleep(.5)
@@ -497,7 +500,8 @@ class AnthropicClient:
         }
 
         last_err: Exception | None = None
-        for attempt in range(2 if bounded else 3):
+        single_attempt = getattr(self, 'durable_single_attempt', False)
+        for attempt in range(1 if single_attempt else (2 if bounded else 3)):
             self.last_request_settings['attempts'] = attempt+1
             try:
                 checkpoint('正在调用模型；最终显示前检查引用')
@@ -520,6 +524,8 @@ class AnthropicClient:
                 raise
             except Exception as e:  # noqa: BLE001
                 last_err = e
+                if single_attempt:
+                    break
                 if bounded:
                     if isinstance(e, requests.exceptions.ConnectTimeout) and attempt == 0:
                         time.sleep(.5)

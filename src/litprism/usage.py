@@ -88,11 +88,16 @@ class UsageTracker:
     cache_hit: int = 0
     cache_miss: int = 0
     unknown_cache_calls: int = 0
+    unknown_usage_calls: int = 0
+    failed_calls: int = 0
     per_task: dict[str, dict] = field(default_factory=dict)
 
-    def add(self, usage: dict | None, *, task: str = "unknown") -> None:
+    def add(self, usage: dict | None, *, task: str = "unknown", failed: bool = False) -> None:
         n = normalize_usage(usage)
         self.calls += 1
+        self.failed_calls += int(failed)
+        known = isinstance(usage, dict) and any(k in usage for k in ("prompt_tokens", "input_tokens")) and any(k in usage for k in ("completion_tokens", "output_tokens"))
+        self.unknown_usage_calls += int(not known)
         self.input += n["input"]
         self.output += n["output"]
         self.cache_hit += n["cache_hit"]
@@ -101,8 +106,10 @@ class UsageTracker:
             self.unknown_cache_calls += 1
 
         slot = self.per_task.setdefault(task, {"calls": 0, "input": 0, "output": 0,
-                                               "cache_hit": 0, "cache_miss": 0})
+                                               "cache_hit": 0, "cache_miss": 0, "failed_calls": 0, "unknown_usage_calls": 0})
         slot["calls"] += 1
+        slot["failed_calls"] += int(failed)
+        slot["unknown_usage_calls"] += int(not known)
         slot["input"] += n["input"]
         slot["output"] += n["output"]
         slot["cache_hit"] += n["cache_hit"]
@@ -111,6 +118,15 @@ class UsageTracker:
     def add_from(self, client: Any, *, task: str = "unknown") -> None:
         """从客户端读 ``last_usage`` 并累计。客户端没有该属性时按未知处理。"""
         self.add(getattr(client, "last_usage", None), task=task)
+
+    def merge(self, other):
+        for key in ('calls', 'input', 'output', 'cache_hit', 'cache_miss',
+                    'unknown_cache_calls', 'unknown_usage_calls', 'failed_calls'):
+            setattr(self, key, getattr(self, key)+getattr(other, key))
+        for task, values in other.per_task.items():
+            slot = self.per_task.setdefault(task, {key: 0 for key in values})
+            for key, value in values.items():
+                slot[key] = slot.get(key, 0)+value
 
     @property
     def cached_ratio(self) -> float | None:
@@ -127,9 +143,46 @@ class UsageTracker:
             "cache_miss": self.cache_miss,
             "cached_ratio": ratio,
             "unknown_cache_calls": self.unknown_cache_calls,
+            "unknown_usage_calls": self.unknown_usage_calls,
+            "failed_calls": self.failed_calls,
+            "accounting_scope": "logical_calls_reported_usage",
+            "complete": not self.unknown_usage_calls,
             "per_task": dict(self.per_task),
-            "note": (
+            "note": (f"{self.unknown_usage_calls} 次调用未返回用量；以下为已报告用量，非完整计费。 " if self.unknown_usage_calls else "") + (
                 "提供商未报告缓存字段，命中率不可知" if ratio is None
                 else f"缓存命中 {ratio*100:.0f}%（{self.cache_hit:,} / {self.cache_hit + self.cache_miss:,}）"
+                + (f"；仅含有缓存上报的调用，另有 {self.unknown_cache_calls} 次未知" if self.unknown_cache_calls else "")
             ),
         }
+
+
+def tracked_json(client, messages, *, task, tracker=None):
+    """Record each logical call once, including truncation and failed calls.
+
+    Reset last_usage to avoid charging a previous response to a failed request.
+    Transport attempts without provider usage remain unknown, never guessed free.
+    """
+    if tracker is None:
+        return client.chat_json(messages, task=task)
+    previous = getattr(client, 'last_usage', None)
+    reset = False
+    try:
+        client.last_usage = None
+        reset = True
+    except (AttributeError, TypeError):
+        pass
+    failed = True
+    try:
+        client.last_call_replayed = False
+    except (AttributeError, TypeError):
+        pass
+    try:
+        result = client.chat_json(messages, task=task)
+        failed = False
+        return result
+    finally:
+        usage = getattr(client, 'last_usage', None)
+        if not reset and usage is previous:
+            usage = None
+        if not getattr(client, 'last_call_replayed', False) and not getattr(client, 'last_call_not_sent', False):
+            tracker.add(usage, task=task, failed=failed)

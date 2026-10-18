@@ -1019,6 +1019,8 @@ def create_app(cfg: Config) -> FastAPI:
     register_semantics(app, kb)
     from ..tasks import register_tasks
     register_tasks(app)
+    from .analysis_run_routes import register_analysis_runs
+    register_analysis_runs(app, kb, cfg, task_llm)
     return app
 
 

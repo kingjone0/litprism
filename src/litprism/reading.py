@@ -63,10 +63,9 @@ def reading_batches(kb, cfg, papers: list[dict], system: str, instruction: str =
                 items.append(dict(c, tag=f'P{len(items)+1}', paper_title=paper['title'], document_tag=f'D{j}'))
     # 预算按**实际消息布局**估算：system 固定 + 原文 + 任务分隔 + 指令。
     # 布局改了估算不改，就会出现"估得下、实际装不下"的偏差。
-    _fixed = meter.estimate_text(system) + meter.estimate_text(PAPER_HEADER + TASK_SEPARATOR + instruction)
-
     def cost(batch):
-        return _fixed + meter.estimate_text(excerpt_text(batch))
+        return sum(meter.estimate_message(m) for m in
+                   build_messages(system, excerpt_context(batch), instruction))
     batches, current = [], []
     for item in items:
         remaining = item['text']

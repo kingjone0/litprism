@@ -305,12 +305,14 @@ class CompareAgent:
         if aspects:
             instruction += '\n关注维度：' + '、'.join(aspects)
         batches, excerpts, coverage = reading_batches(self.kb, self.cfg, papers, system, instruction)
+        from .usage import UsageTracker, tracked_json
+        tracker = UsageTracker()
         results, issues = [], []
         from .tasks import checkpoint
         for index, batch in enumerate(batches, 1):
             checkpoint(f'对比原文第 {index}/{len(batches)} 批')
-            raw = self.llm.chat_json(
-                build_messages(system, excerpt_context(batch), instruction), task='compare')
+            raw = tracked_json(self.llm,
+                build_messages(system, excerpt_context(batch), instruction), task='compare', tracker=tracker)
             result, errors = check_comparison(raw, papers, batch)
             issues.extend(errors)
             results.append(result)
@@ -343,7 +345,7 @@ class CompareAgent:
                 fields.extend((key, text, []) for text in result.get(key) or [])
             inputs.append((fields, batch))
         if not issues:
-            semantic = run_review(inputs, excerpts, self.cfg, self.llm)
+            semantic = run_review(inputs, excerpts, self.cfg, self.llm, tracker=tracker)
             data['_semantic_review'] = semantic
             if semantic['status'] != 'not_run':
                 safe = supported_fields(semantic)
@@ -357,6 +359,7 @@ class CompareAgent:
                                         for u in semantic['items'] if u['status'] == 'machine_supported']
         issues = list(dict.fromkeys(issues))
         data['_coverage'] = coverage
+        coverage['usage'] = tracker.to_dict()
         data['_citation_check'] = {'passed': not issues, 'issues': issues}
         from .evidence import citations_for, stored_excerpts
         data['_citations'] = citations_for(excerpts)

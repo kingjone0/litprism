@@ -64,10 +64,19 @@ const path = require('node:path');
     await page.locator('#btnReanalyze').click();
     await expect(page.locator('#paperDetail')).toContainText('offline:acceptance-fixture');
     await expect(page.locator('#paperDetail')).toContainText('1 项待核对');
+    await expect(page.locator('#paperDetail')).toContainText('用量未知');
     await expect(page.locator('#paperDetail [data-ppane=analysis] > .card').last()).not.toContainText('待核查陈述');
     await page.locator('[data-semantic-claim]').first().click();
     await expect(page.locator('#inspSources')).toContainText('陈述与整体差异核对');
-    await expect(page.locator('#inspSources [data-evidence-ref]')).toHaveCount(1);
+    const expectedSourceIds = await page.evaluate(async () => {
+      const d = await api(semanticEndpoint(S.semanticRef));
+      const claim = d.report.items.find(c => c.id === S.semanticRef.claimId);
+      return d.sources.filter(s => claim.candidate_tags.includes(s.tag)).map(s => s.chunk_id).sort();
+    });
+    assert(expectedSourceIds.length >= 1 && expectedSourceIds.length <= 3);
+    const displayedSourceIds = await page.locator('#inspSources [data-evidence-ref]')
+      .evaluateAll(nodes => nodes.map(n => n.dataset.evidenceRef).sort());
+    assert.deepEqual(displayedSourceIds, expectedSourceIds);
     await page.locator('#semanticReview [name=reviewed_text]').fill('semantichumanmarker 人工修正的知识陈述。');
     await page.locator('#semanticReview [name=note]').fill('离线验收：已查对原文、数字与适用条件。');
     await page.locator('#semanticReview [value=confirm]').click();
@@ -236,10 +245,47 @@ const path = require('node:path');
     assert.equal(savedConfig.status(), 200);
     await page.locator('#btnCloseSettings').click();
 
+    // 分阶段运行：预算暂停保留原解读，刷新后仍可恢复；待审不可误报通过。
+    await page.locator('#paperList [data-paper]').first().click();
+    await expect(page.locator('#btnBudgetAnalyze')).toBeVisible();
+    const analysisBeforeBudget = await page.evaluate(() => JSON.stringify(S.paperAnalysis));
+    await page.locator('#btnBudgetAnalyze').click();
+    await page.locator('#researchTask [name=with_concepts]').uncheck();
+    await page.locator('#researchTask [name=semantic_review]').fill('0');
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
+    await expect(page.locator('#analysisRuns')).toContainText('预算暂停');
+    await expect(page.locator('#analysisRuns')).toContainText('原文提取 1/12');
+    assert.equal(await page.evaluate(() => JSON.stringify(S.paperAnalysis)), analysisBeforeBudget);
+    const budgetRun = await page.locator('#analysisRuns [data-run-id]').first().getAttribute('data-run-id');
+    await page.reload();
+    // 论文视图由应用状态重新打开；记录独立于瞬时任务与浏览器页面。
+    await page.locator('#paperList [data-paper]').first().click();
+    await expect(page.locator('#analysisRuns')).toContainText('预算暂停');
+    await page.locator(`[data-resume-run="${budgetRun}"]`).click();
+    await expect(page.locator('#researchTask')).toContainText('已用 1');
+    await page.locator('#researchTask [name=semantic_review]').fill('1');
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
+    await expect(page.locator('#analysisRuns')).toContainText('仍有待审项');
+    await expect(page.locator('#analysisRuns')).toContainText('原文提取 1/12');
+    await expect(page.locator('#analysisRuns')).toContainText('逐项复核 1/1');
+    if (output) {
+      await expect(page.locator('#toasts .toast')).toHaveCount(0);
+      await page.screenshot({ path: path.join(output, 'analysis-run-light.png') });
+    }
+
     // 新工作流在深色主题与桌面最小窗口内保持可操作。
     await page.setViewportSize({ width: 1000, height: 660 });
     await page.locator('#btnTheme').click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await page.locator(`[data-resume-run="${budgetRun}"]`).click();
+    await expect(page.locator('#researchTask')).toBeVisible();
+    if (output) await page.screenshot({ path: path.join(output, 'analysis-run-dark-narrow.png') });
+    const budgetSubmit = await page.locator('#researchTask [type=submit]').boundingBox();
+    assert(budgetSubmit.x >= 0 && budgetSubmit.y >= 0 && budgetSubmit.x + budgetSubmit.width <= 1000 && budgetSubmit.y + budgetSubmit.height <= 660);
+    await page.locator('#researchTask [data-cancel]').first().click();
+    await page.locator('.workspace-nav [data-view=library]').click();
     await page.locator('#btnPaperExport').click();
     await expect(page.locator('#researchTask')).toBeVisible();
     const submit = await page.locator('#researchTask [type=submit]').boundingBox();
@@ -266,6 +312,6 @@ const path = require('node:path');
     await expect(page.locator('#btnSend')).toBeEnabled();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(errors, []);
-    console.log('Real API workflow acceptance passed: research tasks, reply source links, sidebar review/revoke, persistent provenance, web snapshots, cancellation, themes and narrow layout.');
+    console.log('Real API workflow acceptance passed: research tasks, durable analysis budgets/resume, reply source links, sidebar review/revoke, persistent provenance, web snapshots, cancellation, themes and narrow layout.');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

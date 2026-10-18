@@ -128,6 +128,8 @@ class RecordingClient:
             record['seconds'] = round(time.monotonic() - started, 2)
             record['usage'] = None if record.get('replayed_from') else getattr(self.client, 'last_usage', None)
             record['request_settings'] = None if record.get('replayed_from') else getattr(self.client, 'last_request_settings', None)
+            self.last_usage = record['usage']
+            self.last_request_settings = record['request_settings']
             self.calls.append(record)
             save(path, record)
             print(json.dumps({'call': number, 'seconds': record['seconds'],

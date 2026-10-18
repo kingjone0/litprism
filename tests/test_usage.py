@@ -108,3 +108,46 @@ class TestTracker:
         t = UsageTracker()
         t.add({"prompt_tokens": 100, "prompt_cache_hit_tokens": 90, "prompt_cache_miss_tokens": 10})
         assert "90%" in t.to_dict()["note"]
+
+
+def test_failed_call_cannot_reuse_previous_usage():
+    import pytest
+
+    from litprism.usage import tracked_json
+    class Client:
+        last_usage = {'prompt_tokens': 900, 'completion_tokens': 800}
+        def chat_json(self, *args, **kwargs):
+            raise TimeoutError('offline fixture')
+    tracker = UsageTracker()
+    with pytest.raises(TimeoutError):
+        tracked_json(Client(), [], task='semantic_review', tracker=tracker)
+    report = tracker.to_dict()
+    assert report['calls'] == report['unknown_usage_calls'] == report['failed_calls'] == 1
+    assert report['input'] == report['output'] == 0
+    assert not report['complete']
+
+
+def test_truncated_response_counts_reported_usage_once():
+    import pytest
+
+    from litprism.llm import OutputLimitError
+    from litprism.usage import tracked_json
+    class Client:
+        def chat_json(self, *args, **kwargs):
+            self.last_usage = {'prompt_tokens': 100, 'completion_tokens': 4096}
+            raise OutputLimitError('offline truncation')
+    tracker = UsageTracker()
+    with pytest.raises(OutputLimitError):
+        tracked_json(Client(), [], task='semantic_cross_review', tracker=tracker)
+    report = tracker.to_dict()
+    assert report['calls'] == report['failed_calls'] == 1
+    assert report['output'] == 4096 and report['unknown_usage_calls'] == 0
+
+
+def test_merge_preserves_unknown_and_per_task_counts():
+    a, b = UsageTracker(), UsageTracker()
+    a.add({'prompt_tokens': 10, 'completion_tokens': 1}, task='extract')
+    b.add(None, task='semantic_review', failed=True)
+    a.merge(b)
+    assert a.calls == 2 and a.unknown_usage_calls == a.failed_calls == 1
+    assert a.to_dict()['per_task']['extract']['input'] == 10

@@ -68,6 +68,63 @@ function workflowDialog(title, body, submit, action = '确定') {
   return dialog;
 }
 
+const analysisStages = { extract: '原文提取', concepts: '术语提取', semantic_review: '逐项复核', semantic_cross_review: '跨批核对' };
+const analysisRunStatuses = { queued: '等待执行', running: '正在执行或上次中断', paused_budget: '预算暂停', needs_retry: '需确认重试', cancelled: '已取消', partial: '仍有待审项', completed: '机器复核通过', failed: '运行失败', stale: '版本已变化' };
+
+async function loadAnalysisRuns(pid) {
+  const box = $('#analysisRuns');
+  if (!box) return;
+  try {
+    const { items } = await api('/api/paper/'+encodeURIComponent(pid)+'/analysis-runs');
+    if (S.activePaper !== pid || $('#analysisRuns') !== box) return;
+    box.innerHTML = `<details ${items.length ? 'open' : ''}><summary>分阶段运行记录（${items.length}${items.length === 30 ? '，最近' : ''}）</summary>
+      <p class="source-intro">暂停时保留原解读。刷新或重新打开应用不会自动恢复调用。机器复核通过仍不等于人工确认。</p>
+      <button class="btn sm" data-refresh-runs>刷新记录</button>
+      ${items.map(run => `<div class="analysis-run" data-run-id="${esc(run.id)}">
+        <div class="row wrap"><strong>${esc(analysisRunStatuses[run.status] || run.status)}</strong><span class="source-intro">${esc(run.model)} · ${esc(run.updated_at)}</span>
+        ${!['completed', 'stale'].includes(run.status) ? `<button class="btn sm" data-resume-run="${esc(run.id)}">检查并恢复</button>` : ''}</div>
+        <p class="source-intro">${Object.entries(analysisStages).filter(([key]) => key !== 'concepts' || run.with_concepts).map(([key, label]) => `${label} ${run.spent[key]}/${run.budgets[key]}`).join(' · ')}（已用/上限）</p>
+        <p class="source-intro">已报告用量：输入 ${run.usage.input} / 输出 ${run.usage.output} token；${run.usage.unknown_usage_calls} 次用量未知。${esc(run.stop_reason || '')}</p>
+      </div>`).join('') || '<p class="source-intro">尚无分阶段记录。可用上方“分阶段解读”设置预算。</p>'}</details>`;
+    $('[data-refresh-runs]', box).onclick = () => loadAnalysisRuns(pid);
+    $$('[data-resume-run]', box).forEach(button => button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const run = await api('/api/analysis-runs/'+encodeURIComponent(button.dataset.resumeRun));
+        analysisRunDialog(pid, run);
+      } catch (error) { toast(error.message, true); }
+      finally { button.disabled = false; }
+    });
+  } catch (error) {
+    if (S.activePaper === pid && $('#analysisRuns') === box) {
+      box.textContent = '运行记录加载失败：'+error.message+'。';
+      const retry = document.createElement('button'); retry.className = 'btn sm'; retry.textContent = '重试加载';
+      retry.onclick = () => loadAnalysisRuns(pid); box.appendChild(retry);
+    }
+  }
+}
+
+function analysisRunDialog(pid, run = null) {
+  const limits = run?.budgets || { extract: 12, concepts: 12, semantic_review: 48, semantic_cross_review: 40 };
+  workflowDialog(run ? '检查并恢复解读' : '设置分阶段预算', `<p class="source-intro">上限按本次运行累计请求次数计算，包含失败与结果未知的尝试。精确匹配的成功请求直接复用，不再发送。预算耗尽后暂停并保留原解读。</p>
+    ${Object.entries(analysisStages).map(([key, label]) => `<label>${label}请求上限${run ? `（已用 ${run.spent[key]}）` : ''}<input class="input" name="${key}" type="number" min="${run ? limits[key] : 0}" max="1000" step="1" required value="${limits[key]}"></label>`).join('')}
+    <p class="source-intro">逐项复核和跨批核对还受原有安全上限约束（每轮最多 48 / 40 次）；增加预算不保证整篇通过。次数上限不是金额承诺，服务未报告的用量保持未知。</p>
+    ${run ? `<p class="source-intro">术语提取：${run.with_concepts ? '启用' : '关闭'}；恢复前核对原文、模型、协议、参数和分析版本。${esc(run.stop_reason || '')}</p>` : '<label><input type="checkbox" name="with_concepts" checked> 同时提取术语</label>'}
+    ${run?.retry_required ? '<label><input type="checkbox" name="retry_failed"> 允许重试失败或结果未知的请求</label><p class="source-intro">这些请求可能已产生费用；重试及后续重新生成都会占用累计预算。未勾选时不会自动重试。</p>' : ''}`, async values => {
+      const body = { budgets: Object.fromEntries(Object.keys(analysisStages).map(key => [key, Number(values[key])])) };
+      if (run) body.retry_failed = values.retry_failed === 'on';
+      else body.with_concepts = values.with_concepts === 'on';
+      const endpoint = run ? '/api/analysis-runs/'+encodeURIComponent(run.id)+'/resume' : '/api/paper/'+encodeURIComponent(pid)+'/analysis-runs';
+      const started = await api(endpoint, { method: 'POST', body });
+      try {
+        const result = await waitTask(started.task_id);
+        toast(analysisRunStatuses[result.status] || result.status, ['failed', 'stale', 'needs_retry'].includes(result.status));
+      } finally {
+        if (S.activePaper === pid) await loadPaperDetail();
+      }
+    }, run ? '按预算恢复' : '按预算开始');
+}
+
 async function downloadApi(path, filename, body) {
   await ENV_READY;
   const env = apiEnv();
@@ -357,6 +414,7 @@ function coverageDetail(c) {
     : '';
   const why = c.error === 'output_limit'
     ? '（跨批核查的输出/推理预算耗尽）'
+    : c.error === 'call_budget' ? '（整体调用预算已用尽）'
     : (c.calls != null && c.max_calls != null ? `（已用 ${c.calls}/${c.max_calls} 次比较预算）` : '');
 
   return `<div class="lui-degraded">${esc(head)}${pendText}${esc(why)}${doneText}${skippedText}</div>`;

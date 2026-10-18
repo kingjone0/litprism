@@ -7,9 +7,15 @@
 导入 PDF ──▶ 解析/章节识别 ──▶ 题录补全 ──▶ 真实性核验 ──▶ 结构化解读 ──▶ 知识库
                                                                           │
                               问答（带引用）◀── 检索 ◀──────────────────────┤
-                              多篇对比        ◀── 结构化字段 ───────────────┤
+                              多篇对比        ◀── 原文取证   ───────────────┤
                               文献推荐        ◀── 外部数据库检索 + 核验 ────┘
 ```
+
+当前以 **Electron + Python sidecar** 为桌面路线，支持回复来源链接、右栏原文和人工审核。源码已经具备完整原文计划、有界语义复核与用量统计，但**尚未完成真实长论文的整体自动质量验收**。
+
+当前 schema v7；主工作树回归 **770 passed、1 skipped**，无窗口工作流通过；跳过项是未随仓库提交的本地审计 PDF。本轮源码与文档整理在主工作树提交，尚未打包，旧 exe 不含这些修改；F3 与本地 embedding 暂停。详细能力与限制见 [当前实现与验收状态](docs/当前实现与验收状态.md)，文档导航见 [docs/README.md](docs/README.md)。
+
+最初需求、方案变化与剩余功能计划见 [设计与功能实施总计划](docs/实现计划.md)，区分已有实现、待验收、未实现和暂停方向；列入计划不表示当前开始开发。
 
 ---
 
@@ -19,48 +25,48 @@
 
 | 问题 | 本项目的做法 |
 |---|---|
-| **编造文献**：凭空生成不存在的论文标题、作者、DOI | 任何外部文献必须先通过 **Crossref / OpenAlex / arXiv 多源交叉核验**；未核到的一律标注并**拒绝导入本地库** |
+| **编造文献**：凭空生成不存在的论文标题、作者、DOI | 使用 **Crossref / OpenAlex / arXiv 等来源**检索核验；只有自动核验通过或记录依据的人工确认才可导入、引用 |
 | **无依据发挥**：答案超出论文实际内容 | 问答只基于检索到的原文片段；片段不足直接拒答；回答中的 `[P1 p.3]` 引用会**逐条回溯校验** |
-| **过度简化 / 主观臆断**：把作者主张说成定论 | 提示词强制区分"原文事实 / 作者主张 / 模型推断"；缺失字段留空并说明，不做补全 |
+| **过度简化 / 主观臆断**：把作者主张说成定论 | 解读与对比增加有界陈述复核，待审/不符项保留来源，不进入正常结论；机器支持仍不等于人工确认 |
 
 ---
 
 ## 快速开始
 
-```bash
-# 1. 安装依赖（Python 3.10+）
-python -m pip install -r requirements.txt
-# 若默认源不可用： python -m pip install -r requirements.txt -i https://pypi.org/simple/
+本项目在 Windows 工作树中运行时，先设置独立数据根。以下命令使用本机指定环境，不会打开桌面窗口；导入和核验可能访问网络，真实模型解读会计费。
 
-# 2. 初始化（查看状态、数据源、模型）
-python run.py init
+```powershell
+$py = 'C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe'
+$env:LITPRISM_HOME = 'E:/codex-litprism-data'
 
-# 3. 导入论文（自动解析 → 题录补全 → 真实性核验 → 结构化解读）
-python run.py add sample_papers/ --verify
+# 首次安装依赖（已有环境可跳过）
+& $py -m pip install -r requirements.txt
+& $py run.py init
 
-# 4. 提问（中英文都可以）
-python run.py ask "这些论文在方法论上的核心差异是什么？"
+# 导入时强制核验；--verify 保留为显式用法，不能省略该标记来绕过守卫
+& $py run.py add sample_papers/ --verify
+& $py run.py ask '这些论文在方法论上的核心差异是什么？'
+& $py run.py compare 'Attention Is All You Need' 'BERT'
 
-# 5. 跨论文对比
-python run.py compare "Attention Is All You Need" "BERT"
-
-# 6. 按研究方向推荐文献（结果全部经核验，可一键导入本地库）
-python run.py recommend --topic "large language model in-context learning" --import
-
-# 7. 浏览器界面
-python run.py serve        # http://127.0.0.1:8765
+# 启动本地 Web 服务；不会自动打开浏览器
+& $py run.py serve
 ```
 
-> 未配置大模型 API Key 时，系统自动使用**离线占位模型（mock）**跑通全流程，
-> 输出会明确标注 `mock`，不会冒充真实模型结论。配置 Key 后即可获得真正的语义解读。
+未配置真实模型时，推理使用明确标注的 **mock**，语义复核标记未执行；配置真实 Key 也不等于论文质量自动验收通过。真实性核验等网络能力不会因为使用 mock 就自动改成离线。
+
+桌面源码与 Web 服务共用界面。当前不重新打包；本地 API 验证与鉴权说明见 [AGENTS.md](AGENTS.md)。
 
 ---
 
 ## 配置
 
-复制 `config/config.example.yaml` 为 `config/config.yaml` 后按需修改。
+配置模板是 `config/config.example.yaml`；首次运行会在数据根生成 `config/config.yaml`。设置 `LITPRISM_HOME` 后配置与数据随该根隔离，不要误改主工作树的配置。
 
-**接入大模型**（三选一，或用环境变量自动探测）：
+**桌面/Web 模型设置**支持提供商、模型选择和 API 协议选择：OpenAI Chat Completions / Anthropic Messages。密钥通过 SecretStore 加密留存，数据库只存引用（若平台降级为弱存储会明确提示，不能将 Base64 混淆称作加密）；当前选中配置无效会报错，不静默改用 mock。
+
+模型级窗口优先于提供商级和全局窗口；窗口大小需要按服务实际能力填写，模型名预填仅作提示。全局最大输出与输出预留可编辑；Web 活跃提供商路径取二者较小值，语义复核另有上限。推理 token 也可能占输出额度。
+
+**CLI 配置**仍使用 YAML / 环境变量；不会保证自动沿用桌面 ProviderStore 的选模。下面是已有配置结构示例（不是服务能力或模型推荐）：
 
 ```yaml
 llm:
@@ -72,16 +78,18 @@ llm:
 ```
 
 支持的自动探测环境变量：`OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `DASHSCOPE_API_KEY` /
-`MOONSHOT_API_KEY` / `ZHIPU_API_KEY`。本地模型可用 `provider: ollama`（无需 Key、无需联网）。
+`MOONSHOT_API_KEY` / `ZHIPU_API_KEY`。代码仍保留 `provider: ollama` 的兼容入口；这不表示本轮安装了本地模型或 embedding，当前不推进该部署。
 
 **核验数据源**（`sources` 段）：
 
-| 数据源 | 是否需要 Key | 说明 |
+下表描述当前示例配置，不保证服务最新账户政策或在线可用性；实际接入需按服务要求配置。
+
+| 数据源 | 本项目默认配置 | 用途 |
 |---|---|---|
-| Crossref | 否（建议填 `mailto`） | 覆盖最广的 DOI 注册机构，期刊论文首选 |
-| OpenAlex | 否（建议填 `mailto`） | 开放学术图谱，提供 related_works / citing 用于推荐 |
-| arXiv | 否 | 预印本，含摘要 |
-| Semantic Scholar | 需要免费 Key | 补充来源，默认关闭 |
+| Crossref | 启用；可填 `mailto` | DOI 与题录检索 |
+| OpenAlex | 启用；可填 `mailto` | 学术题录、相关/引用线索 |
+| arXiv | 启用 | 预印本与摘要 |
+| Semantic Scholar | 默认关闭；可配置 API Key | 补充学术来源 |
 
 ---
 
@@ -121,7 +129,8 @@ llm:
 | ✅ `verified` | 相似度 ≥ 0.92 或 DOI 精确命中 | 可以 |
 | ⚠️ `likely` | 相似度 ∈ [0.82, 0.92) | 需人工确认 |
 | ❌ `not_found` | 数据库正常响应但无匹配 | **禁止**（但不等于"该文献是编造的"） |
-| ❔ `unchecked` | 数据源全部请求失败 | **禁止**（绝不误判为"不存在"） |
+| ❔ `unchecked` | 未核验或数据源请求失败 | **禁止**（绝不误判为"不存在"） |
+| 🔵 `manual_confirmed` | 用户填写依据后人工放行，保留原自动结果 | 可以，但明确显示为人工确认 |
 
 两个关键设计：
 
@@ -138,9 +147,11 @@ llm:
   - 引用的片段编号是否真实存在（防"引用 [P9] 但只给了 5 个片段"）；
   - 标注页码是否与该片段实际页码一致（防"页码随口编"）。
 
-### 第 3 层 · 导入守卫 + 全量留痕
+人工可信知识还有独立来源状态：网页搜索摘要与手动知识先为候选，右栏检查后填写依据才能确认；撤销后不再召回。回复链接保存稳定来源 ID，不沿用其他轮次的 P 编号。长论文的原文送达覆盖、引用机械检查、机器语义支持和人工确认分开显示。
 
-- `import_record()` 拒绝 `not_found` / `unchecked` 的文献进入本地知识库，
+### 第 3 层 · 导入守卫 + 留痕
+
+- CLI、Web 上传与题录导入只接受 `verified` / `manual_confirmed`，`likely` 也需先人工确认；
   防止污染后续检索；
 - 每一次核验结果都写入 `verify_log` 表，可审计、可复现。
 
@@ -162,18 +173,22 @@ paper-research-agent/
 │   ├── db.py                   SQLite 知识库（论文/分块/FTS5/解读/术语/关联/核验日志）
 │   ├── ingest.py               PDF·DOCX·HTML·TXT·MD·TeX 解析 → 章节识别 → 分块
 │   ├── enrich.py               题录用权威数据库校正
-│   ├── llm.py                  OpenAI 兼容 / Ollama / 离线 mock 客户端
+│   ├── llm.py                  OpenAI 兼容 / Anthropic / 兼容 Ollama / mock 客户端
 │   ├── prompts.py              全部提示词（学术规范 + 防幻觉约束）
-│   ├── extract.py              结构化解读（研究问题/方法/实验/结论/创新点/局限/术语）
+│   ├── extract.py              六字段解读、提取闸门、有界修复与保存
+│   ├── reading.py / plan.py     固定原文前缀、真实范围指令及预算分批
+│   ├── semantics.py / gates.py  陈述复核、同字段差异、机械闸门
+│   ├── evidence.py / knowledge.py  来源与人工审核/撤销
+│   ├── usage.py / tasks.py     用量归集、任务轮询及协作取消
 │   ├── verify.py               ★ 论文真实性核验（多源交叉验证）
 │   ├── search.py               本地 BM25 检索 + 外部检索 + 导入
 │   ├── relations.py            跨论文关联（TF-IDF 余弦 + 主题簇）
 │   ├── agents.py               ★ 问答 / 对比 / 推荐 三个 Agent
 │   ├── cli.py                  命令行
-│   └── web/                    FastAPI + 单文件前端
-├── tests/test_core.py          49 个测试，聚焦防幻觉与解析正确性
+│   └── web/                    FastAPI + 多模块原生 JS/CSS 前端
+├── tests/                      完整离线回归；最新结果见验收状态
 ├── docs/                       设计文档
-├── sample_papers/              示例论文（3 篇真实 arXiv 论文）
+├── sample_papers/              示例材料说明（不保证本机已下载 PDF）
 └── data/                       运行时生成：知识库、缓存、导出笔记
 ```
 
@@ -181,19 +196,24 @@ paper-research-agent/
 
 ## 测试
 
-```bash
-python -m pytest tests -v
+```powershell
+Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
+& 'C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe' -m pytest tests
 ```
 
-测试覆盖：标题相似度（含词序敏感性）、引用解析、章节识别与合并、分块页码准确性、
-知识库去重与级联删除、**核验四态判定（含网络故障不误判）**、
-**虚构引用检测**、**未核验导入拒绝**、跨论文关联。
+`pyproject.toml` 已配置 `-q`，无需重复添加。应用运行前重新设置独立 `LITPRISM_HOME`；不要设置全局环境或共用主库来验证。
+
+回归覆盖核验、引用、范围、计划原文区间、完整请求预算、截断与用量、持久化、导出、人工修正与撤销。`tools/check_workflows.py` 使用临时库和无窗口浏览器验证真实本地 API/UI。详细工具与证据边界见 [当前实现与验收状态](docs/当前实现与验收状态.md)。纯文档整理不重新计为一次测试通过。
 
 ---
 
 ## 已知局限
 
-- **扫描版 PDF** 无文本层，需先 OCR；导入时会给出明确警告。
+- **扫描版 PDF** 无文本层时无法完成当前文本解读；转写能力暂缓，不把零散识别当作可靠正文。
+- **长论文质量**未完成整体自动验收。全文可见和缓存命中不能保证模型不漏读；单条/跨批预算不足时保留待审。可用“分阶段解读”设置累计预算并人工恢复；重启不会自动发请求。旧入口未接入持久续跑，未上报费用仍未知。详见 [阶段预算与恢复](docs/阶段预算与可续验进度-2026-10-18.md)。
+- **表格与页码**采用保守恢复和物理页定位；复杂表格会标待核对。旧 PDF/分析需要重导入或重跑，不会自动重写旧来源。
+- **管理与集成**已有嵌套分组、批量操作、会话管理和产出编辑；流式输出、全库备份恢复、完整 MCP 实测、W1–W3 自动全文获取仍未完成。
+- **评测**尚无漏提补录入口，召回仍为 n/a；固定正反例和单篇实验不代表一般准确率。
 - **跨语言检索**依赖内置词表（约 200 组中英学术术语）+ 可选 LLM 改写；
   领域非常冷僻的术语可能召回不足，此时建议用论文原文的语言提问。
 - **`not_found` 不等于"编造"**：新预印本、小众期刊、非英文文献可能尚未被收录，
