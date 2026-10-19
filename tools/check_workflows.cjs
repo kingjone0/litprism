@@ -107,6 +107,13 @@ const path = require('node:path');
     await page.locator('#btnSend').click();
     await expect(page.locator('.from-assistant')).toHaveCount(1);
     await expect(page.locator('.from-assistant')).toContainText('offline:acceptance-fixture');
+    await expect(page.locator('.chat-reasoning')).toHaveCount(1);
+    await page.locator('.chat-reasoning summary').click();
+    await expect(page.locator('.chat-reasoning pre')).toHaveText('<script>thinking_ui_marker</script>');
+    assert.equal(await page.locator('.chat-reasoning script').count(), 0);
+    await expect(page.locator('.request-budget')).toContainText('自动分配 384,000');
+    await expect(page.locator('.chat-bubble').last()).not.toContainText('thinking_ui_marker');
+
     await page.locator('.answer-sources [data-evidence-ref]').first().click();
     await expect(page.locator('#inspSources')).toContainText('论文原文');
     await expect(page.locator('#inspSources')).toContainText('自动核验通过');
@@ -141,6 +148,8 @@ const path = require('node:path');
     await page.reload();
     await expect(page.locator('#paperList')).toBeVisible();
     await page.locator('[data-conv]').filter({ hasText: '知识条目验收' }).click();
+    await expect(page.locator('.chat-reasoning')).toHaveCount(1);
+    await expect(page.locator('.request-budget')).toContainText('384,000');
     await page.locator(`.answer-sources [data-evidence-ref="${evidenceRef}"]`).click();
     await expect(page.locator('#inspSources')).toContainText('知识条目快照');
     const output = process.env.LITPRISM_UI_OUTPUT;
@@ -233,11 +242,13 @@ const path = require('node:path');
     await expect(page.locator('#collectionFilter')).toHaveValue('');
     await expect(page.locator('#paperList .list-item')).toHaveCount(2);
 
-    // 输出预算有真实可保存的设置入口，避免报错后无处调整。
+    // 手工任务输出上限已移除；其他设置仍可保存。
     await page.locator('[data-view=settings]').first().click();
     await page.locator('#settingsNav [data-set=retrieval]').click();
-    await page.locator('[data-cfg="context.output_reserve_tokens"]').fill('8192');
-    await page.locator('[data-cfg="llm.max_tokens"]').fill('8192');
+    await expect(page.locator('[data-cfg="context.output_reserve_tokens"]')).toHaveCount(0);
+    await expect(page.locator('[data-cfg="llm.max_tokens"]')).toHaveCount(0);
+    await expect(page.locator('[data-cfg="context.window_tokens"]')).toHaveCount(0);
+    await page.locator('[data-cfg="retrieval.top_k"]').fill('8');
     const [savedConfig] = await Promise.all([
       page.waitForResponse(r => r.url().endsWith('/api/config') && r.request().method() === 'PATCH'),
       page.locator('#btnSaveCfg').click(),
@@ -310,6 +321,32 @@ const path = require('node:path');
     await expect(page.locator('.task-progress')).toHaveCount(0);
     await expect(page.locator('#chatStream')).toContainText('任务已取消');
     await expect(page.locator('#btnSend')).toBeEnabled();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    // 模型能力只读展示与重新载入；无密钥、无服务探测、无模型调用。
+    const capacityProvider = await page.evaluate(async () => {
+      const p = await api('/api/providers', {method:'POST', body:{name:'Capacity fixture',base_url:'https://api.commandcode.ai/provider/v1'}});
+      await api(`/api/providers/${p.id}/models`, {method:'PUT', body:{models:[{model_id:'deepseek/deepseek-v4.1-flash'}]}});
+      return p.id;
+    });
+    await page.locator('[data-view=settings]').first().click();
+    await page.locator('#settingsNav [data-set=model]').click();
+    await page.locator(`[data-pv-edit="${capacityProvider}"]`).click();
+    const card = page.locator(`[data-pv="${capacityProvider}"]`);
+    await expect(card.locator('[data-model-window]')).toHaveText('1,000,000 token');
+    await expect(card.locator('[data-model-max-output]')).toHaveText('384,000 token');
+    await expect(card.locator('[data-pm-window], [data-pm-max-output], [data-pm-budget]')).toHaveCount(0);
+    await card.locator('[data-pv-save]').click();
+    await expect(page.locator('#toasts')).toContainText('已保存');
+    await page.locator(`[data-pv-edit="${capacityProvider}"]`).click();
+    await expect(card.locator('[data-model-max-output]')).toHaveText('384,000 token');
+    if (output) {
+      await page.setViewportSize({width:1360,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.screenshot({path:path.join(output, 'model-capacity-light.png')});
+      await page.setViewportSize({width:850,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.screenshot({path:path.join(output, 'model-capacity-dark-narrow.png')});
+    }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(errors, []);
     console.log('Real API workflow acceptance passed: research tasks, durable analysis budgets/resume, reply source links, sidebar review/revoke, persistent provenance, web snapshots, cancellation, themes and narrow layout.');

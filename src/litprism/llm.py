@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -71,7 +72,7 @@ def parse_json_loose(text: str) -> dict | list | None:
 # ---------------------------------------------------------------------------
 # OpenAI 兼容客户端
 # ---------------------------------------------------------------------------
-def _review_output_cap() -> int:
+def _review_output_cap(default: int = 4096) -> int:
     """逐条语义复核的单次输出上限。
 
     默认 4096 与既有行为一致（不静默提高）。但推理模型的**思考 token 也计入这个额度**，
@@ -79,9 +80,9 @@ def _review_output_cap() -> int:
     需要时用 ``LITPRISM_REVIEW_MAX_TOKENS`` 显式放宽，例如小论文实测用 8192。
     """
     try:
-        return max(1024, int(os.environ.get('LITPRISM_REVIEW_MAX_TOKENS', '4096')))
+        return max(1024, int(os.environ.get('LITPRISM_REVIEW_MAX_TOKENS', str(default))))
     except ValueError:
-        return 4096
+        return default
 
 
 def _review_read_timeout(default: int = 60) -> int:
@@ -94,6 +95,38 @@ def _review_read_timeout(default: int = 60) -> int:
         return max(10, int(os.environ.get('LITPRISM_REVIEW_READ_TIMEOUT', str(default))))
     except ValueError:
         return default
+
+
+def _review_connect_timeout(default: int = 10) -> int:
+    """Connect and read stalls are separate; preserve the default unless explicit."""
+    try:
+        return max(1, int(os.environ.get('LITPRISM_REVIEW_CONNECT_TIMEOUT', str(default))))
+    except ValueError:
+        return default
+
+
+def output_allocation(cfg: LLMConfig, messages: list[dict], *, meter=None) -> dict:
+    """Allocate from model capacity and the complete, estimated input envelope.
+
+    There is no user task ceiling in automatic mode. A 5% input-estimation
+    margin (at least 256 tokens) covers formatting/tokenizer uncertainty. This
+    is an estimate, not a promise that every provider will accept the request.
+    """
+    from .context.meter import Meter
+    meter = meter or Meter()
+    estimated = sum(meter.estimate_message(m) for m in messages) + 8
+    margin = max(256, math.ceil(estimated * .05))
+    ceiling = cfg.model_max_output_tokens
+    window = cfg.model_window_tokens
+    if not cfg.automatic_output or not ceiling or not window:
+        return {'max_tokens': cfg.max_tokens, 'output_mode': 'legacy_unknown_capability',
+                'estimated_input_tokens': estimated}
+    remaining = window - estimated - margin
+    if remaining <= 0:
+        raise ContextWindowError('完整请求估算已占满模型上下文，未发送模型请求。')
+    return {'max_tokens': min(ceiling, remaining), 'output_mode': 'automatic',
+            'estimated_input_tokens': estimated, 'input_safety_tokens': margin,
+            'model_window_tokens': window, 'model_max_output_tokens': ceiling}
 
 
 class OpenAICompatClient:
@@ -109,22 +142,30 @@ class OpenAICompatClient:
     def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None,
              temperature: float | None = None, max_tokens: int | None = None) -> str:
         self.last_usage = None
+        self.last_reasoning = ''
+        self.last_request_settings = {}
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": self.cfg.temperature if temperature is None else temperature,
             "max_tokens": self.cfg.max_tokens if max_tokens is None else max_tokens,
         }
+        allocation = output_allocation(self.cfg, messages, meter=getattr(self, 'meter', None))
+        if self.cfg.automatic_output:
+            payload['max_tokens'] = allocation['max_tokens']
+        if self.cfg.model_max_output_tokens:
+            payload['max_tokens'] = min(payload['max_tokens'], self.cfg.model_max_output_tokens)
         if json_mode and self.cfg.json_mode:
             payload["response_format"] = {"type": "json_object"}
         bounded = task in ('semantic_review', 'semantic_cross_review')
-        if bounded:
-            cap = 8192 if task == 'semantic_cross_review' else _review_output_cap()
+        if bounded and not self.cfg.automatic_output:
+            cap = self.cfg.cross_review_max_tokens if task == 'semantic_cross_review' else _review_output_cap(self.cfg.review_max_tokens)
             payload['max_tokens'] = min(payload['max_tokens'], cap)
-        request_timeout = ((min(self.cfg.timeout, 10), min(self.cfg.timeout, _review_read_timeout()))
+        request_timeout = ((min(self.cfg.timeout, _review_connect_timeout()), min(self.cfg.timeout, _review_read_timeout(self.cfg.review_read_timeout)))
                            if bounded else self.cfg.timeout)
         self.last_request_settings = {'task': task, 'max_tokens': payload['max_tokens'],
                                       'temperature': payload['temperature'], 'timeout': request_timeout}
+        self.last_request_settings.update({k: v for k, v in allocation.items() if k != 'max_tokens'})
 
         headers = {"Content-Type": "application/json"}
         if self.cfg.api_key:
@@ -154,8 +195,12 @@ class OpenAICompatClient:
                 data = resp.json()
                 self.last_usage = data.get('usage')
                 if data['choices'][0].get('finish_reason') == 'length':
-                    raise OutputLimitError('模型达到输出 token 上限，结果不完整；请提高输出预算（推理模型的思考也占用此预算）或缩小任务。')
-                return data["choices"][0]["message"]["content"] or ""
+                    raise OutputLimitError('模型达到输出 token 上限，结果不完整；已保留待审，请核对服务能力与截断用量。')
+                message = data['choices'][0]['message']
+                reasoning = message.get('reasoning_content')
+                if isinstance(reasoning, str):
+                    self.last_reasoning = reasoning
+                return message.get('content') or ""
             except (ContextWindowError, OutputLimitError, TaskCancelled):
                 raise
             except Exception as e:  # noqa: BLE001
@@ -470,6 +515,8 @@ class AnthropicClient:
     def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None,
              temperature: float | None = None, max_tokens: int | None = None) -> str:
         self.last_usage = None
+        self.last_reasoning = ''
+        self.last_request_settings = {}
         system_parts = [m["content"] for m in messages if m.get("role") == "system"]
         convo = [
             {"role": m["role"], "content": m["content"]}
@@ -484,14 +531,20 @@ class AnthropicClient:
         }
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
+        allocation = output_allocation(self.cfg, messages, meter=getattr(self, 'meter', None))
+        if self.cfg.automatic_output:
+            payload['max_tokens'] = allocation['max_tokens']
+        if self.cfg.model_max_output_tokens:
+            payload['max_tokens'] = min(payload['max_tokens'], self.cfg.model_max_output_tokens)
         bounded = task in ('semantic_review', 'semantic_cross_review')
-        if bounded:
-            cap = 8192 if task == 'semantic_cross_review' else _review_output_cap()
+        if bounded and not self.cfg.automatic_output:
+            cap = self.cfg.cross_review_max_tokens if task == 'semantic_cross_review' else _review_output_cap(self.cfg.review_max_tokens)
             payload['max_tokens'] = min(payload['max_tokens'], cap)
-        request_timeout = ((min(self.cfg.timeout, 10), min(self.cfg.timeout, _review_read_timeout()))
+        request_timeout = ((min(self.cfg.timeout, _review_connect_timeout()), min(self.cfg.timeout, _review_read_timeout(self.cfg.review_read_timeout)))
                            if bounded else self.cfg.timeout)
         self.last_request_settings = {'task': task, 'max_tokens': payload['max_tokens'],
                                       'temperature': payload['temperature'], 'timeout': request_timeout}
+        self.last_request_settings.update({k: v for k, v in allocation.items() if k != 'max_tokens'})
 
         headers = {
             "Content-Type": "application/json",
@@ -518,7 +571,9 @@ class AnthropicClient:
                 self.last_usage = data.get('usage')
                 blocks = data.get("content") or []
                 if data.get('stop_reason') == 'max_tokens':
-                    raise OutputLimitError('模型达到输出 token 上限，结果不完整；请提高输出预算或缩小任务。')
+                    raise OutputLimitError('模型达到输出 token 上限，结果不完整；已保留待审，请核对服务能力与截断用量。')
+                self.last_reasoning = '\n\n'.join(b['thinking'] for b in blocks
+                                                  if b.get('type') == 'thinking' and isinstance(b.get('thinking'), str))
                 return "".join(b.get("text") or "" for b in blocks if b.get("type") == "text")
             except (ContextWindowError, OutputLimitError, TaskCancelled):
                 raise
@@ -575,9 +630,10 @@ def build_llm_for(
     if max_tokens is not None:
         lc.max_tokens = max_tokens
 
-    if (protocol or "openai").lower() == "anthropic":
-        return AnthropicClient(lc)
-    return OpenAICompatClient(lc)
+    from .context.meter import Meter
+    client = AnthropicClient(lc) if (protocol or 'openai').lower() == 'anthropic' else OpenAICompatClient(lc)
+    client.meter = Meter(cfg)
+    return client
 
 
 def llm_status(cfg: Config) -> dict:

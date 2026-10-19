@@ -510,6 +510,18 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
     ''')
 
 
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    for col in ('max_output_tokens',):
+        if not _column_exists(conn, 'provider_models', col):
+            conn.execute(f'ALTER TABLE provider_models ADD COLUMN {col} INTEGER')
+    if not _column_exists(conn, 'analysis_run_calls', 'request_settings'):
+        conn.execute('ALTER TABLE analysis_run_calls ADD COLUMN request_settings TEXT')
+    conn.execute('''CREATE TABLE IF NOT EXISTS provider_model_capabilities (
+        provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+        model_id TEXT NOT NULL, window_tokens INTEGER, max_output_tokens INTEGER,
+        checked_at TEXT NOT NULL, PRIMARY KEY(provider_id, model_id))''')
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
@@ -518,6 +530,7 @@ MIGRATIONS: list[Migration] = [
     Migration(5, '按解读版本保存陈述人工审核与知识入库记录', _migrate_v5),
     Migration(6, '模型窗口随模型走：provider_models.window_tokens', _migrate_v6),
     Migration(7, '持久分析阶段预算、请求结果与安全恢复记录', _migrate_v7),
+    Migration(8, '模型输出能力（任务额度自动计算）', _migrate_v8),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

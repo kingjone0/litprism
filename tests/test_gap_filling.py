@@ -157,7 +157,7 @@ def test_failed_later_reading_batch_preserves_previous_analysis_and_terms(env):
     assert kb.list_concepts(pid)[0]['term'] == '上一版术语'
 
 
-def test_output_budget_can_be_configured_and_invalid_values_leave_file_unchanged(env, tmp_path, monkeypatch):
+def test_manual_output_budget_is_rejected_and_model_capability_drives_requests(env, tmp_path, monkeypatch):
     import yaml
 
     from litprism.config import config_to_dict
@@ -170,15 +170,16 @@ def test_output_budget_can_be_configured_and_invalid_values_leave_file_unchanged
     assert client.patch('/api/config', json={'llm': {'max_tokens': 1.5}}).status_code == 400
     assert client.patch('/api/config', json={'context': {'output_reserve_tokens': 999999}}).status_code == 400
     assert path.read_text(encoding='utf-8') == before
-    assert client.patch('/api/config', json={'llm': {'max_tokens': 8192}, 'context': {'output_reserve_tokens': 8192}}).status_code == 200
+    assert client.patch('/api/config', json={'llm': {'max_tokens': 8192}, 'context': {'output_reserve_tokens': 8192}}).status_code == 400
     store = ProviderStore(kb)
     p = store.create(name='Offline', base_url='https://example.org/v1', api_key='offline-test-only', chat_model='fixture')
+    store.set_models(p.id, [{'model_id': 'fixture', 'window_tokens': 128000, 'max_output_tokens': 100000}])
     store.set_active_model(p.id, 'fixture')
     seen = []
     monkeypatch.setattr('litprism.llm.build_llm_for', lambda *a, **kw: (seen.append(kw) or model))
     paper(kb)
     assert client.post('/api/ask', json={'question': 'alphatopic'}).status_code == 200
-    assert seen[-1]['max_tokens'] == 8192
+    assert seen[-1]['max_tokens'] == 100000
 
 
 def test_nested_collections_enforce_descendant_scope_and_prevent_cycles(env):

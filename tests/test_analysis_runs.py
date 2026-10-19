@@ -153,6 +153,17 @@ def test_no_secrets_or_messages_are_in_public_run_detail(env):
     assert 'private-token' not in row['binding']
 
 
+def test_changed_connect_timeout_rejects_resume_before_call(env, monkeypatch):
+    cfg, kb, pid = env
+    store, client = AnalysisRuns(kb), Client(cfg)
+    monkeypatch.setenv('LITPRISM_REVIEW_CONNECT_TIMEOUT', '10')
+    rid = store.create(cfg, client, pid)['id']
+    monkeypatch.setenv('LITPRISM_REVIEW_CONNECT_TIMEOUT', '30')
+    with pytest.raises(RunConflict):
+        store.execute(rid, cfg, client)
+    assert not client.calls and store.detail(rid)['status'] == 'stale'
+
+
 @pytest.mark.parametrize('limits', [{'extract': True}, {'unknown': 1}, {'extract': -1}, {'concepts': 1.5}])
 def test_invalid_budget_is_rejected_without_creating_run(env, limits):
     cfg, kb, pid = env
@@ -261,7 +272,7 @@ def test_migration_from_v6_preserves_existing_analysis_and_is_idempotent(tmp_pat
         con.execute("INSERT INTO papers(id,title) VALUES ('old','old paper')")
         con.execute("INSERT INTO analyses(paper_id,payload) VALUES ('old',?)", ('{"research_question":"preserved"}',))
         con.commit()
-        assert len(apply_migrations(con)) == 1 and current_version(con) == 7
+        assert len(apply_migrations(con)) == 2 and current_version(con) == 8
         assert not apply_migrations(con)
         assert con.execute('SELECT COUNT(*) FROM analysis_runs').fetchone()[0] == 0
         assert json.loads(con.execute("SELECT payload FROM analyses WHERE paper_id='old'").fetchone()[0]) == {'research_question': 'preserved'}

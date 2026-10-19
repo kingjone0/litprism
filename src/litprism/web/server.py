@@ -74,10 +74,11 @@ def create_app(cfg: Config) -> FastAPI:
     verifier = PaperVerifier(cfg, Whitelist(kb))
 
     def task_llm():
+        from copy import deepcopy
         from urllib.parse import urlparse
 
         from ..llm import build_llm_for
-        from ..providers import ProviderStore
+        from ..providers import ProviderStore, apply_active_window
 
         store = ProviderStore(kb, cfg.data_path)
         active, model_id = store.get_active()
@@ -88,8 +89,12 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(400, "当前提供商没有选定模型。")
         if not key and urlparse(active.base_url).hostname not in ('localhost', '127.0.0.1', '::1'):
             raise HTTPException(400, "当前提供商的密钥未配置或无法解密，请检查设置。")
-        return build_llm_for(cfg, base_url=active.base_url, api_key=key or '', model=model_id, protocol=active.protocol,
-                             max_tokens=min(cfg.llm.max_tokens, cfg.context.output_reserve_tokens))
+        runtime = deepcopy(cfg)
+        apply_active_window(runtime, kb)
+        client = build_llm_for(runtime, base_url=active.base_url, api_key=key or '', model=model_id, protocol=active.protocol,
+                               max_tokens=runtime.llm.max_tokens)
+        client.runtime_config = runtime
+        return client
 
     # 静态资源（app.css / app.js）
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -133,6 +138,8 @@ def create_app(cfg: Config) -> FastAPI:
         """
         from ..config import patch_config as _patch
 
+        if any(k in (req.get('llm') or {}) for k in ('max_tokens', 'review_max_tokens', 'cross_review_max_tokens')) or 'output_reserve_tokens' in (req.get('context') or {}):
+            raise HTTPException(400, '任务输出额度已改为自动分配；请在模型目录维护上下文窗口与模型最大输出能力。')
         if not cfg.config_path:
             raise HTTPException(400, "当前使用内置默认配置，没有可写入的配置文件。")
         try:
@@ -446,6 +453,8 @@ def create_app(cfg: Config) -> FastAPI:
             m['model'] = meta.get('model')
             m['candidate_links'] = meta.get('candidate_links') or []
             m['source_warning'] = meta.get('source_warning') or ''
+            m['reasoning'] = meta.get('reasoning') or ''
+            m['request_settings'] = meta.get('request_settings') or {}
             m['source_links'] = evidence_links(m.get('citations'), m.get('content') or '')
         latest = next((m for m in reversed(items) if m["role"] == "assistant"), {})
         return {"conversation": conv, "items": items, "sources": citation_sources(latest.get("citations"))}
@@ -477,13 +486,14 @@ def create_app(cfg: Config) -> FastAPI:
         user_msg = kb.append_message(conv["id"], "user", question)
 
         chat_llm = task_llm()
+        chat_cfg = getattr(chat_llm, 'runtime_config', cfg)
         candidates, source_warning = [], ''
         if req.get('web_search'):
             from ..tasks import checkpoint
             from .evidence_routes import discover_web
             checkpoint('检索网页候选；候选尚未审核，不作为事实依据')
             try:
-                discovered = discover_web(kb, cfg, question)
+                discovered = discover_web(kb, chat_cfg, question)
                 candidates = [{'ref': s['id'], 'title': s['title']} for s in discovered['items']]
             except HTTPException as exc:
                 source_warning = str(exc.detail)
@@ -499,7 +509,7 @@ def create_app(cfg: Config) -> FastAPI:
                 raise HTTPException(409, str(exc)) from exc
 
         try:
-            ans = QAAgent(kb, cfg, chat_llm).ask(
+            ans = QAAgent(kb, chat_cfg, chat_llm).ask(
                 question, top_k=top_k,
                 conversation_id=conv["id"], before_seq=user_msg["seq"],
                 paper_ids=paper_ids,
@@ -546,6 +556,7 @@ def create_app(cfg: Config) -> FastAPI:
             conv["id"], "assistant", content,
             citations=cites, citation_check=check_dict,
             meta={'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens,
+                  'reasoning': ans.reasoning, 'request_settings': ans.request_settings,
                   'candidate_links': candidates, 'source_warning': source_warning},
         )
         last_request = {'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens}
@@ -565,8 +576,8 @@ def create_app(cfg: Config) -> FastAPI:
             from ..context.summarizer import ExtractiveSummarizer, Summarizer
             from ..context.telemetry import Telemetry
 
-            meter = Telemetry(kb, cfg).meter
-            policy = Policy(cfg)
+            meter = Telemetry(kb, chat_cfg).meter
+            policy = Policy(chat_cfg)
             fresh_conv = kb.resolve_conversation(conv["id"])
             msgs = kb.get_messages(conv["id"])
             meas = meter.measure(kb, conv["id"])
@@ -580,12 +591,12 @@ def create_app(cfg: Config) -> FastAPI:
             if decision.should_compact:
                 sel = policy.select(meas, messages=msgs, aggressive=decision.emergency_truncate)
                 if sel.ok:
-                    seam = Seam(kb, cfg)
+                    seam = Seam(kb, chat_cfg)
                     tx_id, _ = seam.begin(conv["id"], decision.trigger, sel)
                     if tx_id:
                         in_range = [m for m in msgs if sel.start_seq <= m["seq"] <= sel.end_seq]
                         summary = Summarizer(
-                            cfg, chat_llm, backend=ExtractiveSummarizer()
+                            chat_cfg, chat_llm, backend=ExtractiveSummarizer()
                         ).summarize(in_range, sel.shadowed_tokens)
                         if summary.ok:
                             res = seam.commit(tx_id, summary)
@@ -606,7 +617,8 @@ def create_app(cfg: Config) -> FastAPI:
             "user": user_msg,
             "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict, 'model': ans.model,
                           'source_links': evidence_links(cites, ans.answer), 'candidate_links': candidates,
-                          'source_warning': source_warning},
+                          'source_warning': source_warning, 'reasoning': ans.reasoning,
+                          'request_settings': ans.request_settings},
             "confidence": getattr(ans, "confidence", None),
             "insufficient_evidence": bool(getattr(ans, "insufficient_evidence", False)),
             "sources": citation_sources(cites),
@@ -623,7 +635,12 @@ def create_app(cfg: Config) -> FastAPI:
         conv = kb.resolve_conversation(conv_id)
         if conv is None:
             raise HTTPException(404, "会话不存在")
-        snap = Telemetry(kb, cfg).snapshot(conv["id"])
+        from copy import deepcopy
+
+        from ..providers import apply_active_window
+        runtime = deepcopy(cfg)
+        apply_active_window(runtime, kb)
+        snap = Telemetry(kb, runtime).snapshot(conv["id"])
         snap["conversation"] = {"id": conv["id"], "title": conv["title"]}
         last = kb._con.execute('SELECT value FROM meta WHERE key=?', ('last_request:'+conv['id'],)).fetchone()
         snap['last_request'] = json.loads(last['value']) if last else None
@@ -979,11 +996,15 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.put("/api/providers/{pid}/models")
     def set_models(pid: str, req: dict):
+        from ..providers import ProviderError
         mode = (req or {}).get("mode") or "replace"
         models = req.get("models") or []
-        if mode == "merge":
-            return _provider_store().add_models(pid, models)
-        return {"ok": True, "count": _provider_store().set_models(pid, models)}
+        try:
+            if mode == "merge":
+                return _provider_store().add_models(pid, models)
+            return {"ok": True, "count": _provider_store().set_models(pid, models)}
+        except ProviderError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.post("/api/providers/{pid}/test")
     def test_provider(pid: str):

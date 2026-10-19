@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -138,6 +137,8 @@ class ProviderModel:
     enabled: bool = True
     sort_order: int = 0
     window_tokens: int | None = None
+    max_output_tokens: int | None = None
+    api_limits: dict = field(default_factory=dict)
 
     @property
     def label(self) -> str:
@@ -150,6 +151,8 @@ class ProviderModel:
             "enabled": self.enabled,
             "sort_order": self.sort_order,
             "window_tokens": self.window_tokens,
+            "max_output_tokens": self.max_output_tokens,
+            'api_limits': self.api_limits,
             "suggested_window": guess_window(self.model_id),
         }
 
@@ -185,6 +188,11 @@ class Provider:
         }.get(self.status, self.status)
 
     def to_dict(self) -> dict:
+        from .model_limits import confirmed_limits
+        def model_dict(m):
+            item = m.to_dict()
+            item['defaults'] = confirmed_limits(self.base_url, m.model_id)
+            return item
         return {
             "id": self.id,
             "name": self.name,
@@ -201,13 +209,43 @@ class Provider:
             "status_note": self.status_note,
             "checked_at": self.checked_at,
             "window_tokens": self.window_tokens,
-            "models": [m.to_dict() for m in self.models],
-            "enabled_models": [m.to_dict() for m in self.models if m.enabled],
+            "models": [model_dict(m) for m in self.models],
+            "enabled_models": [model_dict(m) for m in self.models if m.enabled],
         }
 
 
 class ProviderError(ValueError):
     """提供商操作失败。消息必须可操作。"""
+
+
+def _positive_limit(value):
+    if value is None or value == '':
+        return None
+    if isinstance(value, bool) or not str(value).isascii() or not str(value).isdigit() or not 0 < int(value) < 2**63:
+        raise ProviderError('模型最大输出能力必须为正整数，留空表示继承。')
+    return int(value)
+
+
+def _validate_limits(model):
+    ceiling, window = model.get('max_output_tokens'), model.get('window_tokens')
+    if ceiling and window and ceiling > window:
+        raise ProviderError('模型最大输出不能超过上下文窗口。')
+
+
+def api_capabilities(item: dict) -> dict:
+    """Only unambiguous capacity fields; max_tokens alone is ambiguous."""
+    def read(mapping, keys):
+        for key in keys:
+            value = mapping.get(key)
+            if type(value) is int and 0 < value < 2**63:
+                return value
+        return None
+    top = item.get('top_provider')
+    top = top if isinstance(top, dict) else {}
+    return {'window_tokens': read(item, ('context_length', 'context_window', 'contextWindow'))
+            or read(top, ('context_length',)),
+            'max_output_tokens': read(item, ('max_output_tokens', 'max_completion_tokens'))
+            or read(top, ('max_completion_tokens', 'max_output_tokens'))}
 
 
 class ProviderStore:
@@ -327,6 +365,7 @@ class ProviderStore:
         if p.api_key_ref:
             self.secrets.delete(p.api_key_ref)
         with self.kb.tx() as con:
+            con.execute('DELETE FROM provider_model_capabilities WHERE provider_id=?', (pid,))
             con.execute("DELETE FROM provider_models WHERE provider_id = ?", (pid,))
             cur = con.execute("DELETE FROM providers WHERE id = ?", (pid,))
         return cur.rowcount > 0
@@ -350,20 +389,23 @@ class ProviderStore:
                     "enabled": 1 if m.get("enabled", True) else 0,
                     "sort_order": i,
                     "window_tokens": _as_int(m.get("window_tokens")),
+                    "max_output_tokens": _positive_limit(m.get('max_output_tokens')),
                 }
             )
 
         now = _now()
+        for m in cleaned:
+            _validate_limits(m)
         with self.kb.tx() as con:
             con.execute("DELETE FROM provider_models WHERE provider_id = ?", (pid,))
             for m in cleaned:
                 con.execute(
                     "INSERT INTO provider_models (id, provider_id, model_id, display_name,"
-                    " enabled, sort_order, window_tokens, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    " enabled, sort_order, window_tokens, max_output_tokens, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         f"pm_{uuid.uuid4().hex[:10]}", pid, m["model_id"],
                         m["display_name"], m["enabled"], m["sort_order"],
-                        m["window_tokens"], now,
+                        m["window_tokens"], m['max_output_tokens'], now,
                     ),
                 )
         return len(cleaned)
@@ -380,6 +422,9 @@ class ProviderStore:
             raise ProviderError(f"提供商 {pid} 不存在")
 
         existing = {m.model_id for m in p.models}
+        for m in models or []:
+            _validate_limits({**m, 'window_tokens': _as_int(m.get('window_tokens')),
+                              'max_output_tokens': _positive_limit(m.get('max_output_tokens'))})
         now = _now()
         added: list[str] = []
         skipped: list[str] = []
@@ -395,11 +440,11 @@ class ProviderStore:
                 existing.add(mid)
                 con.execute(
                     "INSERT INTO provider_models (id, provider_id, model_id, display_name,"
-                    " enabled, sort_order, window_tokens, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    " enabled, sort_order, window_tokens, max_output_tokens, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         f"pm_{uuid.uuid4().hex[:10]}", pid, mid,
                         str(m.get("display_name") or mid).strip(), 1, 1000 + i,
-                        _as_int(m.get("window_tokens")), now,
+                        _as_int(m.get("window_tokens")), _positive_limit(m.get('max_output_tokens')), now,
                     ),
                 )
                 added.append(mid)
@@ -441,7 +486,7 @@ class ProviderStore:
             )
         if resp.status_code == 404:
             raise ProviderError(
-                f"该提供商未提供 /models 接口（HTTP 404）。"
+                "该提供商未提供 /models 接口（HTTP 404）。"
                 "请在下方手动添加模型 ID。"
             )
         if resp.status_code >= 400:
@@ -470,11 +515,17 @@ class ProviderStore:
                 {
                     "model_id": str(mid),
                     "display_name": str(it.get("display_name") or it.get("name") or mid),
+                    **api_capabilities(it),
                 }
             )
         out.sort(key=lambda x: x["model_id"])
 
         with self.kb.tx() as con:
+            for item in out:
+                con.execute('''INSERT INTO provider_model_capabilities VALUES (?,?,?,?,?)
+                    ON CONFLICT(provider_id,model_id) DO UPDATE SET window_tokens=excluded.window_tokens,
+                    max_output_tokens=excluded.max_output_tokens,checked_at=excluded.checked_at''',
+                    (pid, item['model_id'], item.get('window_tokens'), item.get('max_output_tokens'), _now()))
             con.execute(
                 "UPDATE providers SET status = 'ok', status_note = ?, checked_at = ?,"
                 " updated_at = ? WHERE id = ?",
@@ -540,10 +591,30 @@ class ProviderStore:
         provider, model_id = self.get_active()
         if provider is None:
             return None
-        for m in provider.models:
-            if m.model_id == model_id and m.window_tokens:
-                return int(m.window_tokens)
-        return int(provider.window_tokens) if provider.window_tokens else None
+        return self.active_limits().get('window_tokens')
+
+    def active_limits(self) -> dict:
+        from .model_limits import confirmed_limits
+        provider, model_id = self.get_active()
+        if provider is None:
+            return {}
+        limits = confirmed_limits(provider.base_url, model_id or '')
+        sources = {key: 'user_confirmed' for key in limits if key.endswith('_tokens')}
+        limits['selected_model'] = model_id
+        for model in provider.models:
+            if model.model_id == model_id:
+                for key in ('window_tokens', 'max_output_tokens'):
+                    if key not in limits and getattr(model, key) is not None:
+                        limits[key] = getattr(model, key)
+                        sources[key] = 'stored'
+                    if model.api_limits.get(key):
+                        limits[key] = model.api_limits[key]
+                        sources[key] = 'api'
+                break
+        limits['capability_sources'] = sources
+        if 'window_tokens' not in limits and provider.window_tokens:
+            limits['window_tokens'] = provider.window_tokens
+        return limits
 
     def chat_options(self) -> list[dict]:
         """暴露给 chat 的模型选择器：所有启用的模型，按提供商分组。"""
@@ -568,6 +639,8 @@ class ProviderStore:
     def _row_to_provider(self, row: Any) -> Provider:
         d = dict(row)
         pid = d["id"]
+        capabilities = {r['model_id']: dict(r) for r in self.kb._con.execute(
+            'SELECT model_id,window_tokens,max_output_tokens,checked_at FROM provider_model_capabilities WHERE provider_id=?', (pid,))}
         model_rows = [
             dict(r)
             for r in self.kb._con.execute(
@@ -582,6 +655,8 @@ class ProviderStore:
                 enabled=bool(m.get("enabled", 1)),
                 sort_order=int(m.get("sort_order") or 0),
                 window_tokens=m.get("window_tokens"),
+                max_output_tokens=m.get('max_output_tokens'),
+                api_limits=capabilities.get(m['model_id'], {}),
             )
             for m in model_rows
         ]
@@ -636,9 +711,11 @@ def apply_active_window(cfg: Any, kb: Any) -> dict:
     resolved: int | None = None
     source = "config"
     try:
-        resolved = ProviderStore(kb, cfg.data_path).active_window()
+        limits = ProviderStore(kb, cfg.data_path).active_limits()
+        resolved = limits.get('window_tokens')
     except Exception:  # noqa: BLE001 - 提供商表缺失/损坏都不该阻断分析
         resolved = None
+        limits = {}
 
     if resolved and resolved != configured:
         cfg.context.window_tokens = resolved
@@ -646,9 +723,25 @@ def apply_active_window(cfg: Any, kb: Any) -> dict:
     elif resolved:
         source = "model"
 
+    ceiling = limits.get('max_output_tokens', cfg.llm.model_max_output_tokens if 'selected_model' not in limits else None)
+    cfg.llm.model_max_output_tokens = ceiling
+    cfg.llm.model_window_tokens = cfg.context.window_tokens
+    cfg.llm.automatic_output = bool(ceiling)
+    if ceiling:
+        cfg.llm.max_tokens = min(ceiling, cfg.context.window_tokens - 1)
+        cfg.context.output_reserve_tokens = cfg.llm.max_tokens
+        cfg.llm.review_read_timeout = 300
+        if cfg.llm.timeout == 120:
+            cfg.llm.timeout = 300
+    effective = min(cfg.llm.max_tokens, cfg.context.output_reserve_tokens)
+    cfg.llm.max_tokens = effective
     return {
         "window": int(cfg.context.window_tokens),
         "configured": configured,
         "source": source,
         "available": int(cfg.context.available_tokens),
+        'max_output_tokens': ceiling, 'output_budget_tokens': effective,
+        'capability_source': limits.get('source', 'configured'),
+        'capability_sources': limits.get('capability_sources', {}),
+        'output_mode': 'automatic' if ceiling else 'legacy_unknown_capability',
     }

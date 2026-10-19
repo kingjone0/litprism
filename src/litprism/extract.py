@@ -67,6 +67,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     if sum(len(c['text']) for c in chunks) < 150:
         raise ValueError('正文过少，无法解读；扫描件需先转写。')
 
+    from copy import deepcopy
+    cfg = deepcopy(getattr(llm, 'runtime_config', cfg))
     # 窗口跟着当前模型走：不这样做，换了大窗口模型也不会用上。
     from .providers import apply_active_window
     window_info = apply_active_window(cfg, kb)

@@ -75,21 +75,25 @@ def binding(kb, cfg, client, pid, with_concepts):
         require_citable(paper.get('verify_level'))
     except ValueError as exc:
         raise RunConflict('来源已不可引用，不能恢复。') from exc
-    cfg = copy.deepcopy(cfg)
+    cfg = copy.deepcopy(getattr(client, 'runtime_config', cfg))
     apply_active_window(cfg, kb)
     chunks = kb.get_chunks(pid)
     source = {'paper': {k: paper.get(k) for k in ('id', 'title', 'authors', 'year', 'abstract', 'doi', 'url')},
               'chunks': [{k: c.get(k) for k in ('id', 'page', 'section', 'text')} for c in chunks]}
     settings = getattr(client, 'cfg', cfg.llm)
     # Persist hashes of complete endpoint/settings; never plaintext credentials.
-    params = {k: getattr(settings, k, None) for k in ('provider', 'model', 'base_url', 'temperature', 'max_tokens', 'timeout', 'json_mode')}
+    params = {k: getattr(settings, k, None) for k in ('provider', 'model', 'base_url', 'temperature', 'max_tokens', 'timeout', 'json_mode',
+                                                   'review_max_tokens', 'cross_review_max_tokens', 'review_read_timeout', 'model_max_output_tokens',
+                                                   'model_window_tokens', 'automatic_output')}
     params['client_type'] = type(client).__module__+'.'+type(client).__qualname__
     params['context'] = config_to_dict(cfg)['context']
     params['with_concepts'] = with_concepts
     params['supports_semantic_review'] = bool(getattr(client, 'supports_semantic_review', False))
-    from .llm import _review_output_cap, _review_read_timeout
+    from .llm import _review_connect_timeout, _review_output_cap, _review_read_timeout
     from .semantics import MAX_CROSS_CALLS, MAX_REVIEW_CALLS
-    params['review_limits'] = [_review_output_cap(), _review_read_timeout(), MAX_REVIEW_CALLS, MAX_CROSS_CALLS]
+    params['review_limits'] = ['automatic' if getattr(settings, 'automatic_output', False) else _review_output_cap(),
+                               _review_read_timeout(getattr(settings, 'review_read_timeout', 60)),
+                               _review_connect_timeout(), MAX_REVIEW_CALLS, MAX_CROSS_CALLS]
     # Source builds bind implementation and prompts; frozen builds require an
     # explicit protocol bump when changing the pipeline (packaging not yet tested).
     root = Path(__file__).parent
@@ -197,7 +201,7 @@ class AnalysisRuns:
             'budgets': limits, 'spent': spent, 'usage': usage,
             'retry_required': any(c['status'] != 'succeeded' for c in latest.values()),
             'steps': [{'step': c['step'], 'attempt': c['attempt'], 'task': c['task'], 'status': c['status'],
-                       'error_type': c['error_type']} for c in calls]}
+                       'error_type': c['error_type'], 'request_settings': json.loads(c['request_settings'] or '{}')} for c in calls]}
 
     def list(self, pid):
         with self.kb._tx_lock:
@@ -300,7 +304,7 @@ class JournalClient:
             raise BudgetExhausted()
         timestamp = now()
         with self.store.kb.tx() as con:
-            con.execute('INSERT INTO analysis_run_calls VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+            con.execute('INSERT INTO analysis_run_calls (run_id,step,attempt,task,request_hash,status,response,usage,error_type,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                         (self.rid, self.step, attempt, task, digest, 'started', None, None, None, timestamp, timestamp))
         self.store.update(self.rid, stage=task)
         try:
@@ -332,6 +336,12 @@ class JournalClient:
         details = {'cached_tokens', 'cache_hit_tokens', 'reasoning_tokens', 'accepted_prediction_tokens',
                    'rejected_prediction_tokens', 'audio_tokens'}
         usage = None
+        settings = getattr(self.client, 'last_request_settings', {}) or {}
+        safe_settings = {k: v for k, v in settings.items()
+                         if k in ('max_tokens', 'estimated_input_tokens', 'input_safety_tokens', 'model_window_tokens',
+                                  'model_max_output_tokens', 'attempts') and numeric(v)}
+        if settings.get('output_mode') in ('automatic', 'legacy_unknown_capability'):
+            safe_settings['output_mode'] = settings['output_mode']
         if isinstance(raw, dict):
             usage = {}
             for key, value in raw.items():
@@ -342,7 +352,7 @@ class JournalClient:
                 elif numeric(value):
                     usage[key] = value
         with self.store.kb.tx() as con:
-            con.execute('UPDATE analysis_run_calls SET status=?,response=?,usage=?,error_type=?,updated_at=? '
+            con.execute('UPDATE analysis_run_calls SET status=?,response=?,usage=?,error_type=?,updated_at=?,request_settings=? '
                         'WHERE run_id=? AND step=? AND attempt=?',
-                        (status, response, _json(usage) if usage is not None else None, error, now(),
+                        (status, response, _json(usage) if usage is not None else None, error, now(), _json(safe_settings),
                          self.rid, self.step, attempt))

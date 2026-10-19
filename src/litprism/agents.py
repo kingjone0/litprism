@@ -36,6 +36,8 @@ class QAAnswer:
     warnings: list[str] = field(default_factory=list)
     provider_usage: dict | None = None
     request_tokens: int = 0
+    reasoning: str = ''
+    request_settings: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -61,6 +63,8 @@ class QAAnswer:
             "warnings": self.warnings,
             'provider_usage': self.provider_usage,
             'request_tokens': self.request_tokens,
+            'reasoning': self.reasoning,
+            'request_settings': self.request_settings,
         }
 
 
@@ -74,7 +78,7 @@ class QAAgent:
 
     def __init__(self, kb: KnowledgeBase, cfg: Config, llm):
         self.kb = kb
-        self.cfg = cfg
+        self.cfg = getattr(llm, 'runtime_config', cfg)
         self.llm = llm
 
     def ask(
@@ -218,6 +222,8 @@ class QAAgent:
                     break
         res.request_tokens = sum(meter.estimate_message(m) for m in messages)
         res.provider_usage = getattr(self.llm, 'last_usage', None) if error is None else None
+        res.reasoning = getattr(self.llm, 'last_reasoning', '') if error is None else ''
+        res.request_settings = dict(getattr(self.llm, 'last_request_settings', {}) or {})
         if conversation_id:
             from .memory.view import TurnViewStore
             TurnViewStore(self.kb).freeze(
@@ -278,7 +284,7 @@ class QAAgent:
 class CompareAgent:
     def __init__(self, kb: KnowledgeBase, cfg: Config, llm):
         self.kb = kb
-        self.cfg = cfg
+        self.cfg = getattr(llm, 'runtime_config', cfg)
         self.llm = llm
 
     def compare(self, refs: list[str], *, aspects: list[str] | None = None) -> dict:
@@ -447,7 +453,7 @@ class RecommendAgent:
 
     def __init__(self, kb: KnowledgeBase, cfg: Config, llm, verifier: PaperVerifier):
         self.kb = kb
-        self.cfg = cfg
+        self.cfg = getattr(llm, 'runtime_config', cfg)
         self.llm = llm
         self.verifier = verifier
 

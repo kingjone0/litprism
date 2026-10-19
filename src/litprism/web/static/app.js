@@ -812,7 +812,9 @@ function renderMessage(m, fresh = false) {
       <div class="chat-avatar">${isUser ? '我' : icon('prism')}</div>
       <div class="chat-message">
         ${isCheckpoint ? `<div class="badge accent" style="margin-bottom:6px">压缩检查点</div>` : ''}
+        ${!isUser && m.reasoning ? `<details class="chat-reasoning"><summary>模型思考 · 服务返回内容</summary><p>未经核验，不作为答案或引用依据。</p><pre>${esc(m.reasoning)}</pre></details>` : ''}
         <div class="chat-bubble ${isUser ? 'user' : ''}">${body}</div>
+        ${!isUser && m.request_settings?.max_tokens ? `<div class="request-budget">本次${m.request_settings.output_mode === 'automatic' ? '自动分配' : '输出上限'} ${fmtNum(m.request_settings.max_tokens)} token（含推理） · 等待设置 ${esc(String(m.request_settings.timeout))} 秒${m.reasoning ? '' : ' · 服务未返回独立思考内容'}</div>` : ''}
         ${checkWarn}
         ${!isUser && (m.source_links || []).length ? `<div class="answer-sources" aria-label="回答来源">来源：${m.source_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">[${esc(s.tag || '')}] ${esc(s.title || '原文来源')}${s.page == null ? '' : ' · p.'+esc(s.page)}</a>`).join(' ')}</div>` : ''}
         ${!isUser && (m.candidate_links || []).length ? `<div class="answer-sources">待人工审核的网页候选（尚未作为事实依据）：${m.candidate_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">${esc(s.title)}</a>`).join(' ')}</div>` : ''}
@@ -1265,12 +1267,6 @@ function settingsBody(key, c) {
           `<input class="input" type="number" step="0.01" min="0" max="1"
             data-cfg="retrieval.min_score" data-type="number"
             value="${c.retrieval?.min_score ?? 0}">`) +
-        row('模型窗口 token', '按服务商模型限制填写；输入和输出共同占用窗口。',
-          `<input class="input" type="number" min="1024" data-cfg="context.window_tokens" data-type="number" value="${c.context?.window_tokens ?? 32000}">`) +
-        row('输出预留 token', '为正文和推理共同预留；必须小于窗口。',
-          `<input class="input" type="number" min="1" data-cfg="context.output_reserve_tokens" data-type="number" value="${c.context?.output_reserve_tokens ?? 4096}">`) +
-        row('单次最大输出 token', '实际取此值与输出预留的较小值。推理模型若截断，可同时提高两者。',
-          `<input class="input" type="number" min="1" data-cfg="llm.max_tokens" data-type="number" value="${c.llm?.max_tokens ?? 4096}">`) +
         row('启用扫描件转写', '需要支持图像输入的多模态模型。一期暂缓，开启后不生效。',
           `<span class="badge neutral">暂缓</span>`);
 
@@ -1294,6 +1290,8 @@ function settingsBody(key, c) {
               ${S.status?.window?.source === 'model' ? '来自模型' : '全局配置'}
             </span>
           </div>`) +
+        row('生效输出预算', '模型能力与任务预算分开；K=1000，M=1000000。推理也占用输出预算。',
+          `<span>${S.status?.window?.output_mode === 'automatic' ? `自动分配 · 模型最大输出 ${fmtNum(S.status.window.max_output_tokens)} token` : '尚未配置模型最大输出能力；使用旧版兼容路径，请在模型目录补齐能力。'}</span>`) +
         row('知识库', '当前库内数据量。',
           `<div class="mono" style="font-size:11.5px">
             ${S.status?.stats?.papers ?? 0} 篇论文 · ${fmtNum(S.status?.stats?.chunks)} 块
@@ -1435,18 +1433,25 @@ function renderProviders() {
   bindProviderEditors();
 }
 
+function modelCapacityData(m) {
+  const api = m.api_limits || {}, defaults = m.defaults || {};
+  const source = key => api[key] ? 'API' : defaults[key] ? '用户确认' : m[key] ? '已有数据' : 'API 未提供';
+  const value = key => api[key] ?? defaults[key] ?? m[key];
+  return `<div class="pm-limits">
+    <div><span>上下文窗口</span><strong data-model-window>${value('window_tokens') ? fmtNum(value('window_tokens')) + ' token' : '未知'}</strong><small>${source('window_tokens')}</small></div>
+    <div><span>模型最大输出</span><strong data-model-max-output>${value('max_output_tokens') ? fmtNum(value('max_output_tokens')) + ' token' : '未知'}</strong><small>${source('max_output_tokens')}</small></div>
+  </div><p class="pm-limit-note">每次输出按模型能力自动分配，推理计入输出额度。${api.checked_at ? 'API 数据更新于 ' + esc(api.checked_at) : ''}</p>`;
+}
+
 function providerEditor(p) {
   const modelRows = (p.models || []).map(m => `
     <div class="pm-row">
       <input class="input" data-pm-id placeholder="模型 ID，如 gpt-4o" value="${esc(m.model_id)}">
       <input class="input" data-pm-name placeholder="显示名称" value="${esc(m.display_name)}">
-      <input class="input" data-pm-window type="number" min="1000" step="1000"
-        placeholder="${m.suggested_window ? '建议 ' + (m.suggested_window / 1000) + 'k' : '窗口'} "
-        title="上下文窗口（token）。留空则用全局配置。"
-        value="${m.window_tokens ?? ''}">
       <button class="icon-btn ${m.enabled ? 'on' : ''}" data-pm-toggle
         title="${m.enabled ? '已暴露给对话' : '未暴露给对话'}">${m.enabled ? '◉' : '○'}</button>
       <button class="icon-btn" data-pm-del title="删除">🗑</button>
+      ${modelCapacityData(m)}
     </div>`).join('');
 
   return `
@@ -1518,9 +1523,9 @@ function bindProviderEditors() {
       div.innerHTML = `
         <input class="input" data-pm-id placeholder="模型 ID">
         <input class="input" data-pm-name placeholder="显示名称">
-        <input class="input" data-pm-window type="number" min="1000" step="1000" placeholder="窗口 token">
         <button class="icon-btn on" data-pm-toggle title="已暴露给对话">◉</button>
-        <button class="icon-btn" data-pm-del title="删除">🗑</button>`;
+        <button class="icon-btn" data-pm-del title="删除">🗑</button>
+        ${modelCapacityData({})}`;
       box.appendChild(div);
       bindRows();
     });
@@ -1532,7 +1537,10 @@ function bindProviderEditors() {
       btn.textContent = '拉取中…';
       try {
         const r = await api(`/api/providers/${encodeURIComponent(pid)}/fetch-models`, { method: 'POST' });
-        showCandidates(card, pid, r.items || []);
+        await loadProviders();
+        const refreshedCard = document.querySelector(`[data-pv="${CSS.escape(pid)}"]`);
+        refreshedCard.classList.add('expanded');
+        showCandidates(refreshedCard, pid, r.items || []);
       } catch (e) {
         toast(e.message, true);
       } finally {
@@ -1571,7 +1579,6 @@ function bindProviderEditors() {
       const models = [...card.querySelectorAll('.pm-row')].map(row => ({
         model_id: row.querySelector('[data-pm-id]').value.trim(),
         display_name: row.querySelector('[data-pm-name]').value.trim(),
-        window_tokens: row.querySelector('[data-pm-window]')?.value || null,
         enabled: row.querySelector('[data-pm-toggle]').classList.contains('on'),
       })).filter(m => m.model_id);
 
@@ -1591,6 +1598,7 @@ function bindProviderEditors() {
         toast('已保存');
         await loadProviders();
         await loadModels();
+        S.status = await api('/api/status');
       } catch (e) { toast(e.message, true); }
     });
   });
@@ -1763,6 +1771,8 @@ function renderModelSelector() {
       });
       S.activeModel = { provider_id: pid, model: mid };
       S.compareKey = null;
+      S.status = await api('/api/status');
+      if (S.activeConv) await loadInspectorContext();
       toast(`已切换到 ${mid}`);
     } catch (e) { toast(e.message, true); }
   };

@@ -26,6 +26,8 @@ class AcceptanceModel:
     supports_semantic_review = True
 
     def chat_json(self, messages, *, task=None):
+        self.last_reasoning = '<script>thinking_ui_marker</script>' if task == 'qa' else ''
+        self.last_request_settings = {'max_tokens': 384000, 'timeout': 300, 'output_mode': 'automatic'} if task == 'qa' else {}
         if task == 'semantic_cross_review':
             return {'differences': []}
         if task == 'semantic_review':

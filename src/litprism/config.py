@@ -79,8 +79,14 @@ class LLMConfig:
     model: str = "gpt-4o-mini"
     temperature: float = 0.1
     max_tokens: int = 4096
+    model_max_output_tokens: int | None = None
+    model_window_tokens: int | None = None
+    automatic_output: bool = False
     timeout: int = 120
     json_mode: bool = True
+    review_max_tokens: int = 4096
+    cross_review_max_tokens: int = 8192
+    review_read_timeout: int = 60
 
     @property
     def effective_base_url(self) -> str:
@@ -401,6 +407,16 @@ def _validate(cfg: Config) -> None:
         raise ValueError(f"上下文管理配置不合法：\n  {detail}")
     if cfg.llm.max_tokens <= 0 or cfg.context.output_reserve_tokens <= 0:
         raise ValueError('最大输出和输出预留必须为正。')
+    for key in ('timeout', 'review_max_tokens', 'cross_review_max_tokens', 'review_read_timeout'):
+        value = getattr(cfg.llm, key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f'llm.{key} 必须为正整数。')
+    for key in ('model_max_output_tokens', 'model_window_tokens'):
+        value = getattr(cfg.llm, key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+            raise ValueError(f'llm.{key} 必须为空或正整数。')
+    if type(cfg.llm.automatic_output) is not bool:
+        raise ValueError('llm.automatic_output 必须为布尔值。')
     if not 1 <= cfg.retrieval.top_k <= 50:
         raise ValueError('召回数必须在 1–50 之间。')
 

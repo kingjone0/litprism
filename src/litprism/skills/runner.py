@@ -95,7 +95,7 @@ class SkillRunner:
         registry: SkillRegistry | None = None,
     ):
         self.kb = kb
-        self.cfg = cfg
+        self.cfg = getattr(llm, 'runtime_config', cfg)
         self.llm = llm
         self.registry = registry or SkillRegistry(cfg)
 
