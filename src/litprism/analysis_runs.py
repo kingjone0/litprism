@@ -18,16 +18,13 @@ from .knowledge import now
 from .semantics import payload_hash
 from .usage import UsageTracker
 
-DEFAULT_BUDGETS = {'extract': 12, 'concepts': 12, 'semantic_review': 48, 'semantic_cross_review': 40}
+# 阶段调用预算已取消：保留字段只为兼容旧记录与用量展示，0 表示不限制。
+DEFAULT_BUDGETS = {'extract': 0, 'concepts': 0, 'semantic_review': 0, 'semantic_cross_review': 0}
 PIPELINE_VERSION = 'analysis-journal-v1'
 
 
 class RunStopped(RuntimeError):
     stop_analysis_run = True
-
-
-class BudgetExhausted(RunStopped):
-    pass
 
 
 class RetryRequired(RunStopped):
@@ -53,8 +50,8 @@ def budgets(value=None, previous=None):
         raise ValueError('阶段预算必须是已知阶段的对象。')
     result = dict(previous or DEFAULT_BUDGETS)
     for key, limit in value.items():
-        if type(limit) is not int or not 0 <= limit <= 1000:
-            raise ValueError('每阶段预算须为 0–1000 的整数（逻辑调用次数）。')
+        if type(limit) is not int or not 0 <= limit <= 10000:
+            raise ValueError('每阶段预算须为 0–10000 的整数（逻辑调用次数）。')
         if previous and limit < previous[key]:
             raise ValueError('恢复只允许保持或增加原预算，不允许降低。')
         result[key] = limit
@@ -65,7 +62,7 @@ def _analysis_hash(kb, pid):
     return payload_hash((kb.get_analysis(pid) or {}).get('payload') or {})
 
 
-def binding(kb, cfg, client, pid, with_concepts):
+def binding(kb, cfg, client, pid, with_concepts, semantic_review=True):
     from .config import config_to_dict
     from .providers import apply_active_window
     paper = kb.get_paper(pid)
@@ -88,12 +85,14 @@ def binding(kb, cfg, client, pid, with_concepts):
     params['client_type'] = type(client).__module__+'.'+type(client).__qualname__
     params['context'] = config_to_dict(cfg)['context']
     params['with_concepts'] = with_concepts
+    params['semantic_review'] = bool(semantic_review)
     params['supports_semantic_review'] = bool(getattr(client, 'supports_semantic_review', False))
+    params['capability_missing'] = getattr(client, 'capability_missing', None)
     from .llm import _review_connect_timeout, _review_output_cap, _review_read_timeout
-    from .semantics import MAX_CROSS_CALLS, MAX_REVIEW_CALLS
+    # 只记录输出/等待设置；复核次数不再有内置上限（成本约束来自客户端 remaining_calls）。
     params['review_limits'] = ['automatic' if getattr(settings, 'automatic_output', False) else _review_output_cap(),
                                _review_read_timeout(getattr(settings, 'review_read_timeout', 60)),
-                               _review_connect_timeout(), MAX_REVIEW_CALLS, MAX_CROSS_CALLS]
+                               _review_connect_timeout()]
     # Source builds bind implementation and prompts; frozen builds require an
     # explicit protocol bump when changing the pipeline (packaging not yet tested).
     root = Path(__file__).parent
@@ -101,7 +100,9 @@ def binding(kb, cfg, client, pid, with_concepts):
     code = [(p.relative_to(root).as_posix(), p.read_bytes().hex()) for p in files]
     manifest = {'version': PIPELINE_VERSION, 'source_hash': payload_hash(source),
                 'settings_hash': payload_hash(params), 'pipeline_hash': payload_hash(code),
-                'model': getattr(client, 'name', 'unknown'), 'with_concepts': with_concepts}
+                'model': getattr(client, 'name', 'unknown'), 'with_concepts': with_concepts,
+                'semantic_review': bool(semantic_review),
+                'capability_missing': params.get('capability_missing')}
     return manifest, cfg
 
 
@@ -159,11 +160,13 @@ class AnalysisRuns:
             return [dict(r) for r in self.kb._con.execute(
                 'SELECT * FROM analysis_run_calls WHERE run_id=? ORDER BY step,attempt', (rid,))]
 
-    def create(self, cfg, client, pid, limits=None, with_concepts=True):
+    def create(self, cfg, client, pid, limits=None, with_concepts=True, semantic_review=True):
         if type(with_concepts) is not bool:
             raise ValueError('术语开关必须为布尔值。')
+        if type(semantic_review) is not bool:
+            raise ValueError('机器复核开关必须为布尔值。')
         limits = budgets(limits)
-        manifest, _ = binding(self.kb, cfg, client, pid, with_concepts)
+        manifest, _ = binding(self.kb, cfg, client, pid, with_concepts, semantic_review)
         rid, timestamp = 'ar_'+uuid.uuid4().hex, now()
         with self.kb.tx() as con:
             con.execute('INSERT INTO analysis_runs VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -198,6 +201,8 @@ class AnalysisRuns:
         latest = {c['step']: c for c in calls}
         return {k: row[k] for k in ('id', 'paper_id', 'status', 'stage', 'stop_reason', 'created_at', 'updated_at')} | {
             'model': manifest['model'], 'with_concepts': manifest['with_concepts'],
+            'semantic_review': manifest.get('semantic_review', True),
+            'capability_missing': manifest.get('capability_missing'),
             'budgets': limits, 'spent': spent, 'usage': usage,
             'retry_required': any(c['status'] != 'succeeded' for c in latest.values()),
             'steps': [{'step': c['step'], 'attempt': c['attempt'], 'task': c['task'], 'status': c['status'],
@@ -218,7 +223,8 @@ class AnalysisRuns:
             row = self.row(rid)
             original = json.loads(row['binding'])
             try:
-                current, cfg = binding(self.kb, cfg, client, row['paper_id'], original['with_concepts'])
+                current, cfg = binding(self.kb, cfg, client, row['paper_id'], original['with_concepts'],
+                                   original.get('semantic_review', True))
             except RunConflict:
                 self.update(rid, status='stale', stop_reason='来源不存在、已回收或不可引用；需重新核对来源。')
                 raise
@@ -230,7 +236,8 @@ class AnalysisRuns:
             journal = JournalClient(self, rid, client, new_limits, retry_failed)
             def finalize(payload):
                 # Called inside the same transaction that publishes the analysis.
-                fresh, _ = binding(self.kb, cfg, client, row['paper_id'], original['with_concepts'])
+                fresh, _ = binding(self.kb, cfg, client, row['paper_id'], original['with_concepts'],
+                               original.get('semantic_review', True))
                 if fresh != original or _analysis_hash(self.kb, row['paper_id']) != row['analysis_hash']:
                     raise RunConflict('生成期间来源或分析版本已变化，未发布本次结果。')
                 payload['_coverage']['usage'] = self.usage(rid)
@@ -239,12 +246,11 @@ class AnalysisRuns:
                 self.update(rid, analysis_hash=payload_hash(payload))
             try:
                 payload = analyze_paper(self.kb, cfg, journal, row['paper_id'], force=True,
-                                        with_concepts=original['with_concepts'], finalize=finalize)
+                                        with_concepts=original['with_concepts'], finalize=finalize,
+                                        semantic_review=original.get('semantic_review', True))
                 partial = (not payload['_coverage']['complete'] or not payload['_semantic_review'].get('passed')
                            or bool(payload.get('_concepts_error')))
                 self.update(rid, status='partial' if partial else 'completed', stop_reason=None)
-            except BudgetExhausted:
-                self.update(rid, status='paused_budget', stop_reason='阶段调用预算已用尽；原解读保留，可增加预算后恢复。')
             except RetryRequired:
                 self.update(rid, status='needs_retry', stop_reason='上次调用失败或中断，费用/结果可能未知；不会自动重复调用。')
             except TaskCancelled:
@@ -299,9 +305,7 @@ class JournalClient:
             if same and not self.retry_failed:
                 self.last_call_not_sent = True
                 raise RetryRequired()
-        if sum(c['task'] == task for c in calls) >= self.limits[task]:
-            self.last_call_not_sent = True
-            raise BudgetExhausted()
+        # 预算不再是闸门：只统计用量，不因阶段次数停止（模型窗口已知后由内容决定能跑多少）。
         timestamp = now()
         with self.store.kb.tx() as con:
             con.execute('INSERT INTO analysis_run_calls (run_id,step,attempt,task,request_hash,status,response,usage,error_type,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',

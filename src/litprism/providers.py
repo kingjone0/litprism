@@ -594,26 +594,38 @@ class ProviderStore:
         return self.active_limits().get('window_tokens')
 
     def active_limits(self) -> dict:
+        """当前生效模型的窗口与最大输出。
+
+        优先级：**API 实测值 > 库里存的 > 用户确认白名单 > 提供商级**。
+        白名单只在前两者都缺时兜底 —— 它不该掩盖"根本没拉到能力"这件事。
+        """
         from .model_limits import confirmed_limits
         provider, model_id = self.get_active()
         if provider is None:
-            return {}
-        limits = confirmed_limits(provider.base_url, model_id or '')
-        sources = {key: 'user_confirmed' for key in limits if key.endswith('_tokens')}
-        limits['selected_model'] = model_id
+            return {'capability_missing': 'no_active_model'}
+        limits, sources = {}, {}
         for model in provider.models:
             if model.model_id == model_id:
                 for key in ('window_tokens', 'max_output_tokens'):
-                    if key not in limits and getattr(model, key) is not None:
-                        limits[key] = getattr(model, key)
-                        sources[key] = 'stored'
                     if model.api_limits.get(key):
                         limits[key] = model.api_limits[key]
                         sources[key] = 'api'
+                    elif getattr(model, key) is not None:
+                        limits[key] = getattr(model, key)
+                        sources[key] = 'stored'
                 break
-        limits['capability_sources'] = sources
+        for key, value in confirmed_limits(provider.base_url, model_id or '').items():
+            if key.endswith('_tokens') and key not in limits:
+                limits[key] = value
+                sources[key] = 'user_confirmed'
         if 'window_tokens' not in limits and provider.window_tokens:
             limits['window_tokens'] = provider.window_tokens
+            sources['window_tokens'] = 'provider'
+        limits['selected_model'] = model_id
+        limits['capability_sources'] = sources
+        if 'window_tokens' not in limits:
+            # 已选模型但没有任何窗口来源：多半是从没成功刷新过模型目录。
+            limits['capability_missing'] = 'not_fetched'
         return limits
 
     def chat_options(self) -> list[dict]:
@@ -697,15 +709,16 @@ def dump_presets() -> list[dict]:
     return PRESETS
 
 
-def apply_active_window(cfg: Any, kb: Any) -> dict:
+def apply_active_window(cfg: Any, kb: Any, *, require_active: bool = False) -> dict:
     """把**当前生效模型**的窗口写进 ``cfg.context``，返回解析结果。
 
     为什么必须在这里做：`context.window_tokens` 原本是全局 32000，
     与模型无关。换 128k/1M 的模型不会自动放大，长论文就永远进不了
     「全文驻留」模式 —— 缓存前缀根本建立不起来。
 
-    解析顺序：模型级 → 提供商级 → 全局配置。任何一步出错都静默回落到配置值，
-    绝不让"读不到窗口"变成"分析失败"。
+    解析顺序：API 实测 → 库里存的 → 用户确认白名单 → 提供商级 → 全局配置。
+    ``require_active=True`` 时，没选模型直接抛错（真实模型入口必须显式选模）；
+    其余情况回落配置值，但会把 ``capability_missing`` 带回去，供界面提示。
     """
     configured = int(cfg.context.window_tokens)
     resolved: int | None = None
@@ -716,6 +729,10 @@ def apply_active_window(cfg: Any, kb: Any) -> dict:
     except Exception:  # noqa: BLE001 - 提供商表缺失/损坏都不该阻断分析
         resolved = None
         limits = {}
+
+    if limits.get('capability_missing') == 'no_active_model' and require_active:
+        from .providers import ProviderError
+        raise ProviderError('尚未选择模型：请先在设置里选择提供商与模型，再开始真实调用。')
 
     if resolved and resolved != configured:
         cfg.context.window_tokens = resolved
@@ -744,4 +761,5 @@ def apply_active_window(cfg: Any, kb: Any) -> dict:
         'capability_source': limits.get('source', 'configured'),
         'capability_sources': limits.get('capability_sources', {}),
         'output_mode': 'automatic' if ceiling else 'legacy_unknown_capability',
+        'capability_missing': limits.get('capability_missing'),
     }

@@ -69,7 +69,7 @@ function workflowDialog(title, body, submit, action = '确定') {
 }
 
 const analysisStages = { extract: '原文提取', concepts: '术语提取', semantic_review: '逐项复核', semantic_cross_review: '跨批核对' };
-const analysisRunStatuses = { queued: '等待执行', running: '正在执行或上次中断', paused_budget: '预算暂停', needs_retry: '需确认重试', cancelled: '已取消', partial: '仍有待审项', completed: '机器复核通过', failed: '运行失败', stale: '版本已变化' };
+const analysisRunStatuses = { queued: '等待执行', running: '正在执行或上次中断', paused_budget: '旧版预算暂停', needs_retry: '需确认重试', cancelled: '已取消', partial: '仍有待审项', completed: '机器复核通过', failed: '运行失败', stale: '版本已变化' };
 
 async function loadAnalysisRuns(pid) {
   const box = $('#analysisRuns');
@@ -83,10 +83,12 @@ async function loadAnalysisRuns(pid) {
       ${items.map(run => `<div class="analysis-run" data-run-id="${esc(run.id)}">
         <div class="row wrap"><strong>${esc(analysisRunStatuses[run.status] || run.status)}</strong><span class="source-intro">${esc(run.model)} · ${esc(run.updated_at)}</span>
         ${!['completed', 'stale'].includes(run.status) ? `<button class="btn sm" data-resume-run="${esc(run.id)}">检查并恢复</button>` : ''}</div>
-        <p class="source-intro">${Object.entries(analysisStages).filter(([key]) => key !== 'concepts' || run.with_concepts).map(([key, label]) => `${label} ${run.spent[key]}/${run.budgets[key]}`).join(' · ')}（已用/上限）</p>
+        ${run.capability_missing ? `<p class="lui-degraded">本次未解析到模型能力（${run.capability_missing === 'no_active_model' ? '未选择模型' : '未成功刷新模型目录'}），按配置的固定额度运行。</p>` : ''}
+        ${run.capability_missing ? `<p class="lui-degraded">本次未解析到模型能力（${run.capability_missing === 'no_active_model' ? '未选择模型' : '未成功刷新模型目录'}），按配置的固定额度运行。</p>` : ''}
+        <p class="source-intro">${Object.entries(analysisStages).filter(([key]) => key !== 'concepts' || run.with_concepts).map(([key, label]) => `${label} ${run.spent[key]} 次`).join(' · ')}（已用调用次数）</p>
         ${(run.steps || []).some(s => s.request_settings?.max_tokens) ? `<details><summary>各次请求的实际输出额度</summary>${run.steps.filter(s => s.request_settings?.max_tokens).map(s => `<p class="source-intro">${esc(analysisStages[s.task] || s.task)} · 第 ${s.step} 步 / 尝试 ${s.attempt} · ${s.request_settings.output_mode === 'automatic' ? '自动分配' : '历史固定额度'} ${fmtNum(s.request_settings.max_tokens)} token${s.request_settings.estimated_input_tokens == null ? '' : ` · 输入估算 ${fmtNum(s.request_settings.estimated_input_tokens)}`}</p>`).join('')}</details>` : ''}
         <p class="source-intro">已报告用量：输入 ${run.usage.input} / 输出 ${run.usage.output} token；${run.usage.unknown_usage_calls} 次用量未知。${esc(run.stop_reason || '')}</p>
-      </div>`).join('') || '<p class="source-intro">尚无分阶段记录。可用上方“分阶段解读”设置预算。</p>'}</details>`;
+      </div>`).join('') || '<p class="source-intro">尚无分阶段记录。可用上方“分阶段解读”开始；阶段调用上限已取消，按内容与窗口自动分批。</p>'}</details>`;
     $('[data-refresh-runs]', box).onclick = () => loadAnalysisRuns(pid);
     $$('[data-resume-run]', box).forEach(button => button.onclick = async () => {
       button.disabled = true;
@@ -106,15 +108,18 @@ async function loadAnalysisRuns(pid) {
 }
 
 function analysisRunDialog(pid, run = null) {
-  const limits = run?.budgets || { extract: 12, concepts: 12, semantic_review: 48, semantic_cross_review: 40 };
-  workflowDialog(run ? '检查并恢复解读' : '设置分阶段预算', `<p class="source-intro">上限按本次运行累计请求次数计算，包含失败与结果未知的尝试。精确匹配的成功请求直接复用，不再发送。预算耗尽后暂停并保留原解读。</p>
-    ${Object.entries(analysisStages).map(([key, label]) => `<label>${label}请求上限${run ? `（已用 ${run.spent[key]}）` : ''}<input class="input" name="${key}" type="number" min="${run ? limits[key] : 0}" max="1000" step="1" required value="${limits[key]}"></label>`).join('')}
-    <p class="source-intro">逐项复核和跨批核对还受原有安全上限约束（每轮最多 48 / 40 次）；增加预算不保证整篇通过。次数上限不是金额承诺，服务未报告的用量保持未知。</p>
-    ${run ? `<p class="source-intro">术语提取：${run.with_concepts ? '启用' : '关闭'}；恢复前核对原文、模型、协议、参数和分析版本。${esc(run.stop_reason || '')}</p>` : '<label><input type="checkbox" name="with_concepts" checked> 同时提取术语</label>'}
-    ${run?.retry_required ? '<label><input type="checkbox" name="retry_failed"> 允许重试失败或结果未知的请求</label><p class="source-intro">这些请求可能已产生费用；重试及后续重新生成都会占用累计预算。未勾选时不会自动重试。</p>' : ''}`, async values => {
-      const body = { budgets: Object.fromEntries(Object.keys(analysisStages).map(key => [key, Number(values[key])])) };
+  workflowDialog(run ? '检查并恢复解读' : '分阶段解读', `<p class="source-intro">阶段调用上限已取消：批次数由原文内容与模型窗口决定，不再填写请求次数。精确匹配的成功请求直接复用，不再发送。</p>
+    ${run ? `<p class="source-intro">已用调用：${Object.entries(run.spent).map(([k, v]) => `${analysisStages[k] || k} ${v} 次`).join(' · ')}</p>` : ''}
+    ${run ? `<p class="source-intro">术语提取：${run.with_concepts ? '启用' : '关闭'}；机器复核：${run.semantic_review ? '启用' : '按设置跳过'}。恢复前核对原文、模型、协议、参数和分析版本。${esc(run.stop_reason || '')}</p>`
+      : `<label><input type="checkbox" name="with_concepts" checked> 同时提取术语</label>
+         <label><input type="checkbox" name="semantic_review" checked> 运行机器复核（关闭则只产出候选，由你直接核对原文后确认）</label>`}
+    ${run?.retry_required ? '<label><input type="checkbox" name="retry_failed"> 允许重试失败或结果未知的请求</label><p class="source-intro">这些请求可能已产生费用；未勾选时不会自动重试。</p>' : ''}`, async values => {
+      const body = {};
       if (run) body.retry_failed = values.retry_failed === 'on';
-      else body.with_concepts = values.with_concepts === 'on';
+      else {
+        body.with_concepts = values.with_concepts === 'on';
+        body.semantic_review = values.semantic_review === 'on';
+      }
       const endpoint = run ? '/api/analysis-runs/'+encodeURIComponent(run.id)+'/resume' : '/api/paper/'+encodeURIComponent(pid)+'/analysis-runs';
       const started = await api(endpoint, { method: 'POST', body });
       try {
@@ -123,7 +128,7 @@ function analysisRunDialog(pid, run = null) {
       } finally {
         if (S.activePaper === pid) await loadPaperDetail();
       }
-    }, run ? '按预算恢复' : '按预算开始');
+    }, run ? '检查并恢复' : '开始解读');
 }
 
 async function downloadApi(path, filename, body) {
@@ -266,7 +271,7 @@ async function loadComparison() {
     ${check.passed === false ? `<div class="lui-degraded">${esc((check.issues || []).join('；'))}</div>` : '<button class="btn" id="btnSaveComparison">保存为对比报告</button>'}
     <div class="reading-report">${LitUI.md(r.data.summary || '')}
       ${coverageNote(r.data._coverage)}
-      ${semanticReviewPanel(r.data._semantic_review, {kind: 'run', id: r.data._semantic_run_id})}
+      ${semanticReviewPanel(r.data._semantic_review, {kind: 'run', id: r.data._semantic_run_id}, r.data._candidates)}
       ${(r.data.dimensions || []).length ? `<div style="overflow-x:auto"><table class="table"><thead><tr><th>维度</th>${(r.data._papers || []).map(p => `<th>${esc(p.title)}</th>`).join('')}</tr></thead>
         <tbody>${r.data.dimensions.map(d => `<tr><td>${esc(d.dimension)}</td>${(r.data._papers || []).map(p => `<td>${LitUI.md(String((d.values || {})[p.tag] || '当前提取未找到依据'))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : ''}
       ${['convergence', 'divergence'].map(k => (r.data[k] || []).length ? `<h3>${k === 'convergence' ? '一致点' : '分歧点'}</h3>${r.data[k].map(v => `<p>${LitUI.md(v)}</p>`).join('')}` : '').join('')}
@@ -415,14 +420,21 @@ function coverageDetail(c) {
     : '';
   const why = c.error === 'output_limit'
     ? '（跨批核查的输出/推理预算耗尽）'
-    : c.error === 'call_budget' ? '（整体调用预算已用尽）'
-    : (c.calls != null && c.max_calls != null ? `（已用 ${c.calls}/${c.max_calls} 次比较预算）` : '');
+    : c.error === 'call_budget' ? '（客户端剩余调用数已用尽）'
+    : (c.calls != null ? `（已比较 ${c.calls} 对）` : '');
 
   return `<div class="lui-degraded">${esc(head)}${pendText}${esc(why)}${doneText}${skippedText}</div>`;
 }
 
-function semanticReviewPanel(report, entity) {
-  if (!report || report.status === 'not_run') return '<p class="source-intro">尚未运行整体语义核查；引用能定位不等于引文支持结论。重新解读后可查看。</p>';
+function semanticReviewPanel(report, entity, candidates) {
+  const pool = (candidates || []).map(c => ({...c, status: 'candidate', reason: '候选陈述 · 未经机器核查'}));
+  if (!report || report.status === 'not_run' || report.status === 'skipped_by_user') {
+    const note = report?.status === 'skipped_by_user'
+      ? '已按设置跳过机器语义核查。下面是提取出的候选陈述，可直接点开核对原文并确认入库。'
+      : '尚未运行机器语义核查；候选陈述可直接核对，引用能定位不等于引文支持结论。';
+    if (!pool.length) return `<p class="source-intro">${note}</p>`;
+    return `<details class="card" open><summary>候选陈述：${pool.length} 条待人工核对</summary><div class="card-body"><p class="source-intro">${note}</p>${pool.map(i => `<p><a href="#semantic-${esc(i.id)}" data-semantic-claim="${esc(i.id)}" data-semantic-kind="${esc(entity.kind)}" data-semantic-id="${esc(entity.id)}">第 ${esc(i.batch)} 批 · ${esc(i.text)}</a><span class="ev-claim-chip warn">未核实</span></p>`).join('')}</div></details>`;
+  }
   const items = report.items || [];
   // 待办排序：机器发现不符的最先，其次是没核完的，最后才是普通待确认。
   // 目的是让用户先处理"可能出错"的，而不是从头一条条点。
@@ -474,14 +486,16 @@ async function loadSemanticDetail(ref) {
   try {
     const d = await api(semanticEndpoint(ref));
     if (S.semanticRef !== ref || seq !== S.evidenceLoadSeq) return;
-    const claim = (d.report.items || []).find(i => i.id === ref.claimId);
+    const cand = (d.candidates || []).find(i => i.id === ref.claimId);
+    const claim = (d.report.items || []).find(i => i.id === ref.claimId)
+      || (cand ? {...cand, status: 'candidate', reason: '候选陈述 · 未经机器核查'} : null);
     if (!claim) throw new Error('陈述不在当前解读版本中，请重新打开核查列表。');
     const reviews = (d.reviews || []).filter(i => i.claim_id === claim.id);
     const last = reviews.at(-1);
     const related = (d.report.differences || []).filter(i => i.claim_ids.includes(claim.id));
-    const labels = {machine_supported: '机器支持 · 尚未经人工确认', needs_review: '待人工核对', contradicted: '机器发现不符 · 待人工核对'};
+    const labels = {machine_supported: '机器支持 · 尚未经人工确认', needs_review: '待人工核对', contradicted: '机器发现不符 · 待人工核对', candidate: '候选陈述 · 未经机器核查，可直接确认入知识库'};
     const fields = {research_question:'研究问题', methodology:'方法', experiment_design:'实验设计', key_conclusions:'主要结论', innovations:'创新点', limitations:'局限', summary:'总体结论', convergence:'一致点', divergence:'分歧点'};
-    const renderClaim = c => `<h4>第 ${esc(c.batch)} 批 · ${esc(fields[c.field] || '对比陈述')}</h4><div class="reading-text">${esc(c.text)}</div><p class="source-intro">${esc(labels[c.status] || c.status)}</p><p>机器核查说明：${esc(c.reason)}</p>${(c.quotes || []).map(q => `<details><summary>引文 [${esc(q.tag)}] ${q.page == null ? '' : 'p.'+esc(q.page)} · ${esc(q.quote.slice(0,70))}${q.quote.length > 70 ? '…' : ''}</summary><blockquote class="reading-text">${renderEvidenceText(q.quote, c.text)}</blockquote></details>`).join('')}<p>候选来源：${(c.candidate_tags || []).map(t => {
+    const renderClaim = c => `<h4>第 ${esc(c.batch)} 批 · ${esc(fields[c.field] || '对比陈述')}</h4><div class="reading-text">${esc(c.text)}</div><p class="source-intro">${esc(labels[c.status] || c.status)}</p>${c.reason ? `<p>${c.status === 'candidate' ? '状态' : '机器核查说明'}：${esc(c.reason)}</p>` : ''}${(c.quotes || []).map(q => `<details><summary>引文 [${esc(q.tag)}] ${q.page == null ? '' : 'p.'+esc(q.page)} · ${esc(q.quote.slice(0,70))}${q.quote.length > 70 ? '…' : ''}</summary><blockquote class="reading-text">${renderEvidenceText(q.quote, c.text)}</blockquote></details>`).join('')}<p>候选来源：${(c.candidate_tags || []).map(t => {
       const stored = S.semanticSources?.[t];
       return stored ? `<a href="#evidence-${esc(stored.chunk_id)}" data-evidence-ref="${esc(stored.chunk_id)}">[${esc(t)}] ${esc(stored.paper_title || '原文')} ${stored.page == null ? '' : 'p.'+esc(stored.page)}</a>` : esc('['+t+']');
     }).join(' · ')}</p>${renderSourceBlocks(c)}`;

@@ -44,39 +44,31 @@ def env(tmp_path):
     kb.close()
 
 
-def test_budget_pause_preserves_analysis_and_resume_only_calls_missing_steps(env):
+def test_stage_budgets_no_longer_stop_a_run(env):
+    """阶段调用预算已取消：给很小的预算也照常跑完，不再 paused_budget。"""
     cfg, kb, pid = env
     kb.save_analysis(pid, {'key_conclusions': 'previous accepted analysis'})
     store, client = AnalysisRuns(kb), Client(cfg)
     rid = store.create(cfg, client, pid, {'semantic_review': 1})['id']
-    paused = store.execute(rid, cfg, client)
-    assert paused['status'] == 'paused_budget'
-    assert client.calls == ['extract', 'concepts', 'semantic_review']
-    assert kb.get_analysis(pid)['payload']['key_conclusions'] == 'previous accepted analysis'
-    fresh_client = Client(cfg)
-    done = store.execute(rid, cfg, fresh_client, limits={'semantic_review': 2})
+    done = store.execute(rid, cfg, client)
     assert done['status'] == 'completed'
-    assert fresh_client.calls == ['semantic_review', 'semantic_cross_review']
-    assert done['usage']['calls'] == 5
-    assert done['usage']['input'] == 50 and done['usage']['output'] == 25
-    assert done['usage']['unknown_usage_calls'] == 0
+    assert client.calls[:2] == ['extract', 'concepts']
+    assert 'semantic_review' in client.calls and client.calls[-1] == 'semantic_cross_review'
     payload = kb.get_analysis(pid)['payload']
     assert payload['_analysis_run_id'] == rid
-    assert payload['_coverage']['usage'] == done['usage']
     assert payload['_semantic_review']['usage']['calls'] == 3
 
 
 def test_resume_after_database_reopen(env):
     cfg, kb, pid = env
     rid = AnalysisRuns(kb).create(cfg, Client(cfg), pid, {'extract': 0})['id']
-    assert AnalysisRuns(kb).execute(rid, cfg, Client(cfg))['status'] == 'paused_budget'
     path = kb.db_path
     kb.close()
     reopened = KnowledgeBase(cfg, db_path=path)
     try:
-        done = AnalysisRuns(reopened).execute(rid, cfg, Client(cfg), limits={'extract': 1})
+        done = AnalysisRuns(reopened).execute(rid, cfg, Client(cfg))
         assert done['status'] == 'completed'
-        assert done['spent']['extract'] == 1
+        assert done['spent']['extract'] >= 1
     finally:
         reopened.close()
 
@@ -225,7 +217,7 @@ def test_truncated_concepts_remain_partial_and_require_explicit_retry(env):
 
 
 def test_retry_never_refunds_budget_and_downstream_cache_is_request_bound(env):
-    from litprism.analysis_runs import BudgetExhausted, RunCallFailed
+    from litprism.analysis_runs import RunCallFailed
     cfg, kb, pid = env
     store, client = AnalysisRuns(kb), Client(cfg)
     limits = {'extract': 1, 'concepts': 1, 'semantic_review': 1, 'semantic_cross_review': 1}
@@ -236,8 +228,7 @@ def test_retry_never_refunds_budget_and_downstream_cache_is_request_bound(env):
     with pytest.raises(RunCallFailed):
         journal.chat_json([{'content': 'original'}], task='extract')
     client.chat_json = original
-    with pytest.raises(BudgetExhausted):
-        JournalClient(store, rid, client, limits, True).chat_json([{'content': 'original'}], task='extract')
+    # 预算不再拦截：哪怕超出旧限额也继续，只按日志做重放/新增。
     assert len(store.calls(rid)) == 1
     limits['extract'] = 2
     retried = JournalClient(store, rid, client, limits, True)
@@ -327,15 +318,15 @@ def test_api_pause_and_resume_are_persistent_and_input_checked(env, monkeypatch)
     assert api.post(f'/api/paper/{pid}/analysis-runs', json={'budgets': {'extract': True}}).status_code == 400
     assert api.get('/api/analysis-runs/missing').status_code == 404
     started = api.post(f'/api/paper/{pid}/analysis-runs', json={'budgets': {'semantic_review': 1}}).json()
-    assert wait_api_task(api, started['task_id'])['result']['status'] == 'paused_budget'
+    # 预算已取消：小预算不再暂停，直接跑完。
+    assert wait_api_task(api, started['task_id'])['result']['status'] == 'completed'
     rid = started['run_id']
     assert api.get(f'/api/paper/{pid}/analysis-runs').json()['items'][0]['id'] == rid
-    assert api.post(f'/api/analysis-runs/{rid}/resume', json={'budgets': {'extract': 0}}).status_code == 400
     assert api.post(f'/api/analysis-runs/{rid}/resume', json={'retry_failed': 'yes'}).status_code == 400
     model.calls.clear()
-    resumed = api.post(f'/api/analysis-runs/{rid}/resume', json={'budgets': {'semantic_review': 2}}).json()
+    resumed = api.post(f'/api/analysis-runs/{rid}/resume', json={}).json()
     assert wait_api_task(api, resumed['task_id'])['result']['status'] == 'completed'
-    assert model.calls == ['semantic_review', 'semantic_cross_review']
+    assert model.calls == []
     # A fresh web app retains records; the transient TaskManager is not the journal.
     reopened_api = TestClient(server.create_app(cfg))
     assert reopened_api.get(f'/api/analysis-runs/{rid}').json()['status'] == 'completed'

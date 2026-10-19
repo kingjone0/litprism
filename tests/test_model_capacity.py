@@ -156,3 +156,107 @@ def test_chat_roundtrip_keeps_thinking_out_of_answer_evidence_and_next_prompt(en
     assert api.post('/api/chat/'+cid, json={'question': 'alphatopic again'}).status_code == 200
     assert 'private_thought_marker' not in json.dumps(captured[before:])
     assert api.get('/api/context/'+cid).json()['context_pressure']['window'] == 1_000_000
+
+
+def test_没有生效模型时明确报告而不是静默降级(env):
+    """不再把它当 32K 悄悄跑：没有选中模型必须能看出来，强制入口直接报错。"""
+    from litprism.providers import ProviderError, apply_active_window
+    cfg, kb, store, provider = env
+    with kb.tx() as con:
+        con.execute("DELETE FROM meta WHERE key='active_provider'")
+    assert store.active_limits() == {'capability_missing': 'no_active_model'}
+    with pytest.raises(ProviderError):
+        apply_active_window(cfg, kb, require_active=True)
+    info = apply_active_window(cfg, kb)
+    assert info['capability_missing'] == 'no_active_model'
+    assert info['output_mode'] == 'legacy_unknown_capability'
+
+
+def test_api_值优先于用户确认白名单(env):
+    """API 实测值必须盖过硬编码白名单，否则白名单会掩盖真实能力。"""
+    from litprism.providers import apply_active_window
+    cfg, kb, store, provider = env
+    with kb.tx() as con:
+        con.execute("INSERT OR REPLACE INTO provider_model_capabilities VALUES (?,?,?,?,?)",
+                    (provider.id, provider.chat_model, 123_456, 7_890, '2026-10-19T00:00:00'))
+    limits = store.active_limits()
+    assert limits['window_tokens'] == 123_456 and limits['max_output_tokens'] == 7_890
+    assert limits['capability_sources']['window_tokens'] == 'api'
+    assert apply_active_window(cfg, kb)['window'] == 123_456
+
+
+def test_已选模型但没有任何来源时报告未拉取(env):
+    """白名单只对特定端点生效；别的端点没有能力数据时要说明"没拉过"。"""
+    from litprism.providers import apply_active_window
+    cfg, kb, store, provider = env
+    with kb.tx() as con:
+        con.execute("UPDATE providers SET base_url='https://api.example.com/v1' WHERE id=?", (provider.id,))
+    limits = store.active_limits()
+    assert limits['capability_missing'] == 'not_fetched'
+    assert apply_active_window(cfg, kb)['capability_missing'] == 'not_fetched'
+
+
+def test_选模后尝试刷新能力目录(env, monkeypatch):
+    from fastapi.testclient import TestClient
+    from litprism.web import server
+    cfg, kb, store, provider = env
+    calls = []
+    monkeypatch.setattr(server, 'KnowledgeBase', lambda _: kb)
+    monkeypatch.setattr(type(store), '_provider_store_original', None, raising=False)
+    monkeypatch.setattr(store.__class__, 'fetch_models', lambda self, pid: calls.append(pid) or [], raising=False)
+    api = TestClient(server.create_app(cfg))
+    body = api.post(f'/api/providers/{provider.id}/active', json={'model_id': provider.chat_model}).json()
+    assert body['ok'] is True and body['capability_refreshed'] is True
+    assert calls == [provider.id]
+
+
+def test_没有生效模型时明确报告而不是静默降级(env):
+    """不再把它当 32K 悄悄跑：没有选中模型必须能看出来，强制入口直接报错。"""
+    from litprism.providers import ProviderError, apply_active_window
+    cfg, kb, store, provider = env
+    with kb.tx() as con:
+        con.execute("DELETE FROM meta WHERE key='active_provider'")
+    assert store.active_limits() == {'capability_missing': 'no_active_model'}
+    with pytest.raises(ProviderError):
+        apply_active_window(cfg, kb, require_active=True)
+    info = apply_active_window(cfg, kb)
+    assert info['capability_missing'] == 'no_active_model'
+    assert info['output_mode'] == 'legacy_unknown_capability'
+
+
+def test_api_值优先于用户确认白名单(env):
+    """API 实测值必须盖过硬编码白名单，否则白名单会掩盖真实能力。"""
+    from litprism.providers import apply_active_window
+    cfg, kb, store, provider = env
+    with kb.tx() as con:
+        con.execute("INSERT OR REPLACE INTO provider_model_capabilities VALUES (?,?,?,?,?)",
+                    (provider.id, provider.chat_model, 123_456, 7_890, '2026-10-19T00:00:00'))
+    limits = store.active_limits()
+    assert limits['window_tokens'] == 123_456 and limits['max_output_tokens'] == 7_890
+    assert limits['capability_sources']['window_tokens'] == 'api'
+    assert apply_active_window(cfg, kb)['window'] == 123_456
+
+
+def test_已选模型但没有任何来源时报告未拉取(env):
+    """白名单只对特定端点生效；别的端点没有能力数据时要说明"没拉过"。"""
+    from litprism.providers import apply_active_window
+    cfg, kb, store, provider = env
+    with kb.tx() as con:
+        con.execute("UPDATE providers SET base_url='https://api.example.com/v1' WHERE id=?", (provider.id,))
+    limits = store.active_limits()
+    assert limits['capability_missing'] == 'not_fetched'
+    assert apply_active_window(cfg, kb)['capability_missing'] == 'not_fetched'
+
+
+def test_选模后尝试刷新能力目录(env, monkeypatch):
+    from fastapi.testclient import TestClient
+    from litprism.web import server
+    cfg, kb, store, provider = env
+    calls = []
+    monkeypatch.setattr(server, 'KnowledgeBase', lambda _: kb)
+    monkeypatch.setattr(type(store), '_provider_store_original', None, raising=False)
+    monkeypatch.setattr(store.__class__, 'fetch_models', lambda self, pid: calls.append(pid) or [], raising=False)
+    api = TestClient(server.create_app(cfg))
+    body = api.post(f'/api/providers/{provider.id}/active', json={'model_id': provider.chat_model}).json()
+    assert body['ok'] is True and body['capability_refreshed'] is True
+    assert calls == [provider.id]

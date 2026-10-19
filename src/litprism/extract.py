@@ -52,7 +52,8 @@ def paper_context(kb: KnowledgeBase, paper: dict, budget: int | None = None) -> 
 
 
 def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
-                  force: bool = False, with_concepts: bool = True, finalize=None) -> dict:
+                  force: bool = False, with_concepts: bool = True, finalize=None,
+                  semantic_review: bool = True) -> dict:
     from .evidence import citation_issues, require_citable
     from .reading import build_messages, excerpt_context, reading_batches
     paper = kb.get_paper(paper_id)
@@ -195,11 +196,26 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
                 evidence.setdefault(field, []).extend(refs)
         merged[field] = '\n\n'.join(parts)
     merged['field_evidence'] = {k: list(dict.fromkeys(v)) for k, v in evidence.items()}
-    from .semantics import run_review, supported_fields
-    semantic = run_review(semantic_inputs, all_excerpts, cfg, llm, tracker=tracker)
+    from .semantics import make_units, run_review, supported_fields
+    # 候选陈述先落盘：人工审核不依赖机器复核是否运行、是否通过。
+    # 复用 make_units（确定性 ID），所以复核结果与候选是同一套编号。
+    candidates = []
+    for batch, (fields, sources) in enumerate(semantic_inputs, 1):
+        candidates.extend(make_units(fields, sources, batch))
+    merged['_candidates'] = [{k: u[k] for k in ('id', 'field', 'text', 'batch', 'candidate_tags', 'adjacent_tags')}
+                             for u in candidates]
+    if semantic_review:
+        semantic = run_review(semantic_inputs, all_excerpts, cfg, llm, tracker=tracker)
+    else:
+        semantic = {'version': 2, 'protocol': 'source_selection', 'status': 'skipped_by_user',
+                    'passed': False, 'items': [], 'differences': [],
+                    'coverage': {'complete': False, 'skipped_claim_ids': [u['id'] for u in candidates],
+                                 'method': 'skipped_by_user', 'calls': 0, 'max_calls': None, 'tiles': 0},
+                    'supported': 0, 'pending': len(candidates), 'review_calls': 0, 'max_review_calls': None,
+                    'note': '按设置跳过机器语义核查；候选陈述已保留，可直接人工审核。'}
     merged['_semantic_review'] = semantic
     merged['_batch_notes'] = batch_notes
-    if semantic['status'] != 'not_run':
+    if semantic['status'] not in ('not_run', 'skipped_by_user'):
         safe = supported_fields(semantic)
         for field, _ in _FIELDS:
             merged[field] = safe.get(field, '')

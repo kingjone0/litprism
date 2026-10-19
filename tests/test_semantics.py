@@ -15,6 +15,17 @@ SOURCE = 'Alpha perplexity on PTB is 20.5; lower perplexity is better. SuperGLUE
 EXCERPT = {'tag': 'P1', 'id': 'chunk1', 'paper_id': 'paper1', 'page': 19, 'paper_title': 'Study', 'text': SOURCE}
 
 
+def review_payload(messages):
+    """复核消息可能是「全文前缀 + JSON 尾巴」，这里统一取出 JSON 部分。"""
+    content = messages[-1]['content']
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        marker = '【待核对陈述】'
+        start = content.index(marker)
+        return json.loads(content[content.index('{', start):])
+
+
 class Reviewer:
     supports_semantic_review = True
     name = 'controlled-reviewer'
@@ -24,7 +35,7 @@ class Reviewer:
         self.calls = []
 
     def chat_json(self, messages, task='', **kwargs):
-        payload = json.loads(messages[-1]['content'])
+        payload = review_payload(messages)
         self.calls.append((task, payload))
         if task == 'semantic_cross_review':
             return {'differences': self.differences}
@@ -129,13 +140,16 @@ def test_evidence_selection_uses_stored_text_and_rejects_unknown_ids(selected):
         assert item['quotes'][0]['quote']==SOURCE and item['quotes'][0]['chunk_id']=='chunk1'
 
 
-def test_shared_call_budget_across_batches_keeps_unreviewed_claims_pending(monkeypatch):
-    monkeypatch.setattr('litprism.semantics.MAX_REVIEW_CALLS',2)
-    model = Reviewer()
-    report = run_review([([('key_conclusions','Claim [P1]。',['P1'])],[EXCERPT])]*5,[EXCERPT],Config(),model)
-    assert report['review_calls']==2 and report['max_review_calls']==2
-    assert len([t for t,_ in model.calls if t=='semantic_review'])==2
-    assert report['pending']>=3 and not report['passed']
+def test_client_remaining_calls_keeps_unreviewed_claims_pending():
+    """内置调用上限已取消，只保留客户端给的剩余调用数。"""
+    class NoBudget(Reviewer):
+        remaining_calls = 0
+    items = units()
+    model = NoBudget()
+    result = review_units(items, [EXCERPT], Config(), model)
+    assert model.calls == []
+    assert result[0]['review_error'] == 'call_budget'
+    assert result[0]['status'] == 'needs_review'
 
 
 def test_output_limit_stops_paid_reviews_and_preserves_pending_candidates():
@@ -437,16 +451,101 @@ def test_cross_scope_is_limited_to_same_field():
     assert coverage['complete'] and not coverage['fields_pending']
 
 
-def test_budget_exhaustion_only_marks_unfinished_fields(monkeypatch):
-    import litprism.semantics as sem
-    monkeypatch.setattr(sem, 'MAX_CROSS_CALLS', 1)
-    small = [dict(units()[0], id=f's{i}', field='key_conclusions', text='s', status='machine_supported')
-             for i in range(3)]
-    big = [dict(units()[0], id=f'b{i}', field='methodology', text='b', status='machine_supported')
-           for i in range(6)]
-    _, coverage = reconcile(small+big, Config(), Reviewer())
-    assert coverage['fields_done'] == ['key_conclusions']
-    assert coverage['fields_pending'] == ['methodology']
-    assert [u['status'] for u in small] == ['machine_supported']*3
-    assert all(u['status'] == 'needs_review' for u in big)
-    assert coverage['complete'] is False
+def test_no_builtin_ceiling_stops_the_cross_check():
+    """旧的 40 次硬上限已取消：超过 40 对仍要跑完，而不是把后半篇判成未覆盖。"""
+    items = [dict(units()[0], id=f'cl{i}', field='key_conclusions', text=f'claim {i}',
+                  status='machine_supported') for i in range(60)]
+    model = Reviewer()
+    _, coverage = reconcile(items, Config(), model)
+    assert coverage['calls'] > 40
+    assert coverage['complete'] is True and coverage['skipped_claim_ids'] == []
+
+
+# ---------------------------------------------------------------------------
+# 已知模型能力时：复核复用全文前缀，并按内容一次核对多条
+# ---------------------------------------------------------------------------
+
+def capacity_cfg(window=1_000_000, output=384_000):
+    cfg = Config()
+    cfg.llm.automatic_output = True
+    cfg.llm.model_window_tokens = window
+    cfg.llm.model_max_output_tokens = output
+    return cfg
+
+
+def test_capacity_mode_reviews_many_claims_in_one_call():
+    items = []
+    for i in range(14):                      # 必须是不同对象，同一 dict 会被 id 覆盖
+        item = dict(units()[0])
+        item['id'] = f'cl{i}'
+        items.append(item)
+    model = Reviewer()
+    review_units(items, [EXCERPT], capacity_cfg(), model)
+    assert [len(p['claims']) for _, p in model.calls] == [14]
+    assert all(i['status'] == 'machine_supported' for i in items)
+
+
+def test_capacity_mode_reuses_the_extraction_full_text_prefix():
+    seen = []
+    class Capturing(Reviewer):
+        def chat_json(self, messages, task='', **kwargs):
+            seen.append(messages[-1]['content'])
+            return super().chat_json(messages, task=task, **kwargs)
+    review_units(units(), [EXCERPT], capacity_cfg(), Capturing())
+    content = seen[0]
+    assert 'chunk_id=chunk1' in content and '【待核对陈述】' in content
+    assert content.index('chunk_id=chunk1') < content.index('【待核对陈述】')
+
+
+def test_prefix_is_dropped_when_it_alone_exceeds_the_window():
+    seen = []
+    class Capturing(Reviewer):
+        def chat_json(self, messages, task='', **kwargs):
+            seen.append(messages[-1]['content'])
+            return super().chat_json(messages, task=task, **kwargs)
+    # 未被引用的超长片段只进前缀：容量装得下单条消息、装不下全文
+    big = {**EXCERPT, 'tag': 'P9', 'id': 'chunk9', 'text': '长原文 ' * 20000}
+    review_units(units(), [EXCERPT, big], capacity_cfg(window=50_000, output=500), Capturing())
+    assert '【待核对陈述】' not in seen[0]
+    assert json.loads(seen[0])['claims']
+
+
+# ---------------------------------------------------------------------------
+# 差异层接能力：一个 tile 装得下全部陈述，且不再因"报满 4 条"判未覆盖
+# ---------------------------------------------------------------------------
+
+def cross_units(n, field='key_conclusions'):
+    out = []
+    for i in range(n):
+        out.append({'id': f'cl{i}', 'field': field, 'batch': i//20+1,
+                    'text': f'claim {i} about perplexity on PTB', 'facts': [],
+                    'candidate_tags': [], 'adjacent_tags': [], 'status': 'machine_supported'})
+    return out
+
+
+def test_capacity_mode_cross_check_fits_all_claims_and_completes():
+    model = Reviewer()
+    units = cross_units(240)
+    _, coverage = reconcile(units, capacity_cfg(), model)
+    assert coverage['tiles'] == 1 and coverage['calls'] == 1
+    assert coverage['complete'] is True and coverage['skipped_claim_ids'] == []
+    assert all(u['status'] == 'machine_supported' for u in units)
+
+
+def test_four_or_more_differences_are_not_treated_as_incomplete():
+    class Many(Reviewer):
+        def chat_json(self, messages, task='', **kwargs):
+            if task == 'semantic_cross_review':
+                self.calls.append((task, {}))
+                return {'differences': [
+                    {'claim_ids': ['cl0', 'cl1'], 'reason': 'conflict A'},
+                    {'claim_ids': ['cl2', 'cl3'], 'reason': 'conflict B'},
+                    {'claim_ids': ['cl4', 'cl5'], 'reason': 'conflict C'},
+                    {'claim_ids': ['cl0', 'cl5'], 'reason': 'conflict D'},
+                ]}
+            return super().chat_json(messages, task=task, **kwargs)
+    units = cross_units(6)
+    differences, coverage = reconcile(units, capacity_cfg(), Many())
+    assert len(differences) == 4
+    assert coverage['complete'] is True          # 报满不等于没报完
+    assert all(u['status'] == 'needs_review' for u in units)

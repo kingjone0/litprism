@@ -424,7 +424,7 @@ async function loadPaperDetail() {
       <div data-ppane="analysis">
         <div id="analysisRuns" aria-live="polite"></div>
         ${coverageNote(a._coverage)}
-        ${semanticReviewPanel(a._semantic_review, {kind: 'paper', id: p.id})}
+        ${semanticReviewPanel(a._semantic_review, {kind: 'paper', id: p.id}, a._candidates)}
         ${a._concepts_error ? `<div class="lui-degraded">术语提取未完成：${esc(a._concepts_error)}</div>` : ''}
         ${a._mock ? '<div class="lui-degraded">离线占位模型（mock）：仅演示流程，不构成真实学术解读。配置模型后请重新解读。</div>' : ''}
         ${a._model ? `<div class="source-intro">生成模型：${esc(a._model)}</div>` : ''}
@@ -1766,14 +1766,16 @@ function renderModelSelector() {
     const [pid, mid] = sel.value.split('::');
     if (!pid || !mid) return;
     try {
-      await api(`/api/providers/${encodeURIComponent(pid)}/active`, {
+      const switched = await api(`/api/providers/${encodeURIComponent(pid)}/active`, {
         method: 'POST', body: { model_id: mid },
       });
       S.activeModel = { provider_id: pid, model: mid };
       S.compareKey = null;
       S.status = await api('/api/status');
       if (S.activeConv) await loadInspectorContext();
-      toast(`已切换到 ${mid}`);
+      toast(switched?.capability_refreshed === false
+        ? `已切换到 ${mid}，但没能读取模型能力目录；本次会按固定额度运行`
+        : `已切换到 ${mid}`);
     } catch (e) { toast(e.message, true); }
   };
 }

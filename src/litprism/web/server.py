@@ -83,17 +83,21 @@ def create_app(cfg: Config) -> FastAPI:
         store = ProviderStore(kb, cfg.data_path)
         active, model_id = store.get_active()
         if active is None:
-            return build_llm(cfg)
+            # 真实调用必须显式选模；只有 mock（离线/测试）才允许无提供商运行。
+            if (cfg.llm.provider or '').lower() == 'mock':
+                return build_llm(cfg)
+            raise HTTPException(400, '尚未选择模型：请先在设置里选择提供商与模型，再开始调用。')
         key = store.secrets.get(active.api_key_ref)
         if not model_id:
             raise HTTPException(400, "当前提供商没有选定模型。")
         if not key and urlparse(active.base_url).hostname not in ('localhost', '127.0.0.1', '::1'):
             raise HTTPException(400, "当前提供商的密钥未配置或无法解密，请检查设置。")
         runtime = deepcopy(cfg)
-        apply_active_window(runtime, kb)
+        capability = apply_active_window(runtime, kb, require_active=True)
         client = build_llm_for(runtime, base_url=active.base_url, api_key=key or '', model=model_id, protocol=active.protocol,
                                max_tokens=runtime.llm.max_tokens)
         client.runtime_config = runtime
+        client.capability_missing = capability.get('capability_missing')
         return client
 
     # 静态资源（app.css / app.js）
@@ -1015,8 +1019,17 @@ def create_app(cfg: Config) -> FastAPI:
         model_id = req.get("model_id") or ""
         if not model_id:
             raise HTTPException(400, "model_id 不能为空")
-        ok_ = _provider_store().set_active_model(pid, model_id)
-        return {"ok": ok_}
+        store = _provider_store()
+        ok_ = store.set_active_model(pid, model_id)
+        refreshed = None
+        if ok_:
+            # 选模即尝试刷新一次能力目录：一次拉取后长期本地复用，失败不影响选模。
+            try:
+                store.fetch_models(pid)
+                refreshed = True
+            except Exception:  # noqa: BLE001 - 网络/权限问题不应阻断选模
+                refreshed = False
+        return {"ok": ok_, "capability_refreshed": refreshed}
 
     @app.get("/api/models")
     def models():

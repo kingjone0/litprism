@@ -155,3 +155,59 @@ def test_failed_count_gate_is_not_reported_as_complete(pipeline, monkeypatch):
     assert not result['_coverage']['complete']
     assert result['_coverage']['uncovered_units']
     assert any(not g['passed'] for g in result['_coverage']['gates'])
+
+
+def test_candidates_are_persisted_before_semantic_review(pipeline):
+    """候选陈述必须先落盘，且与复核结果共用同一套确定性 ID。"""
+    cfg, kb, pid, llm, calls, api = pipeline
+    payload = analyze_paper(kb, cfg, llm, pid, force=True, with_concepts=False)
+    candidates = payload['_candidates']
+    assert candidates and all({'id', 'field', 'text', 'batch'} <= set(c) for c in candidates)
+    reviewed = {i['id'] for i in payload['_semantic_review']['items']}
+    assert {c['id'] for c in candidates} == reviewed
+
+
+def test_semantic_review_can_be_skipped_with_candidates_kept(pipeline):
+    """机器复核可关：候选、原文、人工审核入口都要留着。"""
+    cfg, kb, pid, llm, calls, api = pipeline
+    payload = analyze_paper(kb, cfg, llm, pid, force=True, with_concepts=False,
+                            semantic_review=False)
+    assert payload['_semantic_review']['status'] == 'skipped_by_user'
+    assert [c[0] for c in calls if c[0].startswith('semantic_')] == []
+    assert payload['_candidates']
+    # 未跑机器复核时正文保留原始提取，不因"没有 supported"而清空
+    assert payload['key_conclusions'].strip()
+
+
+def test_persistent_run_records_the_skipped_review_option(pipeline):
+    """开关要写进运行清单：关闭复核的运行，记录和结果都必须是"按设置跳过"。"""
+    from litprism.analysis_runs import AnalysisRuns
+    cfg, kb, pid, llm, calls, api = pipeline
+    store = AnalysisRuns(kb)
+    rid = store.create(cfg, llm, pid, None, False, False)['id']
+    done = store.execute(rid, cfg, llm)
+    assert done['semantic_review'] is False
+    assert kb.get_analysis(pid)['payload']['_semantic_review']['status'] == 'skipped_by_user'
+
+
+def test_candidates_are_persisted_before_semantic_review(pipeline):
+    """候选陈述必须先落盘，且与复核结果共用同一套确定性 ID。"""
+    cfg, kb, pid, llm, calls, api = pipeline
+    payload = analyze_paper(kb, cfg, llm, pid, force=True, with_concepts=False)
+    candidates = payload['_candidates']
+    assert candidates and all({'id', 'field', 'text', 'batch'} <= set(c) for c in candidates)
+    reviewed = {i['id'] for i in payload['_semantic_review']['items']}
+    assert {c['id'] for c in candidates} == reviewed
+
+
+def test_semantic_review_can_be_skipped_with_candidates_kept(pipeline):
+    """机器复核可关：候选、原文、人工审核入口都要留着。"""
+    cfg, kb, pid, llm, calls, api = pipeline
+    payload = analyze_paper(kb, cfg, llm, pid, force=True, with_concepts=False,
+                            semantic_review=False)
+    assert payload['_semantic_review']['status'] == 'skipped_by_user'
+    assert [c[0] for c in calls if c[0].startswith('semantic_')] == []
+    assert payload['_candidates']
+    # 未跑机器复核时正文保留原始提取，不因"没有 supported"而清空
+    assert payload['key_conclusions'].strip()
+

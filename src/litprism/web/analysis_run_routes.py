@@ -47,7 +47,8 @@ def register_analysis_runs(app, kb, cfg, task_llm):
             raise HTTPException(404, '论文不存在或已回收。')
         client, run_cfg = task_llm(), copy.deepcopy(cfg)
         try:
-            created = store.create(run_cfg, client, paper['id'], req.get('budgets'), req.get('with_concepts', True))
+            created = store.create(run_cfg, client, paper['id'], req.get('budgets'),
+                                   req.get('with_concepts', True), req.get('semantic_review', True))
         except (ValueError, RunConflict) as exc:
             raise HTTPException(400, str(exc)) from exc
         return schedule(created['id'], client, run_cfg)

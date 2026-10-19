@@ -43,7 +43,8 @@ def register_semantics(app, kb):
                     # 只回被引用的分块，不整篇回传。
                     sources.append({'tag': ref['tag'], 'chunk_id': chunk['id'], 'paper_title': chunk['paper_title'],
                                     'page': chunk['page'], 'section': chunk['section'], 'text': chunk['text']})
-            return {'paper_id': paper['id'], 'analysis_hash': digest, 'report': report, 'reviews': records, 'sources': sources}
+            return {'paper_id': paper['id'], 'analysis_hash': digest, 'report': report, 'reviews': records,
+                    'sources': sources, 'candidates': payload.get('_candidates') or []}
 
     def write(pid, claim_id, req, run=False):
         note, action = req.get('note'), req.get('action')

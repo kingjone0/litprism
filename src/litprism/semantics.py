@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import unicodedata
 from collections import defaultdict
@@ -30,23 +29,6 @@ Return only JSON: {"reviews":[{"id":"exact claim ID","verdict":"supported|contra
 "reason":"brief explanation","evidence":["existing source tag, e.g. P1"]}]}.
 Select source tags; do not reproduce quotations, rewrite the claim, or extract numeric facts.'''
 
-MAX_REVIEW_CALLS = 48
-MAX_REVIEW_INPUT = 6000
-def _cross_call_budget() -> int:
-    """跨批比较的调用上限。默认 40 不变；长论文可用 ``LITPRISM_CROSS_MAX_CALLS`` 显式放宽。
-
-    这是**成本闸门**，不是正确性开关：撞到上限时会明确列出哪些字段没核完，
-    不会把未核对伪装成通过。
-    """
-    try:
-        return max(1, int(os.environ.get('LITPRISM_CROSS_MAX_CALLS', '40')))
-    except ValueError:
-        return 40
-
-
-MAX_CROSS_CALLS = _cross_call_budget()
-# 跨批比较连续撞输出上限几次就放弃剩余比较。单次失败只作废它自己那一对，
-# 不能让整篇连坐（见 reconcile 里的说明）。
 MAX_CROSS_FAILURES = 3
 
 CROSS_SYSTEM = '''Find explicit incompatible assertions among these claims: same subject, metric and conditions,
@@ -55,7 +37,8 @@ Different conditions or metrics are NOT conflicts. Comparable performance does N
 a small performance gap is compatible with "comparable". Do not speculate about unstated contradictions,
 invent missing qualifiers, rewrite claims or select a winner. If compatible or uncertain, return no conflict.
 Return only JSON {"differences":[{"claim_ids":["existing ID1","existing ID2"],"reason":"brief conflict or missing qualification"}]}.
-If none, return {"differences":[]}. Use only supplied IDs. Report at most four pairs.'''
+If none, return {"differences":[]}. Use only supplied IDs. Report every explicit conflict you find;
+do not pad the list and do not repeat the same pair.'''
 
 
 def norm(text):
@@ -194,15 +177,31 @@ def _facts(raw, unit, by_tag):
     return out
 
 
-def _messages(units, by_tag, system=REVIEW_SYSTEM):
-    tags = sorted({t for u in units for t in u['candidate_tags']})
-    sources = [{'tag': t, 'page': by_tag[t].get('page'), 'text': by_tag[t]['text']} for t in tags]
+def _claims_payload(units):
     claims = []
     for u in units:
         claim = {'id': u['id'], 'text': u['text']}
         if u.get('adjacent_tags'):
             claim['adjacent_sources'] = list(u['adjacent_tags'])
         claims.append(claim)
+    return claims
+
+
+def _messages(units, by_tag, system=REVIEW_SYSTEM, prefix=''):
+    """构造复核消息。
+
+    ``prefix`` 是提取阶段同一份全文序列化（``reading.excerpt_text``）。带上它有两个作用：
+    复核不必只看被引片段，能读到上下文；并且与提取共用同一个前缀，才**有机会**命中前缀缓存
+    （是否命中由服务端上报，这里不假定）。
+    """
+    claims = _claims_payload(units)
+    if prefix:
+        tail = '\n\n【待核对陈述】只依据上文原文核对下列陈述，逐条返回 JSON：\n' + json.dumps(
+            {'claims': claims}, ensure_ascii=False)
+        return [{'role': 'system', 'content': system},
+                {'role': 'user', 'content': prefix + tail}]
+    tags = sorted({t for u in units for t in u['candidate_tags']})
+    sources = [{'tag': t, 'page': by_tag[t].get('page'), 'text': by_tag[t]['text']} for t in tags]
     return [{'role': 'system', 'content': system},
             {'role': 'user', 'content': json.dumps({'sources': sources, 'claims': claims}, ensure_ascii=False)}]
 
@@ -211,8 +210,41 @@ def _cost(cfg, messages):
     return sum(Meter(cfg).estimate_message(m) for m in messages)
 
 
-def review_units(units, excerpts, cfg, llm, *, call_budget=None, tracker=None):
+def _capacity_mode(cfg):
+    """模型能力已知（桌面自动额度路径）时为真。"""
+    llm_cfg = getattr(cfg, 'llm', None)
+    return bool(getattr(llm_cfg, 'automatic_output', False) and getattr(llm_cfg, 'model_window_tokens', 0))
+
+
+def _review_capacity(cfg):
+    """复核单次可用输入。
+
+    能力已知 → 按窗口（留 20% 给输出）；未知 → 沿用旧的 6000 上限。
+    旧上限是小证据协议的遗留，不能当成模型窗口的真实边界。
+    """
+    if _capacity_mode(cfg):
+        return int(cfg.llm.model_window_tokens * 0.8)
+    # 能力未知时用配置里的可用窗口，不再叠加 6000 这种"猜出来的"固定上限：
+    # 那是在拿不到窗口的年代留下的经验值，会把本来装得下的证据截掉。
+    return cfg.context.available_tokens
+
+
+def _fulltext_prefix(excerpts, cfg):
+    """提取阶段用过的全文序列化；能力未知时不启用。"""
+    if not excerpts or not _capacity_mode(cfg):
+        return ''
+    from .reading import excerpt_text
+    return excerpt_text(excerpts)
+
+
+def review_units(units, excerpts, cfg, llm, *, tracker=None):
     by_tag = {e['tag']: e for e in merge_fragments(excerpts)}
+    capacity = _capacity_mode(cfg)
+    available = _review_capacity(cfg)
+    prefix = _fulltext_prefix(excerpts, cfg)
+    if prefix and _cost(cfg, _messages([], by_tag, prefix=prefix)) > available:
+        # 全文前缀本身装不下 → 退回候选片段模式；不截断原文蒙混过关。
+        prefix = ''
     groups, current = [], []
     for unit in units:
         if not unit['candidate_tags']:
@@ -221,37 +253,34 @@ def review_units(units, excerpts, cfg, llm, *, call_budget=None, tracker=None):
         if len(unit['candidate_tags']) > 3:
             unit['reason'] = '单条陈述关联超过 3 个来源，未删减证据；请拆分陈述或人工核对。'
             continue
-        # Input fit alone does not bound reasoning/JSON output. Keep reviews small.
-        available = min(cfg.context.available_tokens, MAX_REVIEW_INPUT)
-        if len(current) >= 1 or _cost(cfg, _messages(current+[unit], by_tag)) > available:
-            if current:
+        if _cost(cfg, _messages([unit], by_tag, prefix=prefix)) > available:
+            unit['reason'] = '核查预算不足，未删减证据后冒充已核查。'
+            continue
+        if capacity:
+            # 已知窗口：按内容装，一次核对多条（批量大小由内容决定，不写死条数）。
+            if current and _cost(cfg, _messages(current+[unit], by_tag, prefix=prefix)) > available:
                 groups.append(current)
                 current = []
-            if _cost(cfg, _messages([unit], by_tag)) > available:
-                unit['reason'] = '核查预算不足，未删减证据后冒充已核查。'
-                continue
+        elif current:
+            # 能力未知的旧入口：保持一次一条，不改既有行为。
+            groups.append(current)
+            current = []
         current.append(unit)
     if current:
         groups.append(current)
     from .tasks import checkpoint
     for group_index, group in enumerate(groups):
+        # 只保留**客户端**给的剩余调用数（真实成本约束）；不再有内置调用上限。
         if getattr(llm, 'remaining_calls', 1) <= 0:
             for pending_group in groups[group_index:]:
                 for unit in pending_group:
-                    unit.update(review_error='call_budget', reason='整体调用预算用尽，未调用项待人工核对。')
+                    unit.update(review_error='call_budget', reason='客户端剩余调用数已用尽，未调用项待人工核对。')
             return units
-        if call_budget is not None:
-            if call_budget[0] <= 0:
-                for pending_group in groups[group_index:]:
-                    for unit in pending_group:
-                        unit.update(review_error='call_budget', reason='本次逐条复核调用预算用尽，未调用项待人工核对。')
-                return units
-            call_budget[0] -= 1
         checkpoint('逐条核对陈述与原文')
         from .llm import OutputLimitError
         try:
             from .usage import tracked_json
-            raw = tracked_json(llm, _messages(group, by_tag), task='semantic_review', tracker=tracker)
+            raw = tracked_json(llm, _messages(group, by_tag, prefix=prefix), task='semantic_review', tracker=tracker)
         except OutputLimitError:
             # No blind paid retries. Preserve candidates for explicit human review.
             for pending_group in groups[group_index:]:
@@ -340,14 +369,19 @@ def reconcile(units, cfg, llm, *, tracker=None):
         return [{'role': 'system', 'content': CROSS_SYSTEM},
                 {'role': 'user', 'content': json.dumps({'claims': claims}, ensure_ascii=False)}]
     overhead = _cost(cfg, message([]))
-    limit = (min(cfg.context.available_tokens, MAX_REVIEW_INPUT)-overhead)//2
+    capacity = _capacity_mode(cfg)
+    # 能力已知按窗口的一半装一个 tile（这样两个 tile 一定装得下）；
+    # 能力未知沿用旧的 6000 上限。tile 内条数不再写死为 3。
+    limit = (_review_capacity(cfg) - overhead)//2
+    tile_claim_cap = None if capacity else 3
     def build_tiles(group):
         tiles, current = [], []
         for unit in group:
             if _cost(cfg, message([unit]))-overhead > limit:
                 skipped.append(unit['id'])
                 continue
-            if current and (len(current) >= 3 or _cost(cfg, message(current+[unit]))-overhead > limit):
+            if current and ((tile_claim_cap and len(current) >= tile_claim_cap)
+                            or _cost(cfg, message(current+[unit]))-overhead > limit):
                 tiles.append(current)
                 current = []
             current.append(unit)
@@ -380,7 +414,7 @@ def reconcile(units, cfg, llm, *, tracker=None):
     for field, group in ordered:
         tiles = build_tiles(group)
         total_tiles += len(tiles)
-        if output_limited or calls >= MAX_CROSS_CALLS:
+        if output_limited or getattr(llm, 'remaining_calls', 1) <= 0:
             skipped.extend(u['id'] for u in group)
             pending_fields.append(field)
             continue
@@ -399,11 +433,11 @@ def reconcile(units, cfg, llm, *, tracker=None):
             pair = first if i == j else first+tiles[j]
             if len(pair) < 2:
                 continue
-            if output_limited or calls >= MAX_CROSS_CALLS or getattr(llm, 'remaining_calls', 1) <= 0:
+            if output_limited or getattr(llm, 'remaining_calls', 1) <= 0:
                 skipped.extend(u['id'] for u in pair)
                 continue
             checkpoint('核对全文陈述间的差异与限定')
-            if _cost(cfg, message(pair)) > min(cfg.context.available_tokens, MAX_REVIEW_INPUT):
+            if _cost(cfg, message(pair)) > _review_capacity(cfg):
                 skipped.extend(u['id'] for u in pair)
                 continue
             from .llm import OutputLimitError
@@ -426,7 +460,7 @@ def reconcile(units, cfg, llm, *, tracker=None):
             items = raw.get('differences') if isinstance(raw, dict) else None
             if not isinstance(items, list):
                 raise ValueError('跨批核查没有返回有效差异列表，未标记完成。')
-            if len(items) >= 4:
+            if not capacity and len(items) >= 4:
                 # Hitting the requested result cap might hide further conflicts.
                 skipped.extend(u['id'] for u in pair)
             allowed = {u['id'] for u in pair}
@@ -446,7 +480,7 @@ def reconcile(units, cfg, llm, *, tracker=None):
         if by_id[cid]['status'] == 'machine_supported':
             by_id[cid]['status'] = 'needs_review'
             by_id[cid]['reason'] = '存在全文差异候选或跨批核查未覆盖，请人工核对。'
-    return differences, {'complete': not skipped, 'skipped_claim_ids': sorted(set(skipped)), 'max_calls': MAX_CROSS_CALLS,
+    return differences, {'complete': not skipped, 'skipped_claim_ids': sorted(set(skipped)), 'max_calls': None,
                          'tiles': total_tiles, 'calls': calls, 'method': 'by_field_tile_pairs',
                          'fields_done': sorted(set(done_fields)), 'fields_pending': sorted(set(pending_fields)),
                          'pairs_attempted': planned,
@@ -474,14 +508,15 @@ def _run_review(fields_by_batch, excerpts, cfg, llm, tracker):
                 'note': '此模型未运行语义核查；引用存在不等于语义正确。'}
     units = []
     limited = False
-    call_budget = [MAX_REVIEW_CALLS]
+    # 不再有内置复核次数上限：批量由窗口与内容决定，成本约束只来自客户端 remaining_calls。
+
     for batch, (fields, sources) in enumerate(fields_by_batch, 1):
         items = make_units(fields, sources, batch)
         if limited:
             for item in items:
                 item.update(review_error='output_limit', reason='前批复核耗尽预算，后续复核已停止；待人工核对。')
         else:
-            review_units(items, sources, cfg, llm, call_budget=call_budget, tracker=tracker)
+            review_units(items, sources, cfg, llm, tracker=tracker)
         limited |= any(i.get('review_error') == 'output_limit' for i in items)
         units.extend(items)
     if limited:
@@ -490,14 +525,15 @@ def _run_review(fields_by_batch, excerpts, cfg, llm, tracker):
                 unit.update(status='needs_review', reason='整体差异核查未完成，待人工核对。')
         differences = []
         coverage = {'complete': False, 'skipped_claim_ids': [u['id'] for u in units],
-                    'method': 'not_run_due_review_output_limit', 'calls': 0, 'max_calls':MAX_CROSS_CALLS, 'tiles':0}
+                    'method': 'not_run_due_review_output_limit', 'calls': 0, 'max_calls': None, 'tiles':0}
     else:
         differences, coverage = reconcile(units, cfg, llm, tracker=tracker)
     pending = sum(u['status'] != 'machine_supported' for u in units)
     return {'version': 2, 'protocol': 'source_selection', 'status': ('needs_review' if pending else 'machine_supported') if units else 'no_claims',
             'passed': bool(units) and not pending and coverage['complete'], 'items': units, 'differences': differences,
             'coverage': coverage, 'supported': len(units)-pending, 'pending': pending,
-            'review_calls': MAX_REVIEW_CALLS-call_budget[0], 'max_review_calls': MAX_REVIEW_CALLS,
+            'review_calls': (tracker.per_task.get('semantic_review') or {}).get('calls', 0),
+            'max_review_calls': None,
             'note': ('复核输出/推理预算耗尽，整体语义核查未完成；候选陈述待人工审核。' if limited else
                      '全文差异核查未完成，不能视为整体通过；候选陈述待人工审核。' if not coverage['complete'] else
                      '机器证据核查，不等于人工确认；差异保留双方来源，不自动统一。')}
