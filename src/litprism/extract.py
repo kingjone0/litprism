@@ -62,9 +62,10 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     require_citable(paper.get('verify_level'))
     if not force:
         cached = kb.get_analysis(paper_id)
-        if cached and cached.get('payload'):
+        if cached and cached.get('payload') and cached.get('material_current'):
             return cached['payload']
     chunks = kb.get_chunks(paper_id)
+    material_id = chunks[0]['material_id'] if chunks else None
     if sum(len(c['text']) for c in chunks) < 150:
         raise ValueError('正文过少，无法解读；扫描件需先转写。')
 
@@ -230,7 +231,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     merged['field_notes'] = ('本次未获得可校验依据的字段：'+'、'.join(missing_fields)+'。请核对原文，不能据此断言全文未提及。') if missing_fields else '所有展示字段均保留本批原文引用；内容仍需结合原文核对。'
     merged['_coverage'] = coverage
     from .db import material_label, material_rank
-    level = (paper.get('material_level') or 'unknown')
+    material = next((m for m in kb.list_materials(paper_id) if m['id'] == material_id), {})
+    level = material.get('level') or 'unknown'
     coverage['material_level'] = level
     coverage['material_label'] = material_label(level)
     if material_rank(level) < material_rank('fulltext'):
@@ -267,11 +269,14 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     from .evidence import stored_excerpts
     stored_excerpts(kb, merged['_citations'])
     with kb.tx() as con:
+        if (kb.get_paper(paper_id) or {}).get('current_material_id') != material_id:
+            from .materials import MaterialChanged
+            raise MaterialChanged('解读期间原文材料已变化；保留旧分析，请对当前版本重新解读。')
         if finalize is not None:
             finalize(merged)
         con.execute('DELETE FROM concepts WHERE paper_id=?', (paper_id,))
         kb.add_concepts(paper_id, merged['concepts'])
-        kb.save_analysis(paper_id, merged, model=merged['_model'])
+        kb.save_analysis(paper_id, merged, model=merged['_model'], material_id=material_id)
     return merged
 
 
@@ -381,7 +386,7 @@ def analyze_all(
     for i, p in enumerate(papers, 1):
         if progress:
             progress(i, len(papers), truncate(p["title"], 50))
-        if not force and kb.get_analysis(p["id"]):
+        if not force and (kb.get_analysis(p['id']) or {}).get('material_current'):
             results.append((p["id"], "skipped"))
             continue
         try:
@@ -483,6 +488,8 @@ def export_notes(kb: KnowledgeBase, cfg: Config, paper_id: str | None = None) ->
         analysis = kb.get_analysis(p["id"])
         if not analysis:
             continue
+        if not analysis.get('material_current'):
+            raise ValueError('分析基于旧材料或未绑定材料，请重新解读当前原文后导出。')
         analysis = dict(analysis.get("payload") or analysis)
         from .deliverables import Deliverable, DeliverableStore
         if not (analysis.get('_citation_check') or {}).get('passed'):

@@ -10,8 +10,8 @@
 | 拒绝率 | 拒绝 / 已审核 | 机器说错了 |
 | 可用率 | (逐字 + 修正) / 已审核 | 人工处理后能用的比例 |
 
-**召回（漏提）当前无法测量** —— 审核界面没有"补一条机器没提到的陈述"的入口。
-这里如实显示 `n/a`，不用任何代理指标冒充。
+**真实召回率尚不可测量**：人工补录只记录已经发现的遗漏，不能证明全部遗漏已采集。
+已采集漏提占比用于描述样本，不冒充真实召回率；接口旧键 recall 保留兼容。
 
 用法::
 
@@ -51,9 +51,10 @@ def collect(kb) -> list[dict]:
         pid = r["paper_id"]
         payload = json.loads(r["payload"]) if isinstance(r["payload"], str) else (r["payload"] or {})
         report = payload.get("_semantic_review") or {}
-        if not report.get("items"):
-            continue
         digest = _payload_hash(payload)
+        manual = _manual(kb, pid, digest)
+        if not report.get('items') and not manual:
+            continue
         reviews = [dict(x) for x in kb._con.execute(
             "SELECT * FROM semantic_reviews WHERE paper_id=? AND analysis_hash=? ORDER BY rowid",
             (pid, digest)).fetchall()]
@@ -62,7 +63,7 @@ def collect(kb) -> list[dict]:
             "source": "paper", "id": pid,
             "title": paper.get("display_title") or paper.get("title") or pid,
             "report": report, "reviews": reviews,
-            "manual": _manual(kb, pid, digest),
+            "manual": manual,
         })
 
     # 2) 独立的核查运行
@@ -86,7 +87,7 @@ def _payload_hash(payload: dict) -> str:
 
 
 def _manual(kb, paper_id: str, digest: str) -> list[dict]:
-    """人工补录（N05）。没有补录时返回空列表，召回仍显示 n/a。"""
+    """人工补录（N05）。没有补录时返回空列表，已采集漏提占比仍显示 n/a。"""
     try:
         from litprism.manual_claims import list_claims
 
@@ -107,7 +108,9 @@ def _pct(a: int, b: int) -> str:
 
 
 def report_row(row: dict) -> str:
-    per_field = aggregate(row)
+    from litprism.quality import summarize
+    summary = summarize(row['report'], row['reviews'], row.get('manual'))
+    per_field = {f['field']: f for f in summary['fields']}
     lines = [f"\n■ {row['title']}  ({row['source']}:{row['id']})"]
 
     hdr = f"  {'字段':<10}{'陈述':>5}{'已审':>5}{'逐字':>5}{'修正':>5}{'拒绝':>5}{'逐字精度':>9}{'可用率':>8}{'复核覆盖':>9}"
@@ -133,15 +136,15 @@ def report_row(row: dict) -> str:
         f"{_pct(tot['reviewed'], tot['total']):>9}"
     )
     manual = row.get("manual") or []
-    machine = len((row["report"].get("items") or []))
-    if manual:
+    machine = summary['totals']['total']
+    if summary['totals']['recall'] is not None:
         total = machine + len(manual)
         lines.append(
-            f"  召回（漏提）：人工补录 {len(manual)} 条 / 机器 {machine} 条 → "
-            f"{len(manual) / total * 100:.0f}%（分母 {total}）"
+            f"  已采集漏提占比（漏提）：人工补录 {len(manual)} 条 / 机器 {machine} 条 → "
+            f"{summary['totals']['recall'] * 100:.0f}%（分母 {total}）"
         )
     else:
-        lines.append("  召回（漏提）：n/a —— 尚未有人工补录，不等于 0")
+        lines.append('  已采集漏提占比：n/a —— ' + summary['note'])
     if tot["reviewed"] == 0:
         lines.append("  ⚠️ 尚无人工审核记录：上面的覆盖为 0，指标不可用。")
     return "\n".join(lines)

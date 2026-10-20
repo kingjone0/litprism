@@ -15,12 +15,13 @@ from pathlib import Path
 
 from .evidence import require_citable
 from .knowledge import now
+from .materials import MaterialChanged
 from .semantics import payload_hash
 from .usage import UsageTracker
 
 # 阶段调用预算已取消：保留字段只为兼容旧记录与用量展示，0 表示不限制。
 DEFAULT_BUDGETS = {'extract': 0, 'concepts': 0, 'semantic_review': 0, 'semantic_cross_review': 0}
-PIPELINE_VERSION = 'analysis-journal-v1'
+PIPELINE_VERSION = 'analysis-journal-v2-materials'
 
 
 class RunStopped(RuntimeError):
@@ -75,7 +76,7 @@ def binding(kb, cfg, client, pid, with_concepts, semantic_review=True):
     cfg = copy.deepcopy(getattr(client, 'runtime_config', cfg))
     apply_active_window(cfg, kb)
     chunks = kb.get_chunks(pid)
-    source = {'paper': {k: paper.get(k) for k in ('id', 'title', 'authors', 'year', 'abstract', 'doi', 'url')},
+    source = {'paper': {k: paper.get(k) for k in ('id', 'title', 'authors', 'year', 'abstract', 'doi', 'url', 'current_material_id', 'material_level')},
               'chunks': [{k: c.get(k) for k in ('id', 'page', 'section', 'text')} for c in chunks]}
     settings = getattr(client, 'cfg', cfg.llm)
     # Persist hashes of complete endpoint/settings; never plaintext credentials.
@@ -225,7 +226,7 @@ class AnalysisRuns:
             try:
                 current, cfg = binding(self.kb, cfg, client, row['paper_id'], original['with_concepts'],
                                    original.get('semantic_review', True))
-            except RunConflict:
+            except (RunConflict, MaterialChanged):
                 self.update(rid, status='stale', stop_reason='来源不存在、已回收或不可引用；需重新核对来源。')
                 raise
             if current != original or _analysis_hash(self.kb, row['paper_id']) != row['analysis_hash']:
@@ -256,7 +257,7 @@ class AnalysisRuns:
             except TaskCancelled:
                 self.update(rid, status='cancelled', stop_reason='已取消；已完成请求保留，恢复时精确复用。')
                 raise
-            except RunConflict:
+            except (RunConflict, MaterialChanged):
                 self.update(rid, status='stale', stop_reason='运行期间来源、分析版本或恢复请求不一致；未发布结果。')
             except Exception as exc:
                 self.update(rid, status='failed', stop_reason='运行停止：'+type(exc).__name__+'；原解读保留。')

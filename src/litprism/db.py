@@ -21,6 +21,7 @@ import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,15 @@ def _j(value: Any, default: Any) -> Any:
         except json.JSONDecodeError:
             return default
     return value
+
+
+def _locked(method):
+    """Reads of a shared SQLite connection must serialize with its transactions."""
+    @wraps(method)
+    def read(self, *args, **kwargs):
+        with self._tx_lock:
+            return method(self, *args, **kwargs)
+    return read
 
 
 MATERIAL_LEVELS = ('unknown', 'metadata', 'abstract', 'partial', 'fulltext')
@@ -223,6 +233,7 @@ class KnowledgeBase:
         with self.tx() as con:
             con.execute(f"UPDATE papers SET {', '.join(sets)} WHERE id = ?", vals)
 
+    @_locked
     def get_paper(self, paper_id: str) -> dict | None:
         row = self._con.execute("SELECT * FROM papers WHERE id = ? AND deleted_at IS NULL", (paper_id,)).fetchone()
         return self._row_to_paper(row) if row else None
@@ -312,37 +323,91 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     # 分块
     # ------------------------------------------------------------------
-    def add_chunks(self, paper_id: str, chunks: list[dict]) -> int:
-        """chunks: [{text, page, section}]"""
+    def add_chunks(self, paper_id: str, chunks: list[dict], *, policy: str = 'replace',
+                   source: str | None = None, origin: str | None = None,
+                   level: str | None = None, full_text: str | None = None) -> int:
+        """Save one complete material snapshot; repeated identical imports are idempotent.
+
+        keep_both retains the preceding material as a named alternative; default
+        reading still uses exactly one material. Lower-level imports stay archived.
+        """
+        from .materials import content_hash
+        if policy not in ('replace', 'keep_both'):
+            raise ValueError('材料策略必须为 replace 或 keep_both。')
+        clean = [dict(c, text=(c.get('text') or '').strip()) for c in chunks if (c.get('text') or '').strip()]
+        if not clean:
+            raise ValueError('没有可保存的原文块；保留现有材料。')
         with self.tx() as con:
-            for c in chunks:
-                text = (c.get("text") or "").strip()
-                if not text:
-                    continue
+            paper = self.get_paper(paper_id)
+            if not paper:
+                raise ValueError('文献不存在。')
+            level = level or paper.get('material_level') or 'unknown'
+            if level not in MATERIAL_LEVELS:
+                raise ValueError('未知材料完整度。')
+            digest = content_hash(clean)
+            existing = con.execute('SELECT * FROM materials WHERE paper_id=? AND content_hash=?',
+                                   (paper_id, digest)).fetchone()
+            current = con.execute('SELECT * FROM materials WHERE id=?', (paper.get('current_material_id'),)).fetchone()
+            # Retrying an archived import must never silently roll back the current text.
+            if existing:
+                if material_rank(level) > material_rank(existing['level']):
+                    con.execute('UPDATE materials SET level=? WHERE id=?', (level, existing['id']))
+                if material_rank(level) > material_rank(paper.get('material_level')):
+                    con.execute('UPDATE papers SET material_level=? WHERE id=?', (level, paper_id))
+                return len(self.get_chunks(paper_id, material_id=existing['id']))
+            mid = _new_id('mat_')
+            activate = current is None or material_rank(level) >= material_rank(current['level'])
+            con.execute('INSERT INTO materials VALUES (?,?,?,?,?,?,?,?)',
+                        (mid, paper_id, source or paper['source'], origin or paper.get('origin'),
+                         digest, _now(), level, 'current' if activate else 'retained'))
+            for c in clean:
+                text = c['text']
                 cid = c.get("id") or _new_id("c_")
+                # A supplied ID may already refer to another immutable snapshot.
+                if con.execute('SELECT 1 FROM chunks WHERE id=?', (cid,)).fetchone():
+                    raise ValueError('原文块 ID 已存在，不能覆盖历史材料。')
                 cur = con.execute(
-                    "INSERT OR IGNORE INTO chunks (id, paper_id, page, section, text) VALUES (?,?,?,?,?)",
-                    (cid, paper_id, c.get("page"), c.get("section"), text),
+                    "INSERT INTO chunks (id, paper_id, page, section, text, material_id) VALUES (?,?,?,?,?,?)",
+                    (cid, paper_id, c.get("page"), c.get("section"), text, mid),
                 )
                 if cur.rowcount:
                     con.execute(
                         "INSERT INTO chunks_fts (rowid, seg_text) VALUES (?, ?)",
                         (cur.lastrowid, cjk_segment(text)),
                     )
-        return self.count_chunks(paper_id)
+            if activate:
+                if current:
+                    con.execute('UPDATE materials SET status=? WHERE id=?',
+                                ('retained' if policy == 'keep_both' else 'superseded', current['id']))
+                con.execute('UPDATE papers SET current_material_id=?, full_text=?, updated_at=? WHERE id=?',
+                            (mid, full_text if full_text is not None else '\n\n'.join(c['text'] for c in clean), _now(), paper_id))
+            if material_rank(level) > material_rank(paper.get('material_level')):
+                con.execute('UPDATE papers SET material_level=? WHERE id=?', (level, paper_id))
+        return len(clean)
 
+    @_locked
+    def list_materials(self, paper_id: str) -> list[dict]:
+        return [dict(r) for r in self._con.execute(
+            'SELECT m.*, (SELECT COUNT(*) FROM chunks c WHERE c.material_id=m.id) AS chunks '
+            'FROM materials m WHERE paper_id=? ORDER BY m.rowid DESC', (paper_id,))]
+
+    @_locked
     def count_chunks(self, paper_id: str | None = None) -> int:
         if paper_id:
-            row = self._con.execute("SELECT COUNT(*) n FROM chunks WHERE paper_id = ?", (paper_id,)).fetchone()
+            row = self._con.execute("SELECT COUNT(*) n FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.paper_id=? AND c.material_id=p.current_material_id", (paper_id,)).fetchone()
         else:
-            row = self._con.execute("SELECT COUNT(*) n FROM chunks").fetchone()
+            row = self._con.execute("SELECT COUNT(*) n FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.material_id=p.current_material_id").fetchone()
         return int(row["n"])
 
-    def get_chunks(self, paper_id: str, limit: int | None = None) -> list[dict]:
-        sql = "SELECT id, paper_id, page, section, text FROM chunks WHERE paper_id = ? ORDER BY rowid"
+    @_locked
+    def get_chunks(self, paper_id: str, limit: int | None = None, *, material_id: str | None = None) -> list[dict]:
+        if material_id is None:
+            paper = self.get_paper(paper_id)
+            material_id = (paper or {}).get('current_material_id')
+        sql = "SELECT id, paper_id, page, section, text, material_id FROM chunks WHERE paper_id=? AND material_id=? ORDER BY rowid"
         if limit:
             sql += f" LIMIT {int(limit)}"
-        return [dict(r) for r in self._con.execute(sql, (paper_id,)).fetchall()]
+        return [dict(r) for r in self._con.execute(sql, (paper_id, material_id)).fetchall()]
 
     def search_chunks(
         self, query: str, *, paper_ids: list[str] | None = None, top_k: int = 8
@@ -370,7 +435,7 @@ class KnowledgeBase:
             "       bm25(chunks_fts) AS raw_score",
             "FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid",
             "JOIN papers p ON p.id = c.paper_id",
-            "WHERE chunks_fts MATCH ? AND p.deleted_at IS NULL",
+            "WHERE chunks_fts MATCH ? AND p.deleted_at IS NULL AND c.material_id=p.current_material_id",
         ]
         vals: list[Any] = [match]
         if paper_ids:
@@ -398,7 +463,7 @@ class KnowledgeBase:
         vals: list[Any] = [f"%{t}%" for t in terms]
         sql = (
             "SELECT c.id, c.paper_id, c.page, c.section, c.text, p.title AS paper_title,"
-            " p.year AS paper_year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL AND (" + conds + ")"
+            " p.year AS paper_year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL AND c.material_id=p.current_material_id AND (" + conds + ")"
         )
         if paper_ids:
             sql += f" AND c.paper_id IN ({','.join('?' * len(paper_ids))})"
@@ -410,12 +475,33 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     # 结构化解读
     # ------------------------------------------------------------------
-    def save_analysis(self, paper_id: str, data: dict, model: str = "") -> None:
+    def save_analysis(self, paper_id: str, data: dict, model: str = "", *, material_id: str | None = None) -> None:
         with self.tx() as con:
+            import hashlib
+            payload = json.dumps(data, ensure_ascii=False)
+            refs = data.get('_citations') or []
+            mids = set()
+            for ref in refs:
+                row = con.execute('SELECT material_id FROM chunks WHERE id=? AND paper_id=?',
+                                  (ref.get('chunk_id'), paper_id)).fetchone()
+                if row:
+                    mids.add(row['material_id'])
+            if len(mids) > 1:
+                raise ValueError('分析引用混用了多个材料版本。')
+            material_id = material_id or (next(iter(mids)) if mids else (self.get_paper(paper_id) or {}).get('current_material_id'))
+            if mids and mids != {material_id}:
+                raise ValueError('分析与引用的材料版本不一致。')
+            if material_id and not con.execute('SELECT 1 FROM materials WHERE id=? AND paper_id=?', (material_id, paper_id)).fetchone():
+                raise ValueError('分析材料不属于该论文。')
+            previous = con.execute('SELECT * FROM analyses WHERE paper_id=?', (paper_id,)).fetchone()
+            if previous:
+                archive_id = 'av_' + hashlib.sha256((paper_id + '\n' + str(previous['material_id']) + '\n' + previous['payload']).encode()).hexdigest()
+                con.execute('INSERT OR IGNORE INTO analysis_versions VALUES (?,?,?,?,?,?)',
+                            (archive_id, paper_id, previous['material_id'], previous['payload'], previous['model'], previous['created_at']))
             con.execute(
                 """INSERT INTO analyses (paper_id, research_question, methodology, experiment_design,
-                        key_conclusions, innovations, limitations, field, keywords, payload, model, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        key_conclusions, innovations, limitations, field, keywords, payload, model, created_at, material_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(paper_id) DO UPDATE SET
                         research_question=excluded.research_question,
                         methodology=excluded.methodology,
@@ -427,7 +513,8 @@ class KnowledgeBase:
                         keywords=excluded.keywords,
                         payload=excluded.payload,
                         model=excluded.model,
-                        created_at=excluded.created_at""",
+                        created_at=excluded.created_at,
+                        material_id=excluded.material_id""",
                 (
                     paper_id,
                     data.get("research_question"), data.get("methodology"),
@@ -435,17 +522,23 @@ class KnowledgeBase:
                     data.get("innovations"), data.get("limitations"),
                     data.get("field"),
                     json.dumps(data.get("keywords", []), ensure_ascii=False),
-                    json.dumps(data, ensure_ascii=False), model, _now(),
+                    payload, model, _now(), material_id,
                 ),
             )
 
-    def get_analysis(self, paper_id: str) -> dict | None:
-        row = self._con.execute("SELECT * FROM analyses WHERE paper_id = ?", (paper_id,)).fetchone()
+    @_locked
+    def get_analysis(self, paper_id: str, *, version_id: str | None = None) -> dict | None:
+        if version_id:
+            row = self._con.execute('SELECT * FROM analysis_versions WHERE paper_id=? AND id=?', (paper_id, version_id)).fetchone()
+        else:
+            row = self._con.execute("SELECT * FROM analyses WHERE paper_id = ?", (paper_id,)).fetchone()
         if not row:
             return None
         d = dict(row)
         d["keywords"] = _j(d.get("keywords"), [])
         d["payload"] = _j(d.get("payload"), {})
+        paper = self.get_paper(paper_id) or {}
+        d['material_current'] = bool(d.get('material_id') and d['material_id'] == paper.get('current_material_id'))
         return d
 
     # ------------------------------------------------------------------
@@ -650,6 +743,7 @@ class KnowledgeBase:
             )
 
     # ------------------------------------------------------------------
+    @_locked
     def stats(self) -> dict:
         con = self._con
         total = con.execute("SELECT COUNT(*) n FROM papers WHERE deleted_at IS NULL").fetchone()["n"]
@@ -663,7 +757,7 @@ class KnowledgeBase:
         }
         return {
             "papers": total,
-            "chunks": con.execute("SELECT COUNT(*) n FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
+            "chunks": con.execute("SELECT COUNT(*) n FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL AND c.material_id=p.current_material_id").fetchone()["n"],
             "analyses": con.execute("SELECT COUNT(*) n FROM analyses a JOIN papers p ON p.id=a.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
             "concepts": con.execute("SELECT COUNT(*) n FROM concepts c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL").fetchone()["n"],
             "relations": con.execute('SELECT COUNT(*) n FROM relations r JOIN papers a ON a.id=r.paper_a JOIN papers b ON b.id=r.paper_b WHERE a.deleted_at IS NULL AND b.deleted_at IS NULL').fetchone()['n'],

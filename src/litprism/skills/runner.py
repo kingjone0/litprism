@@ -268,7 +268,7 @@ class SkillRunner:
             if self.kb.get_paper(str(pid)) is None:
                 return []
             a = self.kb.get_analysis(str(pid))
-            return [a] if a else []
+            return [a] if a and a.get('material_current') else []
 
         if cap == "list_collections":
             rows = self.kb._con.execute(
@@ -301,6 +301,8 @@ class SkillRunner:
             out = []
             for pid in ids:
                 a = self.kb.get_analysis(str(pid))
+                if a and not a.get('material_current'):
+                    a = None
                 p = self.kb.get_paper(str(pid))
                 if p and (scope is None or pid in scope):
                     out.append({"paper": p, "analysis": a})

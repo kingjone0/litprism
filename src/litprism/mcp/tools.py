@@ -223,6 +223,8 @@ class LitPrismTools:
                 if p is None:
                     return _err(f"未找到论文 {pid}")
                 a = self.kb.get_analysis(pid) or {}
+                if a and not a.get('material_current'):
+                    return _err('包含基于旧材料或未绑定材料的分析，请重新解读后再比较。')
                 rows.append(
                     {
                         "paper_id": pid,
@@ -350,6 +352,8 @@ class LitPrismTools:
         ]
         if p.get("doi"):
             lines.append(f"- DOI：{p['doi']}")
+        if a and not a.get('material_current'):
+            lines += ['', '> 此分析基于旧材料或未绑定材料，不代表当前原文。']
         for key, label in (
             ("research_question", "研究问题"),
             ("methodology", "方法"),
@@ -389,6 +393,7 @@ def _analysis_brief(a: dict | None) -> dict | None:
         for k in (
             "research_question", "methodology", "experiment_design",
             "key_conclusions", "innovations", "limitations", "field",
+            'material_id', 'material_current',
         )
     }
 

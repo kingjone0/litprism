@@ -13,7 +13,7 @@ from ..quality import summarize
 from ..semantics import payload_hash
 
 
-def snapshot(kb, pid, run=False):
+def snapshot(kb, pid, run=False, version_id=None):
     if run:
         row = kb._con.execute('SELECT * FROM semantic_runs WHERE id=?', (pid,)).fetchone()
         if row is None:
@@ -24,7 +24,10 @@ def snapshot(kb, pid, run=False):
         paper = kb.resolve_paper(pid)
         if not paper or paper.get('deleted_at'):
             raise HTTPException(404, '文献不存在或已移入回收站。')
-        payload = ((kb.get_analysis(paper['id']) or {}).get('payload') or {})
+        analysis = kb.get_analysis(paper['id'], version_id=version_id) or {}
+        if version_id and not analysis:
+            raise HTTPException(404, '历史分析不存在。')
+        payload = analysis.get('payload') or {}
     digest = payload_hash(payload)
     report = payload.get('_semantic_review') or {}
     column = 'run_id' if run else 'paper_id'
@@ -34,9 +37,9 @@ def snapshot(kb, pid, run=False):
 
 
 def register_semantics(app, kb):
-    def read(pid, run=False):
+    def read(pid, run=False, version_id=None):
         with kb._tx_lock:
-            paper, payload, digest, report, records = snapshot(kb, pid, run)
+            paper, payload, digest, report, records = snapshot(kb, pid, run, version_id)
             sources = []
             for ref in payload.get('_citations') or []:
                 chunk = kb._con.execute('SELECT c.*, p.title AS paper_title FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.id=?', (ref.get('chunk_id'),)).fetchone()
@@ -48,7 +51,9 @@ def register_semantics(app, kb):
             # 人工补录：机器漏提的陈述。与机器陈述分开返回 —— 一个是采集，一个是复核。
             manual = [] if run else list_claims(kb, paper['id'], digest)
             machine = len(report.get('items') or [])
+            analysis = {} if run else (kb.get_analysis(paper['id'], version_id=version_id) or {})
             return {'paper_id': paper['id'], 'analysis_hash': digest, 'report': report, 'reviews': records,
+                    'material_id': analysis.get('material_id'), 'material_current': analysis.get('material_current'),
                     'sources': sources, 'candidates': payload.get('_candidates') or [],
                     'manual': manual, 'recall': recall(machine, len(manual))}
 
@@ -107,8 +112,8 @@ def register_semantics(app, kb):
         return {'ok': True, 'knowledge_id': source_id, 'analysis_hash': digest}
 
     @app.get('/api/paper/{pid}/semantic')
-    def detail(pid: str):
-        return read(pid)
+    def detail(pid: str, version_id: str | None = None):
+        return read(pid, version_id=version_id)
 
     @app.get('/api/paper/{pid}/quality')
     def quality(pid: str):

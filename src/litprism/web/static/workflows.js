@@ -578,6 +578,7 @@ async function loadEvidenceDetail(ref) {
     const canReview = d.source_kind !== 'paper' || (!d.citable && d.trust_level !== 'deleted');
     box.innerHTML = `<button class="btn sm" id="btnSourceBack">查看本轮其他来源</button><h3>${esc(d.title || d.paper_title)}</h3>
       <div class="source-intro">${esc(kind)} · ${esc(trustLabel(d.trust_level))} · ${d.page == null ? '无页码' : '第 '+esc(d.page)+' 页'}</div>
+      ${d.material ? `<p class="source-intro">${d.material.status === 'current' ? '当前材料' : '历史材料'} · ${esc(d.material.imported_at)} · 原引用仍指向这份材料。</p>` : ''}
       ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">打开原始来源 ↗</a><p class="source-url">${esc(url)}</p>` : '<p class="source-intro">来源：本地文献或用户提供的知识</p>'}
       ${d.doi ? `<p>DOI：${esc(d.doi)}</p>` : ''}
       ${d.authors ? `<p>作者：${esc(Array.isArray(d.authors) ? d.authors.join('、') : d.authors)}</p>` : ''}

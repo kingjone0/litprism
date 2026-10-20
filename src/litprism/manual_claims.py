@@ -3,13 +3,13 @@
 为什么需要它
 ------------
 审核界面只有「确认 / 修正 / 拒绝 / 撤销」四个动作，全部作用于**机器已经提出**的陈述。
-所以无论人审多少遍，都产生不了"机器漏了什么"的信号 —— 召回一直是 n/a。
+所以无论人审多少遍，都产生不了"机器漏了什么"的信号 —— 已采集漏提占比一直是 n/a。
 
 补录把这个信号补上：人从原文指出一条机器没提的陈述，系统记账。
 
 口径
 ----
-    召回 = 人工补录数 / (机器陈述数 + 人工补录数)
+    已采集漏提占比 = 人工补录数 / (机器陈述数 + 人工补录数)
 
 这个比例只在**有人真的去补**时才有意义，所以未采集时一律返回 ``None``（界面显示 n/a），
 绝不用 0 冒充。同时必须同时给出**绝对数** —— 只看比例会诱导"少补 = 指标好看"。
@@ -81,7 +81,7 @@ def validate(kb, paper_id: str, req: dict) -> dict:
 
     quote = (req.get('quote') or '').strip()
     if not quote:
-        raise ClaimRejected('请从原文中选出一段作为依据；没有依据的补录不计入召回。')
+        raise ClaimRejected('请从原文中选出一段作为依据；没有依据的补录不计入已采集漏提占比。')
     if len(quote) > MAX_QUOTE:
         raise ClaimRejected(f'引用过长（上限 {MAX_QUOTE} 字）。')
 
@@ -89,12 +89,15 @@ def validate(kb, paper_id: str, req: dict) -> dict:
     if not chunk_id:
         raise ClaimRejected('请指定这段引用来自哪个原文块。')
     row = kb._con.execute(
-        'SELECT id, paper_id, page, text FROM chunks WHERE id=?', (chunk_id,)
+        'SELECT id, paper_id, page, text, material_id FROM chunks WHERE id=?', (chunk_id,)
     ).fetchone()
     if row is None:
         raise ClaimRejected('原文块不存在，可能已被重新导入。', status=409)
     if row['paper_id'] != paper_id:
         raise ClaimRejected('该原文块不属于这篇论文。')
+    analysis = kb.get_analysis(paper_id)
+    if analysis and analysis.get('material_id') != row['material_id']:
+        raise ClaimRejected('原文块与当前分析的材料版本不一致，请选择该分析对应的原文。', status=409)
 
     if normalize_text(quote) not in normalize_text(row['text']):
         raise ClaimRejected(
@@ -155,7 +158,7 @@ def list_claims(kb, paper_id: str, analysis_hash: str) -> list[dict]:
 
 
 def delete(kb, paper_id: str, analysis_hash: str, claim_id: str) -> bool:
-    """删除一条补录。写错了必须能撤回，否则它会永久留在召回分母里。"""
+    """删除一条补录。写错了必须能撤回，否则它会永久留在已采集漏提占比分母里。"""
     with kb.tx() as con:
         cur = con.execute(
             'DELETE FROM manual_claims WHERE id=? AND paper_id=? AND analysis_hash=?',
@@ -165,11 +168,11 @@ def delete(kb, paper_id: str, analysis_hash: str, claim_id: str) -> bool:
 
 
 def recall(machine: int, manual: int) -> dict:
-    """召回统计。
+    """已采集漏提占比统计。
 
     只在**两边都有数**时才给比例：
 
-    * 没有补录 → 还没人去补，不等于召回 0%；
+    * 没有补录 → 还没人去补，不等于已采集漏提占比 0%；
     * 机器没有陈述 → 没有可比的分母，也不能算成 100%（那不是"全漏了"，
       而是这份解读根本没产出可核对的陈述）。
 
@@ -182,15 +185,15 @@ def recall(machine: int, manual: int) -> dict:
         note = f'人工补录 {manual} 条，机器提出 {machine} 条'
     elif manual:
         ratio = None
-        note = f'已补录 {manual} 条，但这份解读没有机器陈述可作分母，召回不可计算'
+        note = f'已补录 {manual} 条，但这份解读没有机器陈述可作分母，已采集漏提占比不可计算'
     else:
         ratio = None
-        note = '尚未有人工补录，召回不可用（不等于 0）'
+        note = '尚未有人工补录，已采集漏提占比不可用（不等于 0）'
     return {'machine': machine, 'manual': manual, 'total': total, 'ratio': ratio, 'note': note}
 
 
 def report_for(kb, paper_id: str, payload: dict) -> dict:
-    """把某次分析的补录与召回整理成接口返回结构。"""
+    """把某次分析的补录与已采集漏提占比整理成接口返回结构。"""
     digest = payload_hash(payload)
     claims = list_claims(kb, paper_id, digest)
     machine = len((payload.get('_semantic_review') or {}).get('items') or [])

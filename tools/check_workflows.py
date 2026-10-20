@@ -83,6 +83,24 @@ def main():
         web.KnowledgeBase = lambda _: kb
         web.build_llm = lambda _: AcceptanceModel()
         app = web.create_app(cfg)
+
+        # Only this isolated acceptance app exposes mutation fixtures; never production.
+        @app.post('/api/acceptance/material')
+        def material_fixture(req: dict):
+            pid = req.get('paper_id')
+            if not pid:
+                pid = kb.add_paper(title='材料版本验收', verify_level='verified', material_level='fulltext')
+                kb.add_chunks(pid, [{'text': '旧版原文：originalmarker。训练使用八块 GPU。', 'page': 1}], level='fulltext')
+            elif req.get('replace'):
+                kb.add_chunks(pid, [{'text': '新版原文：replacementmarker。训练使用十六块 GPU。', 'page': 2}], level='fulltext')
+            if not req.get('replace'):
+                chunk = kb.get_chunks(pid)[0]
+                kb.save_analysis(pid, {'research_question': chunk['text'] + ' [P1]', '_model': 'offline:material-fixture',
+                    '_citations': [{'tag': 'P1', 'chunk_id': chunk['id'], 'paper_id': pid, 'page': chunk['page']}],
+                    '_semantic_review': {'items': [{'id': 'materialclaim', 'field': 'research_question',
+                        'text': chunk['text'], 'candidate_tags': ['P1'], 'status': 'needs_review'}]}})
+            return {'paper_id': pid, 'chunks': kb.get_chunks(pid), 'materials': kb.list_materials(pid)}
+
         harden(app, 'acceptance-only')
         sock = socket.socket()
         sock.bind(('127.0.0.1', 0))

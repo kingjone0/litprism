@@ -117,6 +117,25 @@ def test_download_failure_leaves_candidate_untouched(tmp_path, monkeypatch):
         kb.close()
 
 
+@pytest.mark.parametrize('level', ['likely', 'unchecked', 'not_found'])
+def test_fetch_fulltext_cannot_bypass_admission(tmp_path, monkeypatch, level):
+    cfg, kb = kb_of(tmp_path)
+    try:
+        cid = save_candidates(kb, [{'title': 'Remote paper', 'arxiv_id': '1607.01759'}], query='q')['added'][0]
+        def download(url, dest, **kwargs):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b'%PDF-1.4 fake')
+            return dest
+        monkeypatch.setattr(remote, 'download_pdf', download)
+        monkeypatch.setattr('litprism.ingest.load_document', lambda p: _stub_document())
+        with pytest.raises(ValueError, match='拒绝导入'):
+            remote.fetch_candidate_pdf(kb, cfg, _Verifier(level), cid)
+        assert not kb.list_papers() and kb.count_chunks() == 0
+        assert list_candidates(kb)[0]['status'] == 'new'
+    finally:
+        kb.close()
+
+
 def test_candidate_without_arxiv_id_is_rejected_before_network(tmp_path, monkeypatch):
     cfg, kb = kb_of(tmp_path)
     try:

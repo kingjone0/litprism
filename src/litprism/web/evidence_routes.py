@@ -24,6 +24,7 @@ def _evidence_detail(kb, ref):
     if row is None:
         raise HTTPException(404, '来源已不存在，不能替换为其他来源。')
     data = dict(row)
+    data['material'] = next((m for m in kb.list_materials(data['paper_id']) if m['id'] == data.get('material_id')), None)
     return {**data, 'source_kind': 'paper', 'chunk_id': data['id'], 'trust_level': 'deleted' if data['deleted_at'] else data['verify_level'],
             'citable': not data['deleted_at'] and is_citable(data['verify_level'])}
 
@@ -72,20 +73,20 @@ def register_evidence(app, kb, cfg, verifier):
 
 
     @app.post('/api/candidates/{cid}/import')
-    def candidates_import(cid: str):
+    def candidates_import(cid: str, material_policy: str = 'replace'):
         from ..remote import import_candidate
         try:
-            return import_candidate(kb, cfg, verifier, cid)
+            return import_candidate(kb, cfg, verifier, cid, material_policy=material_policy)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f'导入失败：{type(exc).__name__}') from exc
 
     @app.post('/api/candidates/{cid}/fetch')
-    def candidates_fetch(cid: str):
+    def candidates_fetch(cid: str, material_policy: str = 'replace'):
         from ..remote import fetch_candidate_pdf
         try:
-            return fetch_candidate_pdf(kb, cfg, verifier, cid)
+            return fetch_candidate_pdf(kb, cfg, verifier, cid, material_policy=material_policy)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 - 网络/解析异常统一报 502，不泄漏堆栈

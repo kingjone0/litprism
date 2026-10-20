@@ -189,17 +189,19 @@ def cmd_add(ctx: Ctx, args) -> int:
             err(str(exc))
             continue
 
-        pid = ctx.kb.add_paper(
-            title=doc.title, authors=doc.authors, year=doc.year, abstract=doc.abstract,
-            doi=doc.doi, arxiv_id=doc.arxiv_id, venue=doc.venue,
-            source="local_pdf", origin=str(p), full_text=doc.full_text,
-            material_level="fulltext",
-            tags=[t for t in (args.tags or "").split(",") if t.strip()],
-            verify_status=status, verify_level=level, verify_confidence=conf,
-            verify_evidence=verify_evidence,
-        )
-        chunks = chunk_document(doc, ctx.cfg.retrieval.chunk_size, ctx.cfg.retrieval.chunk_overlap)
-        n = ctx.kb.add_chunks(pid, chunks)
+        with ctx.kb.tx():
+            pid = ctx.kb.add_paper(
+                title=doc.title, authors=doc.authors, year=doc.year, abstract=doc.abstract,
+                doi=doc.doi, arxiv_id=doc.arxiv_id, venue=doc.venue,
+                source="local_pdf", origin=str(p), full_text=doc.full_text,
+                material_level="fulltext",
+                tags=[t for t in (args.tags or "").split(",") if t.strip()],
+                verify_status=status, verify_level=level, verify_confidence=conf,
+                verify_evidence=verify_evidence,
+            )
+            chunks = chunk_document(doc, ctx.cfg.retrieval.chunk_size, ctx.cfg.retrieval.chunk_overlap)
+            n = ctx.kb.add_chunks(pid, chunks, level='fulltext', source='local_pdf',
+                                  origin=str(p), full_text=doc.full_text)
         ok(f"已入库 {pid}（{doc.page_count} 页 / {n} 个文本块 / {len(doc.sections)} 个章节）")
         added += 1
 
@@ -243,6 +245,8 @@ def cmd_show(ctx: Ctx, args) -> int:
             err(f"解读失败：{e}")
             return 1
     payload = dict(analysis.get("payload") or {})
+    if not analysis.get('material_current'):
+        warn('这份分析基于旧材料或未绑定材料；不代表当前原文，请重新解读。')
     payload["concepts"] = ctx.kb.list_concepts(p["id"])
     print(format_analysis(p, payload))
     return 0
@@ -1374,12 +1378,56 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--port", type=int, default=8765)
     a.set_defaults(func=cmd_serve)
 
+    a = sub.add_parser('backup', help='整库备份、校验、恢复与目录迁移（不包含密钥）')
+    actions = a.add_subparsers(dest='action', required=True)
+    b = actions.add_parser('create', help='导出当前库的一致快照')
+    b.add_argument('--output', required=True)
+    b.add_argument('--include-originals', action='store_true', help='包含托管 papers 目录中的原文文件')
+    b = actions.add_parser('inspect', help='只读校验备份，不打开当前库')
+    b.add_argument('archive')
+    b = actions.add_parser('restore', help='恢复到不存在的新目录，不自动切换')
+    b.add_argument('archive')
+    b.add_argument('--target', required=True)
+    b = actions.add_parser('migrate', help='将当前库与托管文件复制到新目录，保留原目录')
+    b.add_argument('--target', required=True)
+    b = actions.add_parser('activate', help='退出应用后执行：切换到已恢复目录及非密钥设置')
+    b.add_argument('--target', required=True)
+    a.set_defaults(func=cmd_backup)
+
     return p
+
+
+def cmd_backup(ctx, args) -> int:
+    from .backup import activate_directory, create_backup, inspect_backup, migrate_data, restore_backup
+    cfg = ctx.cfg if ctx else None
+    if args.action in ('create', 'migrate'):
+        if args.action == 'create':
+            result = create_backup(ctx.kb, cfg, args.output, include_originals=args.include_originals)
+        else:
+            result = migrate_data(ctx.kb, cfg, args.target)
+    elif args.action == 'inspect':
+        result = inspect_backup(args.archive)
+    elif args.action == 'restore':
+        result = restore_backup(args.archive, args.target)
+    else:
+        cfg = load_config(getattr(args, 'config', None))
+        switched = activate_directory(cfg, args.target)
+        result = {'data_dir': switched['data_dir'], 'requires_restart': True,
+                  'note': '配置已切换；请重启应用，密钥需要重新配置。原目录保留。'}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Inspection/restoration must not instantiate Ctx or migrate the current user DB.
+    if args.cmd == 'backup' and args.action in ('inspect', 'restore', 'activate'):
+        try:
+            return cmd_backup(None, args)
+        except (ValueError, OSError) as exc:
+            err(str(exc))
+            return 1
     try:
         ctx = Ctx(getattr(args, "config", None))
     except Exception as e:  # noqa: BLE001

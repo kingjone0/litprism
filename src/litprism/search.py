@@ -275,29 +275,32 @@ def import_record(
         )
 
     vr_dict = verification.to_dict() if verification else record.get("verification", {})
-    pid = kb.add_paper(
-        title=record.get("title", ""),
-        authors=record.get("authors") or [],
-        year=record.get("year"),
-        venue=record.get("venue"),
-        abstract=record.get("abstract"),
-        doi=normalize_doi(record.get("doi")),
-        arxiv_id=record.get("arxiv_id"),
-        url=record.get("url"),
-        source=record.get("origin") or record.get("source") or "external",
-        origin=record.get("url") or record.get("doi"),
-        tags=tags or ["外部导入"],
-        # verify_status 与 verify_level 保持同一取值，避免两套状态互相打架
-        verify_status=level or "verified",
-        verify_level=level or "verified",
-        verify_confidence=float(verification.confidence if verification else 1.0),
-        verify_evidence=vr_dict,
-        material_level="abstract" if record.get("abstract") else "metadata",
-    )
-    existing = kb.get_paper(pid)
-    created = bool(existing and existing.get("created_at"))
-    # 摘要可检索化：把标题+摘要作为一个块写入，保证外部文献也能被问答检索到
-    if fetch_abstract and (record.get("abstract") or record.get("title")):
-        body = f"{record.get('title','')}\n\n{record.get('abstract') or ''}".strip()
-        kb.add_chunks(pid, [{"text": body, "page": None, "section": "题录与摘要"}])
+    with kb.tx():
+        pid = kb.add_paper(
+            title=record.get("title", ""),
+            authors=record.get("authors") or [],
+            year=record.get("year"),
+            venue=record.get("venue"),
+            abstract=record.get("abstract"),
+            doi=normalize_doi(record.get("doi")),
+            arxiv_id=record.get("arxiv_id"),
+            url=record.get("url"),
+            source=record.get("origin") or record.get("source") or "external",
+            origin=record.get("url") or record.get("doi"),
+            tags=tags or ["外部导入"],
+            # verify_status 与 verify_level 保持同一取值，避免两套状态互相打架
+            verify_status=level or "verified",
+            verify_level=level or "verified",
+            verify_confidence=float(verification.confidence if verification else 1.0),
+            verify_evidence=vr_dict,
+            material_level="abstract" if record.get("abstract") else "metadata",
+        )
+        existing = kb.get_paper(pid)
+        created = bool(existing and existing.get("created_at"))
+        # 摘要可检索化：把标题+摘要作为一个块写入，保证外部文献也能被问答检索到
+        if fetch_abstract and (record.get("abstract") or record.get("title")):
+            body = f"{record.get('title','')}\n\n{record.get('abstract') or ''}".strip()
+            kb.add_chunks(pid, [{"text": body, "page": None, "section": "题录与摘要"}],
+                          level='abstract' if record.get('abstract') else 'metadata',
+                          source=record.get('source') or 'external', origin=record.get('url'))
     return pid, created

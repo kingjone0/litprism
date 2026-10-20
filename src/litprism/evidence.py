@@ -44,7 +44,10 @@ def citations_for(excerpts: list[dict]) -> list[dict]:
         if not tag or tag in seen:
             continue
         seen.add(tag)
-        out.append({'tag': tag, 'chunk_id': e['id'], 'paper_id': e['paper_id'], 'page': e['page']})
+        cite = {'tag': tag, 'chunk_id': e['id'], 'paper_id': e['paper_id'], 'page': e['page']}
+        if e.get('material_id'):
+            cite['material_id'] = e['material_id']
+        out.append(cite)
     return out
 
 
@@ -70,6 +73,8 @@ def stored_excerpts(kb, citations: list[dict]) -> list[dict]:
             e = dict(row)
         if cite.get('paper_id') and cite['paper_id'] != e['paper_id']:
             raise ValueError("引用片段不属于指定论文。")
+        if cite.get('material_id') and cite['material_id'] != e.get('material_id'):
+            raise ValueError('引用片段不属于指定材料版本。')
         e['tag'] = cite.get('tag') or f'P{i+1}'
         if e['tag'] in tags:
             raise ValueError('引用编号重复，无法确定对应来源。')

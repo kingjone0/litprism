@@ -593,6 +593,8 @@ class AnthropicClient:
 
 def build_llm(cfg: Config):
     """按配置构造客户端；provider=mock 或缺少 Key 时自动降级为离线 mock。"""
+    from .backup import require_restored_credentials
+    require_restored_credentials(cfg)
     provider = (cfg.llm.provider or "mock").lower()
     if provider == "mock":
         return MockClient(cfg.llm)
@@ -637,6 +639,11 @@ def build_llm_for(
 
 
 def llm_status(cfg: Config) -> dict:
+    from .backup import BackupError, require_restored_credentials
+    try:
+        require_restored_credentials(cfg)
+    except BackupError as exc:
+        return {'provider': cfg.llm.provider, 'ready': False, 'mode': 'needs_configuration', 'note': str(exc)}
     provider = (cfg.llm.provider or "mock").lower()
     if provider == "mock":
         return {"provider": "mock", "ready": True, "mode": "offline", "note": "离线占位模型，不调用网络"}

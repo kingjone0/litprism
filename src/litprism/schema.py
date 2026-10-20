@@ -592,6 +592,11 @@ def _migrate_v11(conn: sqlite3.Connection) -> None:
     ''')
 
 
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    from .materials import migrate
+    migrate(conn)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
@@ -604,6 +609,7 @@ MIGRATIONS: list[Migration] = [
     Migration(9, '材料完整度 papers.material_level', _migrate_v9),
     Migration(10, '统一候选池 source_candidates', _migrate_v10),
     Migration(11, '人工补录机器漏提的陈述（manual_claims）', _migrate_v11),
+    Migration(12, '原文材料版本及历史分析，保留原 chunk ID', _migrate_v12),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

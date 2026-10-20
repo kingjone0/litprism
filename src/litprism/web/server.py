@@ -83,6 +83,11 @@ def create_app(cfg: Config) -> FastAPI:
         store = ProviderStore(kb, cfg.data_path)
         active, model_id = store.get_active()
         if active is None:
+            from ..backup import BackupError, require_restored_credentials
+            try:
+                require_restored_credentials(cfg)
+            except BackupError as exc:
+                raise HTTPException(400, str(exc)) from exc
             # 真实调用必须显式选模；只有 mock（离线/测试）才允许无提供商运行。
             if (cfg.llm.provider or '').lower() == 'mock':
                 return build_llm(cfg)
@@ -146,6 +151,8 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(400, '任务输出额度已改为自动分配；请在模型目录维护上下文窗口与模型最大输出能力。')
         if not cfg.config_path:
             raise HTTPException(400, "当前使用内置默认配置，没有可写入的配置文件。")
+        if 'data_dir' in (req.get('app') or {}):
+            raise HTTPException(400, '请使用备份恢复中的目录切换；运行中不能直接修改数据目录。')
         try:
             _patch(cfg.config_path, req)
         except ValueError as exc:
@@ -194,38 +201,60 @@ def create_app(cfg: Config) -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/paper/{paper_id}/text")
-    def paper_text(paper_id: str):
-        """原文分块（按页分组）。供论文详情的「原文」标签使用。"""
-        p = kb.resolve_paper(paper_id)
-        if not p:
-            raise HTTPException(404, "未找到论文")
-        chunks = kb.get_chunks(p["id"], limit=2000)
-        pages: dict[int | None, list[dict]] = {}
-        for c in chunks:
-            pages.setdefault(c.get("page"), []).append(
-                {"section": c.get("section"), "text": c.get("text"), "chunk_id": c.get("id")}
-            )
-        ordered = [
-            {"page": pg, "chunks": items}
-            for pg, items in sorted(pages.items(), key=lambda x: (x[0] is None, x[0] or 0))
-        ]
-        return {"total": len(chunks), "pages": ordered}
+    def paper_text(paper_id: str, material_id: str | None = None):
+        with kb._tx_lock:
+            """原文分块（按页分组）。供论文详情的「原文」标签使用。"""
+            p = kb.resolve_paper(paper_id)
+            if not p:
+                raise HTTPException(404, "未找到论文")
+            if material_id and not any(m['id'] == material_id for m in kb.list_materials(p['id'])):
+                raise HTTPException(404, '材料版本不存在或不属于该论文。')
+            chunks = kb.get_chunks(p["id"], limit=2000, material_id=material_id)
+            pages: dict[int | None, list[dict]] = {}
+            for c in chunks:
+                pages.setdefault(c.get("page"), []).append(
+                    {"section": c.get("section"), "text": c.get("text"), "chunk_id": c.get("id")}
+                )
+            ordered = [
+                {"page": pg, "chunks": items}
+                for pg, items in sorted(pages.items(), key=lambda x: (x[0] is None, x[0] or 0))
+            ]
+            return {"total": len(chunks), "pages": ordered, 'material_id': material_id or p.get('current_material_id')}
+
+    @app.get('/api/paper/{paper_id}/materials')
+    def paper_materials(paper_id: str):
+        with kb._tx_lock:
+            p = kb.resolve_paper(paper_id)
+            if not p:
+                raise HTTPException(404, '未找到论文')
+            return {'items': kb.list_materials(p['id']), 'current_material_id': p.get('current_material_id'),
+                    'analyses': [dict(r) for r in kb._con.execute(
+                        'SELECT id,material_id,model,created_at FROM analysis_versions WHERE paper_id=? ORDER BY rowid DESC', (p['id'],))]}
 
     @app.get("/api/paper/{paper_id}")
-    def paper(paper_id: str):
-        p = kb.resolve_paper(paper_id)
-        if not p:
-            raise HTTPException(404, "未找到论文")
-        analysis = kb.get_analysis(p["id"])
-        payload = dict((analysis or {}).get("payload") or {})
-        payload["concepts"] = kb.list_concepts(p["id"])
-        p.pop("full_text", None)
-        return {
-            "paper": p,
-            "analysis": payload,
-            "markdown": format_analysis(p, payload) if payload else "",
-            "chunks": len(kb.get_chunks(p["id"])),
-        }
+    def paper(paper_id: str, version_id: str | None = None):
+        with kb._tx_lock:
+            p = kb.resolve_paper(paper_id)
+            if not p:
+                raise HTTPException(404, "未找到论文")
+            analysis = kb.get_analysis(p["id"], version_id=version_id)
+            if version_id and not analysis:
+                raise HTTPException(404, '历史分析不存在。')
+            payload = dict((analysis or {}).get("payload") or {})
+            payload.setdefault('concepts', kb.list_concepts(p['id']) if not version_id else [])
+            p.pop("full_text", None)
+            return {
+                "paper": p,
+                "analysis": payload,
+                "markdown": format_analysis(p, payload) if payload else "",
+                "chunks": len(kb.get_chunks(p["id"])),
+                'analysis_material': {'id': (analysis or {}).get('material_id'),
+                                      'current': (analysis or {}).get('material_current', False)} if analysis else None,
+                'materials': kb.list_materials(p['id']),
+                'analysis_version_id': version_id,
+                'analysis_history': [dict(r) for r in kb._con.execute(
+                    'SELECT id,material_id,model,created_at FROM analysis_versions WHERE paper_id=? ORDER BY rowid DESC', (p['id'],))],
+            }
 
     @app.post("/api/analyze/{paper_id}")
     def analyze(paper_id: str, force: bool = False):
@@ -234,13 +263,18 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(404, "未找到论文")
         try:
             data = analyze_paper(kb, cfg, task_llm(), p["id"], force=force)
+        except HTTPException:
+            raise
         except Exception as e:  # noqa: BLE001
             raise HTTPException(500, str(e)) from e
         return {"analysis": data, "markdown": format_analysis(p, dict(data))}
 
     # ---------------------------------------------------------------- 导入
     @app.post("/api/upload")
-    async def upload(files: Annotated[list[UploadFile], File()], analyze: bool = True, verify: bool = True):
+    async def upload(files: Annotated[list[UploadFile], File()], analyze: bool = True, verify: bool = True,
+                     material_policy: str = 'replace'):
+        if material_policy not in ('replace', 'keep_both'):
+            raise HTTPException(400, '材料策略必须为 replace 或 keep_both。')
         results = []
         from ..tasks import checkpoint
         for index, f in enumerate(files, 1):
@@ -276,15 +310,17 @@ def create_app(cfg: Config) -> FastAPI:
                                     "title": doc.title, "doi": doc.doi, "verification": v_ev})
                     continue
                 checkpoint('保存核验通过的文献')
-                pid = kb.add_paper(
-                    title=doc.title, authors=doc.authors, year=doc.year, abstract=doc.abstract,
-                    doi=doc.doi, arxiv_id=doc.arxiv_id, source="local_pdf", origin=f.filename,
-                    full_text=doc.full_text, tags=["本地上传"], material_level="fulltext",
-                    verify_status=v_status, verify_level=v_level,
-                    verify_confidence=v_conf, verify_evidence=v_ev,
-                )
-                chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
-                kb.add_chunks(pid, chunks)
+                with kb.tx():
+                    pid = kb.add_paper(
+                        title=doc.title, authors=doc.authors, year=doc.year, abstract=doc.abstract,
+                        doi=doc.doi, arxiv_id=doc.arxiv_id, source="local_pdf", origin=f.filename,
+                        full_text=doc.full_text, tags=["本地上传"], material_level="fulltext",
+                        verify_status=v_status, verify_level=v_level,
+                        verify_confidence=v_conf, verify_evidence=v_ev,
+                    )
+                    chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
+                    kb.add_chunks(pid, chunks, policy=material_policy, level='fulltext', source='local_pdf',
+                                  origin=f.filename, full_text=doc.full_text)
                 entry = {
                     "file": f.filename, "ok": True, "paper_id": pid,
                     "title": doc.title, "pages": doc.page_count, "chunks": len(chunks),
@@ -1061,6 +1097,8 @@ def create_app(cfg: Config) -> FastAPI:
     register_tasks(app)
     from .analysis_run_routes import register_analysis_runs
     register_analysis_runs(app, kb, cfg, task_llm)
+    from .backup_routes import register_backups
+    register_backups(app, kb, cfg)
     return app
 
 

@@ -140,7 +140,10 @@ def register_workflows(app, kb, cfg, task_llm, verifier):
         for p in papers:
             if fmt == 'markdown':
                 from ..extract import format_analysis
-                a = (kb.get_analysis(p['id']) or {}).get('payload') or {}
+                analysis = kb.get_analysis(p['id']) or {}
+                if not analysis.get('material_current'):
+                    raise HTTPException(409, '分析基于旧材料或未绑定材料，请重新解读后导出。')
+                a = analysis.get('payload') or {}
                 if not a.get('_citation_check', {}).get('passed'):
                     raise HTTPException(409, '解读未通过引用检查，请重新解读。')
                 from ..deliverables import Deliverable

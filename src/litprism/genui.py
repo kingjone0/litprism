@@ -316,7 +316,10 @@ def _validated_analysis(kb: Any, pid: str) -> dict:
     paper = _get_paper(kb, pid)
     if not paper or paper.get('verify_level') not in ('verified', 'manual_confirmed'):
         return {}
-    payload = ((kb.get_analysis(pid) if kb else None) or {}).get('payload') or {}
+    analysis = (kb.get_analysis(pid) if kb else None) or {}
+    if not analysis.get('material_current'):
+        return {}
+    payload = analysis.get('payload') or {}
     return payload if (payload.get('_citation_check') or {}).get('passed') else {}
 
 

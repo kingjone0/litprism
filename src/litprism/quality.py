@@ -15,12 +15,12 @@
 | 修正率 | 确认但改过正文 / 已审 | 方向对但表述需纠正 |
 | 拒绝率 | 拒绝 / 已审 | 机器说错了 |
 | 可用率 | (逐字 + 修正) / 已审 | 人工处理后能用的比例 |
-| 召回 | 人工补录 / (机器 + 人工) | 机器漏了多少；两边都有数才算 |
+| 已采集漏提占比 | 人工补录 / (机器 + 人工) | 机器漏了多少；两边都有数才算 |
 
 口径纪律
 --------
 1. 分母为 0 时一律 ``None``（界面显示 n/a），**不显示 0%**；
-2. 召回在机器没有陈述时也不计算 —— 那不是"全漏了"，是没有分母；
+2. 已采集漏提占比在机器没有陈述时也不计算 —— 那不是"全漏了"，是没有分母；
 3. 分字段报告，不合并成单一总分（总分掩盖"局限"字段 20% 这类问题）；
 4. 人工确认只表示"接受这份快照"，不等于内容客观真实。
 """
@@ -129,7 +129,7 @@ def summarize(report: dict, reviews: list[dict], manual: list[dict] | None = Non
         if reviewed and manual_count and machine:
             note = f'已人工审核 {reviewed} 条，人工补录 {manual_count} 条'
         elif reviewed:
-            note = f'已人工审核 {reviewed} 条；尚无人工补录，召回不可用（不等于 0）'
+            note = f'已人工审核 {reviewed} 条；尚无人工补录，已采集漏提占比不可用（不等于 0）'
         elif manual_count and not machine:
             note = f'已补录 {manual_count} 条，但这份解读没有机器陈述可作分母'
         else:
@@ -146,7 +146,7 @@ def summarize(report: dict, reviews: list[dict], manual: list[dict] | None = Non
             'precision': '确认且未改动 / 已审',
             'usable': '(逐字 + 修正) / 已审',
             'coverage': '已审 / 全部陈述',
-            'recall': '人工补录 / (机器陈述 + 人工补录)',
+            'recall': '已采集漏提占比 = 人工补录 / (机器陈述 + 人工补录)，不是真实召回率',
         },
     }
 

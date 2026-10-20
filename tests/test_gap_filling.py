@@ -39,7 +39,8 @@ def test_compare_cell_is_bound_to_paper_and_schema(env, value):
 def test_compare_reads_tail_and_reports_coverage(env):
     cfg, kb, model, _ = env
     first = paper(kb)
-    kb.add_chunks(first, [{'text': f'TAIL_{i}', 'page': i} for i in range(2, 10)])
+    original = [{k: c[k] for k in ('text', 'page', 'section')} for c in kb.get_chunks(first)]
+    kb.add_chunks(first, original + [{'text': f'TAIL_{i}', 'page': i} for i in range(2, 10)])
     second = paper(kb, title='Second')
     result = CompareAgent(kb, cfg, model).compare([first, second])
     submitted = str([messages for task, messages in model.calls if task == 'compare'])
@@ -51,7 +52,8 @@ def test_compare_reads_tail_and_reports_coverage(env):
 def test_analysis_reads_tail_and_keeps_validated_batch_results(env):
     cfg, kb, _, _ = env
     pid = paper(kb, text='填充文本。' * 6000)
-    kb.add_chunks(pid, [{'text': 'TAIL_UNIQUE 局限是样本很小。', 'page': 9}])
+    original = [{k: c[k] for k in ('text', 'page', 'section')} for c in kb.get_chunks(pid)]
+    kb.add_chunks(pid, original + [{'text': 'TAIL_UNIQUE 局限是样本很小。', 'page': 9}])
     class Extraction(Model):
         def chat_json(self, messages, task='', **kw):
             self.calls.append((task, messages))

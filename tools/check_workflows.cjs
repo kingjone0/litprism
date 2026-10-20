@@ -256,31 +256,28 @@ const path = require('node:path');
     assert.equal(savedConfig.status(), 200);
     await page.locator('#btnCloseSettings').click();
 
-    // 分阶段运行：预算暂停保留原解读，刷新后仍可恢复；待审不可误报通过。
+    // 阶段预算已取消；持久记录保留实际调用和待审状态，刷新后仍能精确恢复。
     await page.locator('#paperList [data-paper]').first().click();
     await expect(page.locator('#btnBudgetAnalyze')).toBeVisible();
-    const analysisBeforeBudget = await page.evaluate(() => JSON.stringify(S.paperAnalysis));
     await page.locator('#btnBudgetAnalyze').click();
     await page.locator('#researchTask [name=with_concepts]').uncheck();
-    await page.locator('#researchTask [name=semantic_review]').fill('0');
-    await page.locator('#researchTask [type=submit]').click();
-    await expect(page.locator('#researchTask')).toHaveCount(0);
-    await expect(page.locator('#analysisRuns')).toContainText('预算暂停');
-    await expect(page.locator('#analysisRuns')).toContainText('原文提取 1/12');
-    assert.equal(await page.evaluate(() => JSON.stringify(S.paperAnalysis)), analysisBeforeBudget);
-    const budgetRun = await page.locator('#analysisRuns [data-run-id]').first().getAttribute('data-run-id');
-    await page.reload();
-    // 论文视图由应用状态重新打开；记录独立于瞬时任务与浏览器页面。
-    await page.locator('#paperList [data-paper]').first().click();
-    await expect(page.locator('#analysisRuns')).toContainText('预算暂停');
-    await page.locator(`[data-resume-run="${budgetRun}"]`).click();
-    await expect(page.locator('#researchTask')).toContainText('已用 1');
-    await page.locator('#researchTask [name=semantic_review]').fill('1');
+    await page.locator('#researchTask [name=semantic_review]').check();
     await page.locator('#researchTask [type=submit]').click();
     await expect(page.locator('#researchTask')).toHaveCount(0);
     await expect(page.locator('#analysisRuns')).toContainText('仍有待审项');
-    await expect(page.locator('#analysisRuns')).toContainText('原文提取 1/12');
-    await expect(page.locator('#analysisRuns')).toContainText('逐项复核 1/1');
+    await expect(page.locator('#analysisRuns')).toContainText('原文提取 1 次');
+    const budgetRun = await page.locator('#analysisRuns [data-run-id]').first().getAttribute('data-run-id');
+    await page.reload();
+    await page.locator('#paperList [data-paper]').first().click();
+    await expect(page.locator('#analysisRuns')).toContainText('仍有待审项');
+    await page.locator(`[data-resume-run="${budgetRun}"]`).click();
+    await expect(page.locator('#researchTask')).toContainText('已用调用');
+    await expect(page.locator('#researchTask [name=semantic_review]')).toHaveCount(0);
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
+    await expect(page.locator('#analysisRuns')).toContainText('仍有待审项');
+    await expect(page.locator('#analysisRuns')).toContainText('原文提取 1 次');
+    await expect(page.locator('#analysisRuns')).toContainText('逐项复核 1 次');
     if (output) {
       await expect(page.locator('#toasts .toast')).toHaveCount(0);
       await page.screenshot({ path: path.join(output, 'analysis-run-light.png') });
@@ -347,6 +344,106 @@ const path = require('node:path');
       await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
       await page.screenshot({path:path.join(output, 'model-capacity-dark-narrow.png')});
     }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    // N05/N06/N12: real storage, historical citations and read-only analysis history.
+    await page.locator('#btnCloseSettings').click();
+    await page.setViewportSize({width:1360,height:880});
+    const materialFixture = await page.evaluate(async () => {
+      const result = await api('/api/acceptance/material', {method:'POST', body:{}});
+      await openView('paper', {paperId:result.paper_id});
+      return result;
+    });
+    await expect(page.locator('#paperDetail')).toContainText('originalmarker');
+    await page.locator('#manualPanel summary').click();
+    await page.locator('#btnAddClaim').click();
+    await expect(page.locator('#claimSource')).toContainText('originalmarker');
+    await page.locator('#claimQuote').fill('训练使用八块 GPU。');
+    await page.locator('#claimText').fill('人工补录：训练使用八块 GPU。');
+    await page.locator('#btnSaveClaim').click();
+    await expect(page.locator('#manualList')).toContainText('人工补录：训练使用八块 GPU。');
+    await page.locator('#qualityPanel summary').click();
+    await expect(page.locator('#qualityTable')).toContainText('漏提占比');
+    await expect(page.locator('#qualityDefs')).toContainText('不是真实召回率');
+    await page.evaluate(async pid => {
+      await api('/api/acceptance/material', {method:'POST',body:{paper_id:pid,replace:true}});
+      await loadPaperDetail();
+    }, materialFixture.paper_id);
+    await expect(page.locator('#paperDetail')).toContainText('这份分析基于旧材料');
+    await page.locator('[data-ptab=text]').click();
+    await expect(page.locator('#paperTextBody')).toContainText('replacementmarker');
+    await expect(page.locator('#paperTextBody')).not.toContainText('originalmarker');
+    await page.locator('#paperMaterialSelect').selectOption(materialFixture.materials[0].id);
+    await expect(page.locator('#paperTextBody')).toContainText('originalmarker');
+    await page.evaluate(ref => showEvidence(ref), materialFixture.chunks[0].id);
+    await expect(page.locator('#inspSources')).toContainText('历史材料');
+    await expect(page.locator('#inspSources')).toContainText('originalmarker');
+    await page.keyboard.press('Escape');
+    await page.evaluate(async pid => {
+      await api('/api/acceptance/material', {method:'POST',body:{paper_id:pid}});
+      await loadPaperDetail();
+    }, materialFixture.paper_id);
+    const history = await page.evaluate(pid => api(`/api/paper/${pid}/materials`), materialFixture.paper_id);
+    await page.locator('#analysisVersionSelect').selectOption(history.analyses[0].id);
+    await expect(page.locator('#paperDetail')).toContainText('历史分析只读');
+    await expect(page.locator('#paperDetail')).toContainText('originalmarker');
+    await expect(page.locator('#btnAddClaim')).toHaveCount(0);
+    await page.locator('[data-ptab=text]').click();
+    await expect(page.locator('#paperTextBody')).toContainText('originalmarker');
+    if (output) {
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.screenshot({path:path.join(output, 'material-history-light.png')});
+      await page.setViewportSize({width:850,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.screenshot({path:path.join(output, 'material-history-dark-narrow.png')});
+    }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    // N08: download, inspect, recover to a new isolated directory, switch/cancel.
+    await page.setViewportSize({width:1360,height:880});
+    await page.locator('[data-view=settings]').first().click();
+    await page.locator('#settingsNav [data-set=backup]').click();
+    await expect(page.locator('.backup-settings')).toContainText('密钥不随备份迁移');
+    await page.locator('#backupOriginals').check();
+    const [backupDownload] = await Promise.all([
+      page.waitForEvent('download'), page.locator('#backupExport').click(),
+    ]);
+    assert.equal(backupDownload.suggestedFilename(), 'litprism-backup.zip');
+    await expect(page.locator('#backupStatus')).toContainText('备份已下载');
+    await page.locator('#backupFile').setInputFiles(await backupDownload.path());
+    await expect(page.locator('#backupPreview')).toContainText('校验通过');
+    if (output) {
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.locator('#settingsPanes').evaluate(el => { el.scrollTop = 0; });
+      await page.screenshot({path:path.join(output, 'backup-preview-light.png')});
+    }
+    const backupStatus = await page.evaluate(() => api('/api/backups/status'));
+    const recoveredPath = path.join(path.dirname(backupStatus.data_dir), 'ui-restored');
+    // An existing directory must fail without losing the validated preview.
+    await page.locator('#backupTarget').fill(backupStatus.data_dir);
+    await page.locator('#backupRestore').click();
+    await expect(page.locator('#backupError')).toContainText('目标目录已存在');
+    await page.locator('#backupTarget').fill(recoveredPath);
+    await page.locator('#backupRestore').click();
+    await expect(page.locator('#backupRestored')).toContainText('已校验并保存');
+    await expect(page.locator('#backupRestore')).toBeDisabled();
+    assert.equal((await page.evaluate(() => api('/api/backups/status'))).requires_restart, false);
+    if (output) {
+      await page.setViewportSize({width:850,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.locator('#backupActivate').scrollIntoViewIfNeeded();
+      await page.screenshot({path:path.join(output, 'backup-switch-dark-narrow.png')});
+    }
+    await page.locator('#backupActivate').click();
+    await expect(page.locator('#backupStatus')).toContainText('切换待重启生效');
+    const blockedMutation = await page.evaluate(async () => {
+      try { await api('/api/conversations', {method:'POST',body:{title:'must be blocked'}}); return false; }
+      catch (e) { return e.message.includes('重启或取消切换'); }
+    });
+    assert.equal(blockedMutation, true);
+    await page.locator('#backupCancel').click();
+    await expect(page.locator('.backup-settings')).toBeVisible();
+    await expect(page.locator('#backupActivate')).toBeVisible();
+    await expect(page.locator('#backupCancel')).toBeHidden();
+    assert.equal((await page.evaluate(() => api('/api/backups/status'))).requires_restart, false);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(errors, []);
     console.log('Real API workflow acceptance passed: research tasks, durable analysis budgets/resume, reply source links, sidebar review/revoke, persistent provenance, web snapshots, cancellation, themes and narrow layout.');

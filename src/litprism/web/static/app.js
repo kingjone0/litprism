@@ -369,7 +369,13 @@ async function loadLibrary() {
 /* ==========================================================================
    论文详情
    ========================================================================== */
-async function loadPaperDetail() {
+let paperDetailRequest = 0;
+function materialTime(value) {
+  const date = new Date(value);
+  return value && !Number.isNaN(date.getTime()) ? date.toLocaleString('zh-CN', {hour12:false}) : '时间未知';
+}
+async function loadPaperDetail(versionId = null) {
+  const request = ++paperDetailRequest;
   const box = $('#paperDetail');
   const requestedPaper = S.activePaper;
   if (!S.activePaper) {
@@ -380,12 +386,15 @@ async function loadPaperDetail() {
     <div class="skeleton" style="width:40%;height:12px;margin:0 auto"></div></div>`;
 
   try {
-    const d = await api(`/api/paper/${encodeURIComponent(requestedPaper)}`);
-    if (S.activePaper !== requestedPaper) return;
+    const d = await api(`/api/paper/${encodeURIComponent(requestedPaper)}` + (versionId ? '?version_id='+encodeURIComponent(versionId) : ''));
+    if (S.activePaper !== requestedPaper || request !== paperDetailRequest) return;
     const p = d.paper || d;
     const a = d.analysis || {};
     setLocation(p.display_title || p.title || '');
     S.paperAnalysis = a;
+    S.analysisMaterial = d.analysis_material?.id || null;
+    S.claimChunksFor = null;
+    S.paperMaterials = d.materials || [];
     const concepts = d.concepts || a.concepts || [];
 
     box.innerHTML = `
@@ -417,15 +426,20 @@ async function loadPaperDetail() {
           <button data-ptab="text">原文</button>
           <button data-ptab="concepts">术语 (${concepts.length})</button>
         </div>
+        ${(d.analysis_history || []).length ? `<div class="material-controls"><label>分析记录<select class="select" id="analysisVersionSelect" aria-label="选择分析记录">
+          <option value="">最新分析</option>
+          ${d.analysis_history.map(v => `<option value="${esc(v.id)}" ${v.id === versionId ? 'selected' : ''}>历史分析 · ${esc(materialTime(v.created_at))} · ${esc(v.model || '模型未知')}</option>`).join('')}
+        </select></label></div>` : ''}
       </div>
 
       <div data-ppane="analysis">
+        ${d.analysis_material && !d.analysis_material.current ? '<p class="lui-degraded" role="status">这份分析基于旧材料或尚未绑定材料，不能视为当前原文的结论。旧引用仍可查看；请重新解读当前材料。</p>' : ''}
         <div id="analysisRuns" aria-live="polite"></div>
         ${materialNote(a._coverage)}
         ${coverageNote(a._coverage)}
-        ${semanticReviewPanel(a._semantic_review, {kind: 'paper', id: p.id}, a._candidates)}
-        ${qualityPanel(p.id)}
-        ${manualClaimsPanel(p.id)}
+        ${versionId ? '<p class="source-intro">历史分析只读。查看原文时请选择对应的历史材料；审核与补录请返回最新分析。</p>' : semanticReviewPanel(a._semantic_review, {kind: 'paper', id: p.id}, a._candidates)}
+        ${versionId ? '' : qualityPanel(p.id)}
+        ${versionId ? '' : manualClaimsPanel(p.id)}
         ${a._concepts_error ? `<div class="lui-degraded">术语提取未完成：${esc(a._concepts_error)}</div>` : ''}
         ${a._mock ? '<div class="lui-degraded">离线占位模型（mock）：仅演示流程，不构成真实学术解读。配置模型后请重新解读。</div>' : ''}
         ${a._model ? `<div class="source-intro">生成模型：${esc(a._model)}</div>` : ''}
@@ -449,6 +463,10 @@ async function loadPaperDetail() {
       </div>
 
       <div data-ppane="text" style="display:none">
+        <div class="material-controls"><label>材料版本<select class="select" id="paperMaterialSelect" aria-label="选择原文材料版本" ${(d.materials || []).length ? '' : 'disabled'}>
+          ${(d.materials || []).length ? d.materials.map(m => `<option value="${esc(m.id)}" ${m.id === (versionId ? d.analysis_material?.id : p.current_material_id) ? 'selected' : ''}>${m.id === p.current_material_id ? '当前材料' : '历史材料'} · ${esc(materialTime(m.imported_at))} · ${m.chunks} 块</option>`).join('') : '<option value="">尚无原文材料</option>'}
+        </select></label></div>
+        <p class="source-intro">默认检索只使用当前材料。切换历史材料仅用于查看，原引用与审核记录保留。</p>
         <div class="card"><div class="card-body" id="paperTextBody">
           <div class="skeleton" style="width:60%"></div></div></div>
       </div>
@@ -471,8 +489,11 @@ async function loadPaperDetail() {
     $$('#paperTabs [data-ptab]').forEach(b => b.onclick = () => {
       $$('#paperTabs [data-ptab]').forEach(x => x.classList.toggle('active', x === b));
       $$('[data-ppane]').forEach(x => x.style.display = x.dataset.ppane === b.dataset.ptab ? '' : 'none');
-      if (b.dataset.ptab === 'text') loadPaperText(S.activePaper);
+      if (b.dataset.ptab === 'text') loadPaperText(S.activePaper, $('#paperMaterialSelect')?.value);
     });
+    $('#paperMaterialSelect').onchange = e => loadPaperText(p.id, e.target.value);
+    const versionSelect = $('#analysisVersionSelect');
+    if (versionSelect) versionSelect.onchange = e => loadPaperDetail(e.target.value || null);
 
     // ---- 重命名 / 删除 ----
     $('#btnRename').onclick = () => {
@@ -506,21 +527,27 @@ async function loadPaperDetail() {
     loadAnalysisRuns(p.id);
 
     // 补录与质量面板：数据单独加载，避免拖慢首屏
-    loadQuality(p.id);
-    loadManualClaims(p.id);
+    if (!versionId) {
+      loadQuality(p.id);
+      loadManualClaims(p.id);
+    }
     const addBtn = $('#btnAddClaim');
     if (addBtn) addBtn.onclick = () => openClaimForm(p.id);
   } catch (e) {
-    if (S.activePaper !== requestedPaper) return;
+    if (S.activePaper !== requestedPaper || request !== paperDetailRequest) return;
     box.innerHTML = `<div class="empty"><div class="title">加载失败</div><div class="desc">${esc(e.message)}</div></div>`;
   }
 }
 
-async function loadPaperText(pid) {
+let paperTextRequest = 0;
+async function loadPaperText(pid, materialId) {
   const body = $('#paperTextBody');
   if (!body) return;
+  const request = ++paperTextRequest;
+  body.textContent = '正在读取原文…';
   try {
-    const d = await api(`/api/paper/${encodeURIComponent(pid)}/text`);
+    const d = await api(`/api/paper/${encodeURIComponent(pid)}/text` + (materialId ? '?material_id='+encodeURIComponent(materialId) : ''));
+    if (request !== paperTextRequest || body !== $('#paperTextBody')) return;
     if (!d.pages?.length) {
       body.innerHTML = `<div class="empty"><div class="title">没有可显示的正文</div>
         <div class="desc">该文件可能没有可提取的文本层（扫描件）。扫描件转写功能一期暂缓。</div></div>`;
@@ -539,6 +566,7 @@ async function loadPaperText(pid) {
           </div>`).join('')}
       </div>`).join('');
   } catch (e) {
+    if (request !== paperTextRequest || body !== $('#paperTextBody')) return;
     body.innerHTML = `<div class="empty"><div class="desc">${esc(e.message)}</div></div>`;
   }
 }
@@ -562,7 +590,7 @@ function qualityPanel(pid) {
           <th scope="col">字段</th><th scope="col">陈述</th><th scope="col">已审</th>
           <th scope="col">逐字</th><th scope="col">修正</th><th scope="col">拒绝</th>
           <th scope="col">补录</th><th scope="col">逐字精度</th><th scope="col">可用率</th>
-          <th scope="col">覆盖</th><th scope="col">召回</th>
+          <th scope="col">覆盖</th><th scope="col">漏提占比</th>
         </tr></thead>
         <tbody></tbody>
       </table></div>
@@ -577,6 +605,7 @@ async function loadQuality(pid) {
   if (!note || !table) return;
   try {
     const d = await api(`/api/paper/${encodeURIComponent(pid)}/quality`);
+    if (note !== $('#qualityNote')) return;
     note.textContent = d.note || '';
     const summary = $('#qualitySummary');
     if (summary) {
@@ -617,7 +646,7 @@ async function loadQuality(pid) {
  * 人工补录面板（N05）。
  *
  * 为什么要有：审核只有确认/修正/拒绝/撤销，全部作用于机器**已经提出**的陈述，
- * 所以「机器漏了什么」一直测不出来。补录把召回从 n/a 变成数字。
+ * 所以「机器漏了什么」一直测不出来。补录把漏提占比从 n/a 变成数字。
  *
  * 必须绑原文原句：没有引用的补录无法与"凭印象写一条"区分，分母就不可信。
  */
@@ -625,7 +654,7 @@ function manualClaimsPanel(pid) {
   return `<details class="card" id="manualPanel">
     <summary>人工补录 · 机器未提的陈述 <span id="manualCount" class="mono muted"></span></summary>
     <div class="card-body">
-      <p class="source-intro">读到机器漏掉的陈述就补一条。必须引用原文原句 —— 没有依据的补录不计入召回。</p>
+      <p class="source-intro">读到机器漏掉的陈述就补一条。必须引用原文原句 —— 没有依据的补录不计入漏提占比。</p>
       <div id="manualList"></div>
       <div id="manualForm"></div>
       <button class="btn" id="btnAddClaim" data-pid="${esc(pid)}" style="margin-top:10px">补一条</button>
@@ -643,13 +672,14 @@ async function loadManualClaims(pid) {
   if (!box) return;
   try {
     const d = await api(`/api/paper/${encodeURIComponent(pid)}/semantic`);
+    if (box !== $('#manualList')) return;
     S.manual = d.manual || [];
     S.recall = d.recall || null;
     S.analysisHash = d.analysis_hash;
     const count = $('#manualCount');
     if (count) {
       count.textContent = S.manual.length
-        ? `${S.manual.length} 条 · 召回 ${S.recall?.ratio == null ? 'n/a' : pct(S.recall.ratio)}`
+        ? `${S.manual.length} 条 · 漏提占比 ${S.recall?.ratio == null ? 'n/a' : pct(S.recall.ratio)}`
         : '暂无补录';
     }
     box.innerHTML = S.manual.length ? S.manual.map(m => `
@@ -664,7 +694,7 @@ async function loadManualClaims(pid) {
           ${m.page == null ? '无页码' : 'p.' + esc(m.page)}${m.note ? ' · ' + esc(m.note) : ''}
         </div>
       </div>`).join('')
-      : '<p class="source-intro">还没有补录。这个数字为 n/a 表示"还没人去补"，不代表召回是 0。</p>';
+      : '<p class="source-intro">还没有补录。这个数字为 n/a 表示"还没人去补"，不代表漏提占比是 0。</p>';
 
     $$('[data-drop-claim]', box).forEach(b => b.onclick = async () => {
       try {
@@ -681,15 +711,16 @@ async function loadManualClaims(pid) {
 
 /** 原文块清单按需加载：补录的来源通常不在已引用块里，所以要全篇。 */
 async function claimChunks(pid) {
-  if (S.claimChunksFor === pid) return S.claimChunks || [];
-  const d = await api(`/api/paper/${encodeURIComponent(pid)}/text`);
+  const key = pid + ':' + (S.analysisMaterial || 'current');
+  if (S.claimChunksFor === key) return S.claimChunks || [];
+  const d = await api(`/api/paper/${encodeURIComponent(pid)}/text` + (S.analysisMaterial ? '?material_id='+encodeURIComponent(S.analysisMaterial) : ''));
   const list = [];
   for (const page of d.pages || []) {
     for (const c of page.chunks || []) {
       list.push({ id: c.chunk_id, page: page.page, text: c.text || '', section: c.section || '' });
     }
   }
-  S.claimChunksFor = pid;
+  S.claimChunksFor = key;
   S.claimChunks = list;
   return list;
 }
@@ -1345,6 +1376,7 @@ const SETTINGS_SECTIONS = [
   { key: 'verify',    label: '核验与白名单', ico: '✓' },
   { key: 'retrieval', label: '检索',        ico: '⌕' },
   { key: 'export',    label: '导出',        ico: '⇩' },
+  { key: 'backup',    label: '备份与恢复',  ico: '' },
   { key: 'about',     label: '关于',        ico: 'ℹ' },
 ];
 
@@ -1382,6 +1414,10 @@ async function renderSettingsPane(key) {
     try { S.status = await api('/api/status'); } catch { S.status = {}; }
   }
   const c = S.status.config || {};
+  if (key === 'backup') {
+    await renderBackupSettings(box);
+    return;
+  }
 
   if (key === 'model') {
     box.innerHTML = `<div id="pvArea">
@@ -1491,7 +1527,7 @@ function settingsBody(key, c) {
           `<input class="input" type="number" min="0" max="1000"
             data-cfg="retrieval.chunk_overlap" data-type="number"
             value="${c.retrieval?.chunk_overlap ?? 150}">`) +
-        row('召回数', '每次检索返回的片段数。受上下文预算约束，实际会动态调整。',
+        row('漏提占比数', '每次检索返回的片段数。受上下文预算约束，实际会动态调整。',
           `<input class="input" type="number" min="1" max="50"
             data-cfg="retrieval.top_k" data-type="number"
             value="${c.retrieval?.top_k ?? 8}">`) +

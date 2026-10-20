@@ -81,7 +81,7 @@ def download_pdf(url: str, dest: Path, *, timeout: int = 60) -> Path:
     return dest
 
 
-def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str) -> dict:
+def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str, *, material_policy: str = 'replace') -> dict:
     """把一条候选取成可解读的论文：下载 → 解析 → 建论文/原文块 → 回链候选。"""
     rows = kb._con.execute('SELECT * FROM source_candidates WHERE id=?', (cid,)).fetchone()
     if rows is None:
@@ -104,25 +104,29 @@ def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str) -> d
 
     result = verifier.verify(title=doc.title or candidate['title'], arxiv_id=arxiv_id,
                              authors=doc.authors or None, year=doc.year)
-    pid = kb.add_paper(
-        title=doc.title or candidate['title'],
-        authors=doc.authors or candidate.get('authors') or [],
-        year=doc.year or candidate.get('year'),
-        venue=doc.venue,
-        abstract=doc.abstract or candidate.get('abstract'),
-        doi=doc.doi or candidate.get('doi'),
-        arxiv_id=arxiv_id,
-        url=candidate.get('url'),
-        source='arxiv',
-        origin=arxiv_pdf_url(arxiv_id),
-        full_text=doc.full_text,
-        material_level='fulltext',
-        tags=['arXiv 自动取回'],
-        verify_status=result.level, verify_level=result.level,
-        verify_confidence=float(result.confidence), verify_evidence=result.to_dict(),
-    )
-    chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
-    added = kb.add_chunks(pid, chunks)
+    from .evidence import require_citable
+    require_citable(result.level)
+    with kb.tx():
+        pid = kb.add_paper(
+            title=doc.title or candidate['title'],
+            authors=doc.authors or candidate.get('authors') or [],
+            year=doc.year or candidate.get('year'),
+            venue=doc.venue,
+            abstract=doc.abstract or candidate.get('abstract'),
+            doi=doc.doi or candidate.get('doi'),
+            arxiv_id=arxiv_id,
+            url=candidate.get('url'),
+            source='arxiv',
+            origin=arxiv_pdf_url(arxiv_id),
+            full_text=doc.full_text,
+            material_level='fulltext',
+            tags=['arXiv 自动取回'],
+            verify_status=result.level, verify_level=result.level,
+            verify_confidence=float(result.confidence), verify_evidence=result.to_dict(),
+        )
+        chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
+        added = kb.add_chunks(pid, chunks, policy=material_policy, level='fulltext', source='arxiv',
+                              origin=arxiv_pdf_url(arxiv_id), full_text=doc.full_text)
     set_candidate_status(kb, cid, 'imported', paper_id=pid)
     return {'paper_id': pid, 'arxiv_id': arxiv_id, 'reused_file': reused,
             'chunks': added, 'pages': len(doc.pages),
@@ -130,7 +134,7 @@ def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str) -> d
             'title': doc.title or candidate['title'], 'warnings': doc.warnings}
 
 
-def import_candidate(kb: KnowledgeBase, cfg: Config, verifier, cid: str) -> dict:
+def import_candidate(kb: KnowledgeBase, cfg: Config, verifier, cid: str, *, material_policy: str = 'replace') -> dict:
     """把一条候选导入知识库。
 
     - 有 arXiv 标识：直接走取全文（题录导入对它是降级）；
@@ -143,7 +147,7 @@ def import_candidate(kb: KnowledgeBase, cfg: Config, verifier, cid: str) -> dict
     if candidate.get('kind') != 'paper':
         raise ValueError('只有论文类候选可以导入知识库；网页请保存为来源快照。')
     if arxiv_id_of(candidate):
-        return fetch_candidate_pdf(kb, cfg, verifier, cid)
+        return fetch_candidate_pdf(kb, cfg, verifier, cid, material_policy=material_policy)
 
     import json as _json
     authors = candidate.get('authors')
