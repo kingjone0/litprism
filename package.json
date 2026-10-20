@@ -2,14 +2,56 @@
   "name": "litprism-desktop",
   "private": true,
   "version": "0.1.0",
-  "description": "文献棱镜 LitPrism 桌面外壳的构建工具链（仅用于 Tauri CLI，前端无打包步骤）",
+  "description": "文献棱镜 LitPrism 桌面外壳（Electron）；界面由 sidecar 提供，没有单独的前端打包步骤",
   "scripts": {
-    "tauri": "tauri",
-    "build": "tauri build",
-    "dev": "tauri dev"
+    "start": "electron desktop-electron/main.js",
+    "dev": "electron desktop-electron/main.js",
+    "dist": "electron-builder --win nsis",
+    "pack": "electron-builder --win --dir"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
-    "electron": "^44.9.0"
+    "electron": "^44.9.0",
+    "electron-builder": "^24.13.3"
+  },
+  "main": "desktop-electron/main.js",
+  "build": {
+    "appId": "ltd.philia093.litprism",
+    "productName": "LitPrism",
+    "copyright": "个人研究工具（非商业）",
+    "directories": {
+      "output": "packaging/installer"
+    },
+    "files": [
+      "desktop-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "packaging/dist/litprism-sidecar.exe",
+        "to": "litprism-sidecar.exe"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "icon": "packaging/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "LitPrism-Setup-${version}.${ext}",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "LitPrism 文献棱镜",
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

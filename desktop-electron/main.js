@@ -11,10 +11,25 @@
  * token 走 URL 的 hash（`#t=…`）：hash 不会发给服务器，也不进 Referer。
  */
 
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const electron = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = electron;
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+
+// 环境变量 ELECTRON_RUN_AS_NODE=1 会让 Electron 以**纯 Node** 身份启动，
+// 此时 require('electron') 拿不到 app，下一行就会以
+// 「Cannot read properties of undefined (reading 'commandLine')」崩掉 ——
+// 打包后的应用无控制台，看起来就是「双击没反应」。
+// 这是从某些 IDE/终端启动时继承下来的变量，不是打包问题。这里给出可读的原因。
+if (!app) {
+  console.error(
+    'Electron 以 Node 模式启动（ELECTRON_RUN_AS_NODE 被设置）。\n' +
+    '请清掉该变量后再启动，例如：env -u ELECTRON_RUN_AS_NODE LitPrism.exe\n' +
+    '或直接从资源管理器双击。'
+  );
+  process.exit(1);
+}
 
 const HANDSHAKE = 'LITPRISM_READY ';
 const STARTUP_TIMEOUT_MS = 120000;
@@ -39,6 +54,12 @@ let child = null;
 let sidecarInfo = null;
 let win = null;
 
+// 打包后没有控制台可看；启动过程写一行日志，排障时把路径打到 TEMP。
+const TRACE_LOG = path.join(process.env.TEMP || process.env.TMP || '.', 'litprism-shell.log');
+function trace(message) {
+  try { fs.appendFileSync(TRACE_LOG, `${new Date().toISOString()} ${message}\n`); } catch { /* 日志失败不影响启动 */ }
+}
+
 /** 找 sidecar：环境变量 > 打包后的 resources > 开发目录 */
 function locateSidecar() {
   const exeName = process.platform === 'win32' ? 'litprism-sidecar.exe' : 'litprism-sidecar';
@@ -60,6 +81,7 @@ function locateSidecar() {
 function startSidecar() {
   return new Promise((resolve, reject) => {
     const exe = locateSidecar();
+    trace('sidecar path: ' + exe);
     // Windows 下 .bat 不能直接 spawn（会 EINVAL），必须经 cmd
     const isBatch = /\.(bat|cmd)$/i.test(exe);
     const cmd = isBatch && process.platform === 'win32' ? 'cmd.exe' : exe;
@@ -67,6 +89,7 @@ function startSidecar() {
       ? ['/d', '/s', '/c', exe, '--port', '0']
       : ['--port', '0'];
 
+    trace('spawn: ' + cmd + ' ' + args.join(' '));
     child = spawn(cmd, args, {
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
@@ -77,11 +100,13 @@ function startSidecar() {
     }, STARTUP_TIMEOUT_MS);
 
     child.on('error', (err) => {
+      trace('spawn error: ' + err.message);
       clearTimeout(timer);
       reject(new Error(`启动后台服务失败（${exe}）：${err.message}`));
     });
 
     child.on('exit', (code) => {
+      trace('sidecar exited: ' + code);
       clearTimeout(timer);
       reject(new Error(`后台服务在握手前退出（code=${code}）`));
     });
@@ -169,7 +194,9 @@ async function selfTest() {
     fs.writeFileSync(path.join(__dirname, '..', '_selftest.png'), img.toPNG());
 
     // 界面验收：进到论文解读 → 点开第一条待核对陈述 → 检查右栏原文是否高亮了对应句子。
-    const nav = await win.webContents.executeJavaScript(
+    // 只验某个视图时可设 LITPRISM_SELFTEST_SKIP_CLAIM=1 跳过这段（省时间，避免挂在语义接口上）。
+    const nav = process.env.LITPRISM_SELFTEST_SKIP_CLAIM ? {found: false}
+      : await win.webContents.executeJavaScript(
       `(async () => {
          const sleep = ms => new Promise(r => setTimeout(r, ms));
          const paper = document.querySelector('[data-paper]');
@@ -189,16 +216,42 @@ async function selfTest() {
                  text: box ? box.innerText.slice(0, 500) : ''};
        })()`
     );
-    fs.writeFileSync(path.join(__dirname, '..', '_selftest_inspector.json'),
-      JSON.stringify(nav, null, 2), 'utf8');
-    const shot = await win.webContents.capturePage();
-    fs.writeFileSync(path.join(__dirname, '..', '_selftest_inspector.png'), shot.toPNG());
+    if (!process.env.LITPRISM_SELFTEST_SKIP_CLAIM) {
+      fs.writeFileSync(path.join(__dirname, '..', '_selftest_inspector.json'),
+        JSON.stringify(nav, null, 2), 'utf8');
+      const shot = await win.webContents.capturePage();
+      fs.writeFileSync(path.join(__dirname, '..', '_selftest_inspector.png'), shot.toPNG());
+    }
+
+    // 可选：切到指定视图并截图（用于新界面的可视验证）
+    const view = process.env.LITPRISM_SELFTEST_VIEW;
+    if (view) {
+      const shot = await win.webContents.executeJavaScript(
+        `(async () => {
+           const sleep = ms => new Promise(r => setTimeout(r, ms));
+           const nav = document.querySelector('[data-view="${view}"]');
+           if (nav) { nav.click(); await sleep(2000); }
+           const pane = document.querySelector('[data-pane="${view}"]');
+           return {clicked: !!nav, text: pane ? pane.innerText.slice(0, 1500) : ''};
+         })()`
+      );
+      fs.writeFileSync(path.join(__dirname, '..', '_selftest_view.json'),
+        JSON.stringify(shot, null, 2), 'utf8');
+      const viewShot = await win.webContents.capturePage();
+      fs.writeFileSync(path.join(__dirname, '..', '_selftest_view.png'), viewShot.toPNG());
+    }
   } catch (e) {
     fs.writeFileSync(path.join(__dirname, '..', '_selftest.err'), String(e && e.stack), 'utf8');
   }
 }
 
 async function createWindow() {
+  // 叠层控件与页面顶栏同色，避免出现一条突兀的浅/深色带
+  const TITLEBAR_COLORS = {
+    light: { color: '#ffffff', symbol: '#55504a' },
+    dark: { color: '#1c1b19', symbol: '#d9d4cc' },
+  };
+
   win = new BrowserWindow({
     width: 1360,
     height: 880,
@@ -208,11 +261,27 @@ async function createWindow() {
     backgroundColor: '#fcfcfa',
     autoHideMenuBar: true,
     show: false,
+    // 页面里已经有自绘的工具栏；再叠一条系统标题栏就是两层边框。
+    // 用 hidden + overlay：去掉系统标题栏，只把最小化/最大化/关闭叠在右上角。
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: TITLEBAR_COLORS.light.color, symbolColor: TITLEBAR_COLORS.light.symbol, height: 44 },
     webPreferences: {
-      // 页面由本地后台提供，不需要任何 Node 能力 —— 保持默认的隔离
+      // 页面由本地后台提供，不需要任何 Node 能力 —— 只加一个主题通道
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
+  });
+
+  ipcMain.on('ui:titlebar-theme', (_event, theme) => {
+    if (!win || win.isDestroyed()) return;
+    const palette = TITLEBAR_COLORS[theme] || TITLEBAR_COLORS.light;
+    try {
+      win.setTitleBarOverlay({ color: palette.color, symbolColor: palette.symbol, height: 44 });
+      win.setBackgroundColor(theme === 'dark' ? '#171614' : '#fcfcfa');
+    } catch {
+      // 老版本 Electron 不支持动态更换叠层颜色：保持初始配色即可
+    }
   });
 
   win.once('ready-to-show', () => win.show());
@@ -225,9 +294,12 @@ async function createWindow() {
 
   try {
     const { port, token } = await startSidecar();
+    trace('handshake ok: port=' + port);
     await win.loadURL(`http://127.0.0.1:${port}/#t=${encodeURIComponent(token)}`);
+    trace('window loaded');
     if (process.env.LITPRISM_SELFTEST) await selfTest();
   } catch (err) {
+    trace('startup failed: ' + err.message);
     await win.loadURL(
       'data:text/html;charset=utf-8,' +
         encodeURIComponent(

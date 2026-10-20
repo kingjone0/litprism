@@ -44,19 +44,20 @@ htmlcov/
 tools/_ocr_out/
 
 # ---- Tauri / 前端构建产物（阶段 F 用）----
-src-tauri/target/
-# tauri-build 每次构建都会重新生成，无需入库
-src-tauri/gen/
-# 前端镜像目录与 sidecar 副本都是 packaging/ 脚本生成的，不入库
-src-tauri/ui/
-src-tauri/binaries/
+# Tauri 工程已删除（2026-10-19）；前端镜像目录与 sidecar 副本是 packaging/ 脚本生成的，不入库
 node_modules/
 *.log
 
 # ---- 调试探针产物 ----
-_selftest.*
+_selftest*
 _probe.png
 packaging/_sidecar_stderr.log
+
+# ---- 打包与视觉验证产物（可随时重建）----
+packaging/installer/
+packaging/shots/
+packaging/dist/
+packaging/build/
 
 # ---- 编辑器 / 系统 ----
 .idea/
