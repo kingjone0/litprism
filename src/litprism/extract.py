@@ -229,6 +229,15 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     missing_fields = [label for field, label in _FIELDS if not merged[field]]
     merged['field_notes'] = ('本次未获得可校验依据的字段：'+'、'.join(missing_fields)+'。请核对原文，不能据此断言全文未提及。') if missing_fields else '所有展示字段均保留本批原文引用；内容仍需结合原文核对。'
     merged['_coverage'] = coverage
+    from .db import material_label, material_rank
+    level = (paper.get('material_level') or 'unknown')
+    coverage['material_level'] = level
+    coverage['material_label'] = material_label(level)
+    if material_rank(level) < material_rank('fulltext'):
+        # 把"只有题录/摘要"顶到最前面：覆盖 N/N 不等于读完了整篇。
+        coverage['partial_material'] = True
+        prefix = f'本篇材料完整度为「{material_label(level)}」：解读与引用只覆盖已索引内容，不能视为整篇论文已读完。'
+        merged['field_notes'] = prefix + ' ' + merged.get('field_notes', '')
     coverage['gates'] = gate_log
     coverage['uncovered_units'] = uncovered
     coverage['usage'] = tracker.to_dict()

@@ -71,6 +71,60 @@ def register_evidence(app, kb, cfg, verifier):
         return evidence_detail(kb, ref)
 
 
+    @app.post('/api/candidates/{cid}/import')
+    def candidates_import(cid: str):
+        from ..remote import import_candidate
+        try:
+            return import_candidate(kb, cfg, verifier, cid)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f'导入失败：{type(exc).__name__}') from exc
+
+    @app.post('/api/candidates/{cid}/fetch')
+    def candidates_fetch(cid: str):
+        from ..remote import fetch_candidate_pdf
+        try:
+            return fetch_candidate_pdf(kb, cfg, verifier, cid)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - 网络/解析异常统一报 502，不泄漏堆栈
+            raise HTTPException(502, f'取全文失败：{type(exc).__name__}') from exc
+
+    @app.get('/api/candidates')
+    def candidates_list(kind: str | None = None, status: str | None = None,
+                        query: str | None = None, hide_in_library: bool = False, limit: int = 50):
+        from ..candidates import list_candidates
+        try:
+            return {'items': list_candidates(kb, kind=kind, status=status, query=query,
+                                             hide_in_library=hide_in_library, limit=limit)}
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post('/api/candidates')
+    def candidates_add(req: dict):
+        from ..candidates import add_manual_candidate
+        try:
+            return add_manual_candidate(kb, title=req.get('title') or '', url=req.get('url'),
+                                        doi=req.get('doi'), arxiv_id=req.get('arxiv_id'),
+                                        year=req.get('year'), note=req.get('note'))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post('/api/candidates/sync')
+    def candidates_sync():
+        from ..candidates import sync_library
+        return sync_library(kb)
+
+    @app.post('/api/candidates/{cid}/status')
+    def candidates_status(cid: str, req: dict):
+        from ..candidates import set_candidate_status
+        try:
+            return set_candidate_status(kb, cid, req.get('status'), paper_id=req.get('paper_id'))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
 def discover_web(kb, cfg, query):
     import requests
 
@@ -101,4 +155,13 @@ def discover_web(kb, cfg, query):
             items.append(create_source(kb, kind='web', title=record.get('title'), content=record.get('content'), url=record.get('url')))
         except ValueError:
             continue
-    return {'items': items, 'note': '搜索摘要候选，尚未人工审核，不作为知识库事实依据。'}
+    pool = None
+    try:
+        from ..candidates import save_candidates
+        pool = save_candidates(kb, [{'title': i.get('title'), 'url': i.get('url'),
+                                     'abstract': (i.get('content') or '')[:500]} for i in items],
+                               query=query, kind='web', source='tavily')
+    except Exception:  # noqa: BLE001 - 留档失败不影响已保存的快照
+        pool = None
+    return {'items': items, 'candidates': pool,
+            'note': '搜索摘要候选，尚未人工审核，不作为知识库事实依据。'}

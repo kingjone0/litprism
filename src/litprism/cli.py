@@ -193,6 +193,7 @@ def cmd_add(ctx: Ctx, args) -> int:
             title=doc.title, authors=doc.authors, year=doc.year, abstract=doc.abstract,
             doi=doc.doi, arxiv_id=doc.arxiv_id, venue=doc.venue,
             source="local_pdf", origin=str(p), full_text=doc.full_text,
+            material_level="fulltext",
             tags=[t for t in (args.tags or "").split(",") if t.strip()],
             verify_status=status, verify_level=level, verify_confidence=conf,
             verify_evidence=verify_evidence,

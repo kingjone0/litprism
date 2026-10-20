@@ -270,6 +270,7 @@ async function loadComparison() {
   box.innerHTML = `<div class="source-intro">模型：${esc(r.data._model || '未知')}</div>
     ${check.passed === false ? `<div class="lui-degraded">${esc((check.issues || []).join('；'))}</div>` : '<button class="btn" id="btnSaveComparison">保存为对比报告</button>'}
     <div class="reading-report">${LitUI.md(r.data.summary || '')}
+      ${materialNote(r.data._coverage)}
       ${coverageNote(r.data._coverage)}
       ${semanticReviewPanel(r.data._semantic_review, {kind: 'run', id: r.data._semantic_run_id}, r.data._candidates)}
       ${(r.data.dimensions || []).length ? `<div style="overflow-x:auto"><table class="table"><thead><tr><th>维度</th>${(r.data._papers || []).map(p => `<th>${esc(p.title)}</th>`).join('')}</tr></thead>
@@ -322,6 +323,15 @@ function showSkillRun(skill) {
       $('#skillRunResult')?.remove();
       $('#skillCards').insertAdjacentHTML('afterbegin', `<div class="card" id="skillRunResult"><div class="card-body">${LitUI.md(r.answer || '')}${r.deliverable_id ? '<p class="insp-note">已保存到研究产出。</p>' : ''}</div></div>`);
     }, '运行并检查引用');
+}
+
+function materialNote(c) {
+  if (!c || !c.material_level) return '';
+  const label = c.material_label || c.material_level;
+  const warn = c.partial_material
+    ? `<div class="lui-degraded">材料完整度：${esc(label)} —— 覆盖 ${esc(c.read_chunks)}/${esc(c.total_chunks)} 块只代表"已索引内容"，不等于整篇论文已读完。</div>`
+    : '';
+  return warn || `<div class="insp-note">材料完整度：${esc(label)}</div>`;
 }
 
 function coverageNote(c) {
@@ -706,3 +716,145 @@ document.addEventListener('drop', e => {
   e.preventDefault(); openView('library'); importFiles([...e.dataTransfer.files]);
 });
 refreshCollections().catch(e => toast(e.message, true));
+
+
+/* ---------------------------------------------------------------------------
+ * 候选池：发现结果的留档区，与知识库双向对账
+ *
+ * 刻意不做的事：这里没有"自动去出版商页面抓 PDF"。只有 arXiv 能免费直连，
+ * 其余来源一律引导用户手动补充/手动导入 —— 版权与登录问题不在这层解决。
+ * ------------------------------------------------------------------------ */
+const POOL_FILTERS = { open: '待处理', library: '已在库', all: '全部' };
+
+function poolStatusChip(item) {
+  if (item.in_library) return '<span class="ev-claim-chip ok">已在库</span>';
+  if (item.status === 'ignored') return '<span class="ev-claim-chip">已忽略</span>';
+  if (item.status === 'rejected') return '<span class="ev-claim-chip warn">已拒绝</span>';
+  return '<span class="ev-claim-chip">待处理</span>';
+}
+
+function poolArxivId(item) {
+  const raw = `${item.arxiv_id || ''} ${item.url || ''} ${item.doi || ''}`;
+  const m = /(\d{4}\.\d{4,5}(?:v\d+)?)/.exec(raw.replace(/10\.48550\/arxiv\.?/i, ''));
+  return m ? m[1] : '';
+}
+
+function poolRow(item) {
+  const arxiv = poolArxivId(item);
+  const meta = [item.year, item.source, item.doi ? 'DOI ' + item.doi : '', arxiv ? 'arXiv ' + arxiv : '']
+    .filter(Boolean).map(esc).join(' · ');
+  const title = item.in_library && item.library_paper_id
+    ? `<a href="#paper-${esc(item.library_paper_id)}" data-pool-open="${esc(item.library_paper_id)}">${esc(item.title)}</a>`
+    : `<a href="${esc(item.url || '#')}" target="_blank" rel="noreferrer">${esc(item.title)}</a>`;
+  const acts = [];
+  if (!item.in_library && arxiv) acts.push(`<button class="btn sm primary" data-pool-fetch="${esc(item.id)}">取全文</button>`);
+  // 非 arXiv 的论文只能导题录；网页候选不冒充论文，保持忽略/拒绝
+  if (!item.in_library && !arxiv && item.kind === 'paper') acts.push(`<button class="btn sm" data-pool-import="${esc(item.id)}">导入题录</button>`);
+  if (item.in_library && item.library_paper_id) acts.push(`<button class="btn sm" data-pool-open="${esc(item.library_paper_id)}">打开论文</button>`);
+  if (!item.in_library && item.status === 'new') {
+    acts.push(`<button class="btn sm" data-pool-ignore="${esc(item.id)}">忽略</button>`);
+    acts.push(`<button class="btn sm" data-pool-reject="${esc(item.id)}">拒绝</button>`);
+  }
+  return `<li class="pool-row">
+    <div class="pool-main">
+      <p class="pool-title">${title}</p>
+      <p class="pool-meta">${meta || '无元数据'}</p>
+      ${item.query && item.query !== '手动补充' ? `<p class="pool-meta">来自检索「${esc(item.query)}」</p>` : ''}
+    </div>
+    <div class="pool-side">${poolStatusChip(item)}<div class="pool-actions">${acts.join('')}</div></div>
+  </li>`;
+}
+
+async function loadCandidates() {
+  const box = $('#candidatePool');
+  if (!box) return;
+  const filter = S.poolFilter || 'open';
+  box.innerHTML = `<div class="pool-head"><h2>候选池</h2><p class="pool-sub">检索到的东西先落在这里；arXiv 可直接取全文，其余请手动导入。</p></div>
+    <p class="pool-meta" role="status">正在读取候选…</p>`;
+  const query = filter === 'open' ? '?hide_in_library=1&status=new'
+    : filter === 'library' ? '?status=imported' : '?limit=100';
+  let data;
+  try { data = await api('/api/candidates' + query); }
+  catch (error) {
+    box.innerHTML = `<div class="pool-head"><h2>候选池</h2></div>
+      <p class="lui-degraded">候选读取失败：${esc(error.message)}</p>`;
+    return;
+  }
+  const items = data.items || [];
+  const groups = new Map();
+  items.forEach(i => { const k = i.query || '（无查询）'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(i); });
+  const list = items.length
+    ? `<ul class="pool-list">${[...groups].map(([q, rows]) => `
+        ${filter === 'all' ? `<li class="pool-group">${esc(q)}<span>${rows.length}</span></li>` : ''}
+        ${rows.map(poolRow).join('')}`).join('')}</ul>`
+    : `<p class="pool-empty">${filter === 'library'
+        ? '还没有已入库的候选。导入论文后点「与知识库核对」，这里会自动更新。'
+        : '暂无待处理候选。用上方检索，或手动补充一条。'}</p>`;
+  box.innerHTML = `<div class="pool-head">
+      <h2>候选池<span class="pool-count">${items.length}</span></h2>
+      <div class="pool-tools">
+        <div class="pool-seg" role="group" aria-label="筛选候选">
+          ${Object.entries(POOL_FILTERS).map(([k, label]) =>
+            `<button data-pool-filter="${k}" class="${filter === k ? 'active' : ''}">${label}</button>`).join('')}
+        </div>
+        <button class="btn sm" data-pool-sync>与知识库核对</button>
+        <button class="btn sm" data-pool-add>手动补充</button>
+      </div>
+    </div>
+    <form class="pool-form" id="poolAddForm" hidden>
+      <label>标题<input class="input" name="title" required maxlength="500" placeholder="论文或网页标题"></label>
+      <label>arXiv ID<input class="input" name="arxiv_id" placeholder="1607.01759，可留空"></label>
+      <label>链接<input class="input" name="url" placeholder="https://…"></label>
+      <div class="row"><button class="btn primary sm">加入候选</button><button class="btn sm" type="button" data-pool-cancel>取消</button></div>
+      <p class="pool-hint">只有带 arXiv ID 的候选能自动取全文；其他来源请手动下载后在知识库导入。</p>
+      <p class="task-error" role="alert"></p>
+    </form>
+    ${list}`;
+
+  $$('[data-pool-filter]', box).forEach(b => b.onclick = () => { S.poolFilter = b.dataset.poolFilter; loadCandidates(); });
+  $('[data-pool-add]', box).onclick = () => { $('#poolAddForm', box).hidden = false; $('input[name=title]', box).focus(); };
+  $('[data-pool-cancel]', box).onclick = () => { $('#poolAddForm', box).hidden = true; };
+  $$('[data-pool-open]', box).forEach(b => b.onclick = ev => {
+    ev.preventDefault(); openView('paper', { paperId: b.dataset.poolOpen });
+  });
+  $$('[data-pool-ignore]', box).forEach(b => b.onclick = () => poolAct(b, `/api/candidates/${encodeURIComponent(b.dataset.poolIgnore)}/status`, { status: 'ignored' }));
+  $$('[data-pool-reject]', box).forEach(b => b.onclick = () => poolAct(b, `/api/candidates/${encodeURIComponent(b.dataset.poolReject)}/status`, { status: 'rejected' }));
+  $$('[data-pool-fetch]', box).forEach(b => b.onclick = () => poolAct(b, `/api/candidates/${encodeURIComponent(b.dataset.poolFetch)}/fetch`, {}, '正在下载并解析…'));
+  $$('[data-pool-import]', box).forEach(b => b.onclick = () => poolAct(b, `/api/candidates/${encodeURIComponent(b.dataset.poolImport)}/import`, {}, '正在核验并导入…'));
+  $('[data-pool-sync]', box).onclick = async ev => {
+    const btn = ev.currentTarget; btn.disabled = true;
+    try {
+      const r = await api('/api/candidates/sync', { method: 'POST' });
+      toast(r.linked ? `已把 ${r.linked} 条候选标记为已在库` : '没有新的已在库候选');
+      await loadCandidates();
+    } catch (error) { toast(error.message, true); btn.disabled = false; }
+  };
+  const form = $('#poolAddForm', box);
+  form.onsubmit = async ev => {
+    ev.preventDefault();
+    const values = Object.fromEntries(new FormData(form));
+    const btn = $('button.primary', form); btn.disabled = true;
+    try {
+      const r = await api('/api/candidates', { method: 'POST', body: values });
+      toast(r.created ? '已加入候选' : '这条候选已存在');
+      form.hidden = true; form.reset();
+      await loadCandidates();
+    } catch (error) { $('.task-error', form).textContent = error.message; btn.disabled = false; }
+  };
+}
+
+async function poolAct(button, url, body, pending) {
+  const row = button.closest('.pool-row');
+  const actions = $('.pool-actions', row);
+  const snapshot = actions.innerHTML;
+  button.disabled = true;
+  actions.innerHTML = `<span class="pool-pending">${esc(pending || '处理中…')}</span>`;
+  try {
+    const r = await api(url, { method: 'POST', body });
+    toast(r && r.paper_id ? (r.material_level ? `已导入（${r.material_level}）` : '已取回全文并入库') : '已更新');
+    await loadCandidates();
+  } catch (error) {
+    actions.innerHTML = snapshot;
+    row.insertAdjacentHTML('beforeend', `<p class="lui-degraded">${esc(error.message)}</p>`);
+  }
+}

@@ -522,6 +522,76 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
         checked_at TEXT NOT NULL, PRIMARY KEY(provider_id, model_id))''')
 
 
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """材料完整度：区分题录/摘要/部分/全文，避免把摘要当整篇解读。"""
+    if not _column_exists(conn, 'papers', 'material_level'):
+        conn.execute("ALTER TABLE papers ADD COLUMN material_level TEXT")
+    # 老数据按已有内容推断：有带页码的块=全文；只有题录摘要块=abstract；否则 metadata
+    rows = conn.execute("SELECT id, abstract FROM papers WHERE material_level IS NULL").fetchall()
+    for row in rows:
+        pid, abstract = row[0], row[1]
+        paged = conn.execute(
+            "SELECT 1 FROM chunks WHERE paper_id=? AND page IS NOT NULL LIMIT 1", (pid,)).fetchone()
+        any_chunk = conn.execute("SELECT 1 FROM chunks WHERE paper_id=? LIMIT 1", (pid,)).fetchone()
+        if paged:
+            level = 'fulltext'
+        elif any_chunk:
+            level = 'abstract'
+        elif abstract:
+            level = 'metadata'
+        else:
+            level = 'unknown'
+        conn.execute("UPDATE papers SET material_level=? WHERE id=?", (level, pid))
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """统一候选池：学术检索与网页搜索的候选都留档，可筛选、可暂存、可回溯。"""
+    conn.execute("""CREATE TABLE IF NOT EXISTS source_candidates (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        source TEXT,
+        query TEXT,
+        title TEXT NOT NULL,
+        url TEXT, doi TEXT, arxiv_id TEXT,
+        abstract TEXT, year INTEGER, authors TEXT,
+        fingerprint TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'new',
+        paper_id TEXT,
+        extra TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_status ON source_candidates(status, kind)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_query ON source_candidates(query)")
+
+
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """人工补录机器漏提的陈述（N05 / 原 E-1）。
+
+    为什么不复用 ``semantic_reviews``：那张表记的是**裁决**（确认/修正/拒绝），
+    这里记的是**采集**（人补了一条机器没提的）。混在一起会让召回分母无法解释 ——
+    "确认"是复核已有陈述，"补录"是增加原本不存在的陈述。
+
+    召回口径：``manual / (machine + manual)``。补录必须绑原文引用，
+    否则无法排除"人凭印象补一条"，分母就不可信。
+    """
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS manual_claims (
+          id            TEXT PRIMARY KEY,
+          paper_id      TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+          analysis_hash TEXT NOT NULL,
+          field         TEXT NOT NULL,
+          text          TEXT NOT NULL,
+          chunk_id      TEXT NOT NULL,
+          page          INTEGER,
+          quote         TEXT NOT NULL,
+          note          TEXT,
+          created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_manual_claims_version
+          ON manual_claims(paper_id, analysis_hash);
+    ''')
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
@@ -531,6 +601,9 @@ MIGRATIONS: list[Migration] = [
     Migration(6, '模型窗口随模型走：provider_models.window_tokens', _migrate_v6),
     Migration(7, '持久分析阶段预算、请求结果与安全恢复记录', _migrate_v7),
     Migration(8, '模型输出能力（任务额度自动计算）', _migrate_v8),
+    Migration(9, '材料完整度 papers.material_level', _migrate_v9),
+    Migration(10, '统一候选池 source_candidates', _migrate_v10),
+    Migration(11, '人工补录机器漏提的陈述（manual_claims）', _migrate_v11),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

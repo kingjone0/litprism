@@ -53,6 +53,29 @@ def _j(value: Any, default: Any) -> Any:
     return value
 
 
+MATERIAL_LEVELS = ('unknown', 'metadata', 'abstract', 'partial', 'fulltext')
+
+MATERIAL_LABELS = {
+    'unknown': '完整度未知',
+    'metadata': '仅题录',
+    'abstract': '仅题录与摘要',
+    'partial': '部分正文',
+    'fulltext': '全文',
+}
+
+
+def material_rank(level: str | None) -> int:
+    """完整度排序：数字越大材料越全。未知按最低处理。"""
+    try:
+        return MATERIAL_LEVELS.index((level or 'unknown').strip().lower())
+    except ValueError:
+        return 0
+
+
+def material_label(level: str | None) -> str:
+    return MATERIAL_LABELS.get((level or 'unknown').strip().lower(), '完整度未知')
+
+
 class KnowledgeBase:
     """本地论文知识库。线程内复用同一个连接。"""
 
@@ -112,10 +135,15 @@ class KnowledgeBase:
         verify_confidence: float = 0.0,
         verify_evidence: dict | None = None,
         paper_id: str | None = None,
+        material_level: str = "unknown",
     ) -> str:
         """新增论文；若 DOI 或 标题+年份 指纹已存在则返回已有 id（去重）。"""
         existing = self.find_duplicate(doi=doi, title=title, year=year)
         if existing:
+            # 已有记录只在完整度更高时才升级，避免"题录覆盖全文"。
+            row = self._con.execute('SELECT material_level FROM papers WHERE id=?', (existing,)).fetchone()
+            if (material_rank(material_level) > material_rank(row['material_level'] if row else None)):
+                self.update_paper(existing, material_level=material_level)
             self.update_paper(
                 existing,
                 verify_status=verify_status,
@@ -138,8 +166,8 @@ class KnowledgeBase:
             con.execute(
                 """INSERT INTO papers (id, doi, arxiv_id, title, authors, year, venue, abstract, url,
                        source, origin, verify_status, verify_level, verify_confidence, verify_evidence,
-                       verified_at, tags, full_text, fingerprint, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       verified_at, tags, full_text, fingerprint, created_at, updated_at, material_level)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     pid, doi, arxiv_id, title.strip(),
                     json.dumps(list(authors or []), ensure_ascii=False),
@@ -148,7 +176,7 @@ class KnowledgeBase:
                     json.dumps(verify_evidence or {}, ensure_ascii=False),
                     now if verify_status == "verified" else None,
                     json.dumps(list(tags or []), ensure_ascii=False),
-                    full_text, paper_fingerprint(title, year), now, now,
+                    full_text, paper_fingerprint(title, year), now, now, material_level,
                 ),
             )
         return pid
@@ -174,7 +202,7 @@ class KnowledgeBase:
         allowed = {
             "title", "authors", "year", "venue", "abstract", "doi", "arxiv_id", "url",
             "source", "origin", "verify_status", "verify_level", "verify_confidence",
-            "verify_evidence", "tags", "note", "full_text", "fingerprint",
+            "verify_evidence", "tags", "note", "full_text", "fingerprint", "material_level",
         }
         sets, vals = [], []
         for k, v in fields.items():

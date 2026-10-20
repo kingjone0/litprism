@@ -279,7 +279,7 @@ def create_app(cfg: Config) -> FastAPI:
                 pid = kb.add_paper(
                     title=doc.title, authors=doc.authors, year=doc.year, abstract=doc.abstract,
                     doi=doc.doi, arxiv_id=doc.arxiv_id, source="local_pdf", origin=f.filename,
-                    full_text=doc.full_text, tags=["本地上传"],
+                    full_text=doc.full_text, tags=["本地上传"], material_level="fulltext",
                     verify_status=v_status, verify_level=v_level,
                     verify_confidence=v_conf, verify_evidence=v_ev,
                 )
@@ -323,6 +323,12 @@ def create_app(cfg: Config) -> FastAPI:
         if req.external:
             recs = search_external(cfg, verifier, req.query, limit=req.limit)
             out["external"] = recs
+            try:
+                # 候选池只做留档与去重；能不能引用仍由核验/人工放行决定。
+                from ..candidates import save_candidates
+                out["candidates"] = save_candidates(kb, recs, query=req.query, kind='paper')
+            except Exception:  # noqa: BLE001 - 留档失败不该让检索本身失败
+                out["candidates"] = None
         return out
 
     # ---------------------------------------------------------------- 对比

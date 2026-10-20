@@ -292,6 +292,7 @@ def import_record(
         verify_level=level or "verified",
         verify_confidence=float(verification.confidence if verification else 1.0),
         verify_evidence=vr_dict,
+        material_level="abstract" if record.get("abstract") else "metadata",
     )
     existing = kb.get_paper(pid)
     created = bool(existing and existing.get("created_at"))

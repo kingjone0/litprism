@@ -253,7 +253,7 @@ def test_mismatched_request_without_retried_parent_is_never_sent(env):
 
 
 def test_migration_from_v6_preserves_existing_analysis_and_is_idempotent(tmp_path):
-    from litprism.schema import MIGRATIONS, apply_migrations, current_version
+    from litprism.schema import MIGRATIONS, SCHEMA_VERSION, apply_migrations, current_version
     con = sqlite3.connect(tmp_path/'old.sqlite')
     try:
         for migration in MIGRATIONS:
@@ -263,7 +263,8 @@ def test_migration_from_v6_preserves_existing_analysis_and_is_idempotent(tmp_pat
         con.execute("INSERT INTO papers(id,title) VALUES ('old','old paper')")
         con.execute("INSERT INTO analyses(paper_id,payload) VALUES ('old',?)", ('{"research_question":"preserved"}',))
         con.commit()
-        assert len(apply_migrations(con)) == 2 and current_version(con) == 8
+        assert len(apply_migrations(con)) == SCHEMA_VERSION - 6
+        assert current_version(con) == SCHEMA_VERSION
         assert not apply_migrations(con)
         assert con.execute('SELECT COUNT(*) FROM analysis_runs').fetchone()[0] == 0
         assert json.loads(con.execute("SELECT payload FROM analyses WHERE paper_id='old'").fetchone()[0]) == {'research_question': 'preserved'}

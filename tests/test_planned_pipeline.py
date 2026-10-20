@@ -211,3 +211,17 @@ def test_semantic_review_can_be_skipped_with_candidates_kept(pipeline):
     # 未跑机器复核时正文保留原始提取，不因"没有 supported"而清空
     assert payload['key_conclusions'].strip()
 
+
+
+def test_abstract_only_paper_is_flagged_in_analysis(pipeline):
+    """只有题录摘要的论文：解读必须明确标注，不能因为 N/N 块送达就算整篇读完。"""
+    cfg, kb, pid, llm, calls, api = pipeline
+    aid = kb.add_paper(title='Abstract only study', abstract='一句话摘要', verify_level='verified',
+                       material_level='abstract')
+    kb.add_chunks(aid, [{'text': '标题与摘要。模型得分为71.8，实验使用固定测试集。' * 12,
+                         'page': None, 'section': '题录与摘要'}])
+    payload = analyze_paper(kb, cfg, llm, aid, force=True, with_concepts=False, semantic_review=False)
+    coverage = payload['_coverage']
+    assert coverage['material_level'] == 'abstract'
+    assert coverage['partial_material'] is True
+    assert '仅题录与摘要' in payload['field_notes']
