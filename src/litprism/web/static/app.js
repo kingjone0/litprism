@@ -14,7 +14,8 @@ const S = {
   activeView: 'library',
   activeConv: null,
   activePaper: null,
-  tabs: [],
+  // 顶部只显示「当前这一页」：不累积多个标签，也没有关闭按钮。
+  locLabel: '',
   theme: localStorage.getItem('litprism-theme') || 'light',
   inspector: localStorage.getItem('litprism-evidence-panel') === '1',
   sidebar: localStorage.getItem('litprism-sidebar') !== '0',
@@ -144,6 +145,9 @@ function badgeOf(level) {
 function applyTheme() {
   document.documentElement.dataset.theme = S.theme;
   $('#btnTheme').title = S.theme === 'dark' ? '切换为浅色' : '切换为深色';
+  // 外壳的窗口控件（最小化/最大化/关闭）叠在顶栏右上角，颜色必须跟着主题走
+  window.litShell?.setTitleBarTheme?.(S.theme);
+  document.body.classList.toggle('is-electron', Boolean(window.litShell));
 }
 function applyInspector() {
   $('#main').classList.toggle('inspector-hidden', !S.inspector);
@@ -198,8 +202,8 @@ function openView(view, opts = {}) {
     S.sources = [];
   }
 
-  if (!S.tabs.includes(view)) S.tabs.push(view);
-  renderTabs();
+  S.locLabel = VIEW_TITLES[view] || view;
+  renderLocation();
   $$('.side-item').forEach(b => b.classList.toggle('active',
     b.dataset.view === view || (view === 'paper' && b.dataset.paper === S.activePaper) ||
     (view === 'chat' && b.dataset.conv === S.activeConv)));
@@ -208,7 +212,7 @@ function openView(view, opts = {}) {
     library: loadLibrary, paper: loadPaperDetail, chat: loadChat,
     deliverables: loadDeliverables, skills: loadSkills, verify: loadVerify,
     compare: loadComparison, memories: loadMemories, trash: loadTrash,
-    knowledge: loadKnowledge,
+    knowledge: loadKnowledge, recommend: loadCandidates,
   }[view];
   if (loader) loader().catch(e => toast(e.message, true));
   refreshInspector();
@@ -220,25 +224,18 @@ function enterView(view) {
   openView(view);
 }
 
-function renderTabs() {
+/** 顶部只画当前这一页的名称；文档加载出真实标题后回填。 */
+function renderLocation() {
   const bar = $('#tabbar');
-  if (!S.tabs.length) { bar.innerHTML = ''; return; }
-  bar.innerHTML = S.tabs.map(v => `
-    <button class="tab ${v === S.activeView ? 'active' : ''}" data-tab="${v}">
-      ${esc(VIEW_TITLES[v] || v)}
-      ${S.tabs.length > 1 ? `<span class="x" data-close="${v}">✕</span>` : ''}
-    </button>`).join('');
-  $$('.tab', bar).forEach(b => {
-    b.onclick = e => {
-      if (e.target.dataset.close) {
-        S.tabs = S.tabs.filter(t => t !== e.target.dataset.close);
-        if (S.activeView === e.target.dataset.close) openView(S.tabs[S.tabs.length - 1] || 'library');
-        else renderTabs();
-        return;
-      }
-      openView(b.dataset.tab);
-    };
-  });
+  if (!bar) return;
+  const label = S.locLabel || VIEW_TITLES[S.activeView] || '';
+  bar.innerHTML = label ? `<span class="loc-chip" title="${esc(label)}">${esc(label)}</span>` : '';
+}
+
+function setLocation(label) {
+  if (!label || S.locLabel === label) return;
+  S.locLabel = label;
+  renderLocation();
 }
 
 /* ==========================================================================
@@ -387,6 +384,7 @@ async function loadPaperDetail() {
     if (S.activePaper !== requestedPaper) return;
     const p = d.paper || d;
     const a = d.analysis || {};
+    setLocation(p.display_title || p.title || '');
     S.paperAnalysis = a;
     const concepts = d.concepts || a.concepts || [];
 
@@ -423,8 +421,11 @@ async function loadPaperDetail() {
 
       <div data-ppane="analysis">
         <div id="analysisRuns" aria-live="polite"></div>
+        ${materialNote(a._coverage)}
         ${coverageNote(a._coverage)}
         ${semanticReviewPanel(a._semantic_review, {kind: 'paper', id: p.id}, a._candidates)}
+        ${qualityPanel(p.id)}
+        ${manualClaimsPanel(p.id)}
         ${a._concepts_error ? `<div class="lui-degraded">术语提取未完成：${esc(a._concepts_error)}</div>` : ''}
         ${a._mock ? '<div class="lui-degraded">离线占位模型（mock）：仅演示流程，不构成真实学术解读。配置模型后请重新解读。</div>' : ''}
         ${a._model ? `<div class="source-intro">生成模型：${esc(a._model)}</div>` : ''}
@@ -489,7 +490,7 @@ async function loadPaperDetail() {
     $('#btnDelete').onclick = () => {
       if (!confirm('移入回收站？该论文将不再出现在检索与问答中。')) return;
       api(`/api/paper/${encodeURIComponent(S.activePaper)}`, { method: 'DELETE' })
-        .then(async () => { toast('已移入回收站'); S.activePaper = null; S.tabs = S.tabs.filter(t => t !== 'paper'); await refreshLibrary(); openView('library'); })
+        .then(async () => { toast('已移入回收站'); S.activePaper = null; await refreshLibrary(); openView('library'); })
         .catch(e => toast(e.message, true));
     };
 
@@ -503,6 +504,12 @@ async function loadPaperDetail() {
     };
     $('#btnBudgetAnalyze').onclick = () => analysisRunDialog(p.id);
     loadAnalysisRuns(p.id);
+
+    // 补录与质量面板：数据单独加载，避免拖慢首屏
+    loadQuality(p.id);
+    loadManualClaims(p.id);
+    const addBtn = $('#btnAddClaim');
+    if (addBtn) addBtn.onclick = () => openClaimForm(p.id);
   } catch (e) {
     if (S.activePaper !== requestedPaper) return;
     box.innerHTML = `<div class="empty"><div class="title">加载失败</div><div class="desc">${esc(e.message)}</div></div>`;
@@ -534,6 +541,231 @@ async function loadPaperText(pid) {
   } catch (e) {
     body.innerHTML = `<div class="empty"><div class="desc">${esc(e.message)}</div></div>`;
   }
+}
+
+/** 比例渲染：None 一律显示 n/a —— 绝不能因为 (v||0) 而渲染成 0%。 */
+const pctOr = v => (v == null ? 'n/a' : `${Math.round(v * 100)}%`);
+
+/**
+ * 质量面板（N06）。
+ *
+ * 分字段展示，不合并成单一总分 —— 总分 80% 会掩盖"局限"字段 20% 这种问题。
+ * 数字与 tools/eval_extraction.py 同源（litprism.quality），不各写一套。
+ */
+function qualityPanel(pid) {
+  return `<details class="card" id="qualityPanel">
+    <summary>质量面板 <span id="qualitySummary" class="mono muted"></span></summary>
+    <div class="card-body">
+      <p class="source-intro" id="qualityNote">正在统计…</p>
+      <div class="quality-scroll"><table class="quality-table" id="qualityTable" hidden>
+        <thead><tr>
+          <th scope="col">字段</th><th scope="col">陈述</th><th scope="col">已审</th>
+          <th scope="col">逐字</th><th scope="col">修正</th><th scope="col">拒绝</th>
+          <th scope="col">补录</th><th scope="col">逐字精度</th><th scope="col">可用率</th>
+          <th scope="col">覆盖</th><th scope="col">召回</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <p class="source-intro" id="qualityDefs"></p>
+    </div>
+  </details>`;
+}
+
+async function loadQuality(pid) {
+  const note = $('#qualityNote');
+  const table = $('#qualityTable');
+  if (!note || !table) return;
+  try {
+    const d = await api(`/api/paper/${encodeURIComponent(pid)}/quality`);
+    note.textContent = d.note || '';
+    const summary = $('#qualitySummary');
+    if (summary) {
+      summary.textContent = d.has_data
+        ? `已审 ${fmtNum(d.totals.reviewed)} / ${fmtNum(d.totals.total)} · 补录 ${fmtNum(d.totals.manual)}`
+        : '尚无数据';
+    }
+    if (!d.has_data) { table.hidden = true; }
+    else {
+      table.hidden = false;
+      table.querySelector('tbody').innerHTML = [...(d.fields || []), d.totals].map(f => `
+        <tr class="${f.field === '__all__' ? 'quality-total' : ''}">
+          <th scope="row">${esc(f.label)}</th>
+          <td>${fmtNum(f.total)}</td>
+          <td>${fmtNum(f.reviewed)}</td>
+          <td>${fmtNum(f.verbatim)}</td>
+          <td>${fmtNum(f.corrected)}</td>
+          <td>${fmtNum(f.rejected)}</td>
+          <td>${fmtNum(f.manual)}</td>
+          <td>${pctOr(f.precision)}</td>
+          <td>${pctOr(f.usable)}</td>
+          <td>${pctOr(f.coverage)}</td>
+          <td>${pctOr(f.recall)}</td>
+        </tr>`).join('');
+    }
+    const defs = $('#qualityDefs');
+    if (defs && d.definitions) {
+      defs.textContent = '口径：' + Object.values(d.definitions).join(' · ')
+        + '。分母为 0 时显示 n/a；人工确认只表示接受这份快照，不等于内容客观真实。';
+    }
+  } catch (e) {
+    note.textContent = `质量统计失败：${e.message}`;
+    table.hidden = true;
+  }
+}
+
+/**
+ * 人工补录面板（N05）。
+ *
+ * 为什么要有：审核只有确认/修正/拒绝/撤销，全部作用于机器**已经提出**的陈述，
+ * 所以「机器漏了什么」一直测不出来。补录把召回从 n/a 变成数字。
+ *
+ * 必须绑原文原句：没有引用的补录无法与"凭印象写一条"区分，分母就不可信。
+ */
+function manualClaimsPanel(pid) {
+  return `<details class="card" id="manualPanel">
+    <summary>人工补录 · 机器未提的陈述 <span id="manualCount" class="mono muted"></span></summary>
+    <div class="card-body">
+      <p class="source-intro">读到机器漏掉的陈述就补一条。必须引用原文原句 —— 没有依据的补录不计入召回。</p>
+      <div id="manualList"></div>
+      <div id="manualForm"></div>
+      <button class="btn" id="btnAddClaim" data-pid="${esc(pid)}" style="margin-top:10px">补一条</button>
+    </div>
+  </details>`;
+}
+
+const CLAIM_FIELDS = [
+  ['research_question', '研究问题'], ['methodology', '方法论'], ['experiment_design', '实验设计'],
+  ['key_conclusions', '关键结论'], ['innovations', '创新点'], ['limitations', '局限与未来工作'],
+];
+
+async function loadManualClaims(pid) {
+  const box = $('#manualList');
+  if (!box) return;
+  try {
+    const d = await api(`/api/paper/${encodeURIComponent(pid)}/semantic`);
+    S.manual = d.manual || [];
+    S.recall = d.recall || null;
+    S.analysisHash = d.analysis_hash;
+    const count = $('#manualCount');
+    if (count) {
+      count.textContent = S.manual.length
+        ? `${S.manual.length} 条 · 召回 ${S.recall?.ratio == null ? 'n/a' : pct(S.recall.ratio)}`
+        : '暂无补录';
+    }
+    box.innerHTML = S.manual.length ? S.manual.map(m => `
+      <div class="manual-claim">
+        <div class="row" style="justify-content:space-between;gap:8px">
+          <span class="ev-claim-chip">人工补录 · ${esc(m.field_label)}</span>
+          <button class="icon-btn" data-drop-claim="${esc(m.id)}" title="删除这条补录">✕</button>
+        </div>
+        <div class="manual-claim-text">${esc(m.text)}</div>
+        <blockquote class="manual-quote">${esc(m.quote)}</blockquote>
+        <div class="source-intro" style="margin:4px 0 0">
+          ${m.page == null ? '无页码' : 'p.' + esc(m.page)}${m.note ? ' · ' + esc(m.note) : ''}
+        </div>
+      </div>`).join('')
+      : '<p class="source-intro">还没有补录。这个数字为 n/a 表示"还没人去补"，不代表召回是 0。</p>';
+
+    $$('[data-drop-claim]', box).forEach(b => b.onclick = async () => {
+      try {
+        await api(`/api/paper/${encodeURIComponent(pid)}/semantic/claims/${encodeURIComponent(b.dataset.dropClaim)}`, {method: 'DELETE'});
+        toast('已删除这条补录');
+        await loadManualClaims(pid);
+        loadQuality(pid);          // 补录数量变了，质量面板必须跟着更新
+      } catch (e) { toast(e.message, true); }
+    });
+  } catch (e) {
+    box.innerHTML = `<p class="source-intro">补录加载失败：${esc(e.message)}</p>`;
+  }
+}
+
+/** 原文块清单按需加载：补录的来源通常不在已引用块里，所以要全篇。 */
+async function claimChunks(pid) {
+  if (S.claimChunksFor === pid) return S.claimChunks || [];
+  const d = await api(`/api/paper/${encodeURIComponent(pid)}/text`);
+  const list = [];
+  for (const page of d.pages || []) {
+    for (const c of page.chunks || []) {
+      list.push({ id: c.chunk_id, page: page.page, text: c.text || '', section: c.section || '' });
+    }
+  }
+  S.claimChunksFor = pid;
+  S.claimChunks = list;
+  return list;
+}
+
+async function openClaimForm(pid) {
+  const wrap = $('#manualForm');
+  if (!wrap) return;
+  wrap.innerHTML = '<p class="source-intro" role="status">正在读取原文块…</p>';
+  let chunks = [];
+  try { chunks = await claimChunks(pid); } catch (e) {
+    wrap.innerHTML = `<p class="source-intro">原文读取失败：${esc(e.message)}</p>`;
+    return;
+  }
+  if (!chunks.length) {
+    wrap.innerHTML = '<p class="source-intro">这篇论文没有可引用的原文块，无法补录。</p>';
+    return;
+  }
+  wrap.innerHTML = `
+    <div class="claim-form">
+      <div class="row" style="gap:10px">
+        <label class="field" style="flex:0 0 150px"><span>字段</span>
+          <select class="select" id="claimField">
+            ${CLAIM_FIELDS.map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}
+          </select></label>
+        <label class="field" style="flex:1"><span>原文块</span>
+          <select class="select" id="claimChunk">
+            ${chunks.map((c, i) => `<option value="${esc(c.id)}" data-i="${i}">
+              ${c.page == null ? '无页码' : 'p.' + esc(c.page)} · ${esc(short(c.text, 42))}
+            </option>`).join('')}
+          </select></label>
+      </div>
+      <div class="claim-source-wrap">
+        <div class="source-intro" style="margin:6px 0 4px">在下面的原文里选中一句话，再点「用选中文字」。</div>
+        <div class="claim-source" id="claimSource"></div>
+        <button class="btn" id="btnUseSelection" type="button">用选中文字作为引用</button>
+      </div>
+      <label class="field"><span>引用原文</span>
+        <textarea class="textarea" id="claimQuote" rows="2" placeholder="必须与原文逐字一致"></textarea></label>
+      <label class="field"><span>陈述内容</span>
+        <textarea class="textarea" id="claimText" rows="2" placeholder="用一句话写清这条陈述"></textarea></label>
+      <div class="row" style="gap:8px">
+        <button class="btn primary" id="btnSaveClaim" type="button">保存补录</button>
+        <button class="btn" id="btnCancelClaim" type="button">取消</button>
+      </div>
+    </div>`;
+
+  const sel = $('#claimChunk');
+  const show = () => {
+    const i = Number(sel.selectedOptions[0]?.dataset.i || 0);
+    $('#claimSource').textContent = chunks[i]?.text || '';
+  };
+  sel.onchange = show;
+  show();
+
+  $('#btnUseSelection').onclick = () => {
+    const picked = String(window.getSelection() || '').trim();
+    if (!picked) { toast('请先在原文里选中一句话', true); return; }
+    $('#claimQuote').value = picked;
+  };
+  $('#btnCancelClaim').onclick = () => { wrap.innerHTML = ''; };
+  $('#btnSaveClaim').onclick = async () => {
+    const body = {
+      field: $('#claimField').value,
+      chunk_id: sel.value,
+      quote: $('#claimQuote').value.trim(),
+      text: $('#claimText').value.trim(),
+      analysis_hash: S.analysisHash,
+    };
+    try {
+      await api(`/api/paper/${encodeURIComponent(pid)}/semantic/claims`, {method: 'POST', body});
+      toast('已补录');
+      wrap.innerHTML = '';
+      await loadManualClaims(pid);
+      loadQuality(pid);            // 补录数量变了，质量面板必须跟着更新
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 /**
@@ -628,17 +860,10 @@ async function loadChat() {
     S.messages = msgs;
     S.sources = d.sources || [];
     $('#tbTitle').textContent = d.conversation.title || '对话';
+    setLocation(d.conversation.title || '对话');
 
     box.innerHTML = `
       <div class="chat-layout">
-        <div class="page-head">
-          <div class="row">
-            <div>
-              <div class="page-title">${esc(d.conversation.title)}</div>
-              <div class="page-sub">基于当前范围内的可引用原文 · 来源可回溯</div>
-            </div>
-          </div>
-        </div>
         <div id="chatStream" role="log" aria-label="研究对话">
           ${msgs.length ? msgs.map(renderMessage).join('') : `
             <div class="empty chat-welcome"><div class="empty-mark">${icon('prism')}</div>
@@ -652,22 +877,29 @@ async function loadChat() {
             </div>`}
         </div>
         <div id="chatCompose">
-          <div class="card"><div class="card-body">
-            <div class="row" style="gap:8px;margin-bottom:9px">
-              <span class="muted" style="font-size:11.5px">模型</span>
-              <select class="select" id="chatModel"
-                style="width:auto;min-width:210px;font-size:12px;padding:4px 9px"></select>
-              <label class="source-intro"><input type="checkbox" id="chatWebSearch"> 同时搜索网页候选（需人工审核）</label>
+          <div class="composer">
+            <textarea class="composer-input" id="chatInput" rows="2"
+              aria-label="研究问题" placeholder="向文献提问，或继续追问…"></textarea>
+            <div class="composer-bar">
+              <div class="composer-opts">
+                <label class="composer-model">
+                  <span class="composer-label">模型</span>
+                  <select class="select" id="chatModel" aria-label="选择模型"></select>
+                </label>
+                <label class="composer-check">
+                  <input type="checkbox" id="chatWebSearch">
+                  <span>同时搜索网页候选</span>
+                  <span class="composer-note">需人工审核</span>
+                </label>
+              </div>
+              <button class="composer-send" id="btnSend" title="发送（Ctrl + Enter）"
+                aria-label="发送" ${S.sending ? 'disabled' : ''}>${icon('send')}</button>
             </div>
-            <div class="row" style="gap:8px;align-items:flex-end">
-              <textarea class="textarea" id="chatInput" rows="2"
-                aria-label="研究问题" placeholder="向文献提问，或继续追问…"></textarea>
-              <button class="btn primary" id="btnSend" title="发送（Ctrl+Enter）" ${S.sending ? 'disabled' : ''}>${icon('send')}<span>发送</span></button>
-            </div>
-            <div style="margin-top:8px;font-size:11.5px;color:var(--muted)">
-              <span>回答依据原文片段，证据不足时拒答。</span><kbd>Ctrl + Enter 发送</kbd>
-            </div>
-          </div></div>
+          </div>
+          <div class="composer-hint">
+            <span>回答依据原文片段，证据不足时拒答。</span>
+            <kbd>Ctrl + Enter</kbd>
+          </div>
         </div>
       </div>`;
 
@@ -1760,7 +1992,11 @@ function renderModelSelector() {
   }
   sel.innerHTML = S.models.map(m => {
     const isActive = m.provider_id === S.activeModel.provider_id && m.model_id === S.activeModel.model;
-    return `<option value="${esc(m.provider_id)}::${esc(m.model_id)}"${isActive ? ' selected' : ''}>${esc(m.label)}</option>`;
+    // 下拉只显示模型名：输入区一行里「提供商 · 模型」太长会被截断，
+    // 而提供商在选择之后并不是关键信息。完整标签留在 title 上。
+    const full = String(m.label || m.model_id || '');
+    const short = full.includes(' · ') ? full.split(' · ').pop() : full;
+    return `<option value="${esc(m.provider_id)}::${esc(m.model_id)}" title="${esc(full)}"${isActive ? ' selected' : ''}>${esc(short)}</option>`;
   }).join('');
   sel.onchange = async () => {
     const [pid, mid] = sel.value.split('::');

@@ -4,7 +4,8 @@
 
 ## 当前基线
 
-- 路线：Electron + Python sidecar + FastAPI/原生 JS；Tauri 是历史备选。当前 schema v8；最新测试及无窗口验收结果统一见当前状态页。
+- 路线：Electron + Python sidecar + FastAPI/原生 JS；**Tauri 工程已于 2026-10-19 删除**（本机 Chromium GPU 崩溃后退场），electron-builder 打包已跑通但安装验收（N11）未做。当前 schema **v11**（候选池、`papers.material_level`、`manual_claims` 人工补录）；最新测试及无窗口验收结果统一见当前状态页。
+- N05 漏提补录与 N06 质量面板已实现（2026-10-19）：右栏「补一条」必须绑原文原句；`GET /api/paper/{pid}/quality` 分字段给出已审/精度/可用率/覆盖/召回，与 `tools/eval_extraction.py` 共用 `litprism.quality` 聚合，**同一份数据只允许一个数字**。比例分母为 0 一律 `None`（界面 n/a），不显示 0%。
 - 当前增量包含长文计划真实范围、完整请求预算、全阶段用量，以及单篇 N01 持久运行与恢复（阶段调用预算已取消）。详见 [N01 契约](docs/阶段预算与可续验进度-2026-10-18.md)。旧“重新解读”、对比、QA、Skill、CLI/MCP 尚未统一接入持久续跑。
 - 机器支持、人工确认、原文覆盖是不同状态。真实固定样本结果有限；fastText、GPT-3、RMSNorm 的不同版本/片段/回放不能拼成当前整篇长论文质量通过。
 - N02 已完成首轮受控实测：[协议与结果](docs/N02真实链路验收.md)。18 个正反例和 5 个差异控制通过；两轮论文仍有提取配额、输出截断/复核熔断和跨页来源误判，不能称整篇通过。用户当前要求先做设计审查与文档校正，不启动后续真实语义验收；原反例仍保留。
@@ -53,7 +54,7 @@ pyproject 已含 `-q`，不重复添加。GUI 项目不意味着要开可见窗�
 - 本机 curl 必须带 `--noproxy '*'`。先发一条可控请求确认访问日志能观测，再判断“前端没有请求”；sidecar stdout 是握手管道。
 - onefile 有启动器和真实进程：按握手 pid 先回收真实进程，再收启动器，避免孤儿占端口。
 - 本机 Chromium 曾出现 GPU 进程 `0xC0000005`；保留现有 Electron 禁用 GPU/沙箱措施。启动前清除进程环境 `ELECTRON_RUN_AS_NODE`，不改全局变量。
-- sidecar 同源加载页面，token 由 URL hash 传递；API 需 token，页面骨架/静态资源和 ping 按既有豁免规则。不要为旧 Tauri 的跨源推断引入额外改动。
+- sidecar 同源加载页面，token 由 URL hash 传递；API 需 token，页面骨架/静态资源和 ping 按既有豁免规则。不要为已删除的 Tauri 跨源方案引入额外改动。
 - 原始 PDF、响应、临时库和截图只留本地 `_selftest.*`。不强制加入 Git，不为修历史链接重跑真实服务。
 
 ## 核心代码入口

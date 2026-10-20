@@ -8,6 +8,8 @@ from fastapi import HTTPException
 
 from ..evidence import stored_excerpts
 from ..knowledge import create_source, get_source, now, review_source
+from ..manual_claims import ClaimRejected, add, delete, list_claims, recall
+from ..quality import summarize
 from ..semantics import payload_hash
 
 
@@ -43,8 +45,12 @@ def register_semantics(app, kb):
                     # 只回被引用的分块，不整篇回传。
                     sources.append({'tag': ref['tag'], 'chunk_id': chunk['id'], 'paper_title': chunk['paper_title'],
                                     'page': chunk['page'], 'section': chunk['section'], 'text': chunk['text']})
+            # 人工补录：机器漏提的陈述。与机器陈述分开返回 —— 一个是采集，一个是复核。
+            manual = [] if run else list_claims(kb, paper['id'], digest)
+            machine = len(report.get('items') or [])
             return {'paper_id': paper['id'], 'analysis_hash': digest, 'report': report, 'reviews': records,
-                    'sources': sources, 'candidates': payload.get('_candidates') or []}
+                    'sources': sources, 'candidates': payload.get('_candidates') or [],
+                    'manual': manual, 'recall': recall(machine, len(manual))}
 
     def write(pid, claim_id, req, run=False):
         note, action = req.get('note'), req.get('action')
@@ -103,6 +109,46 @@ def register_semantics(app, kb):
     @app.get('/api/paper/{pid}/semantic')
     def detail(pid: str):
         return read(pid)
+
+    @app.get('/api/paper/{pid}/quality')
+    def quality(pid: str):
+        """质量面板：分字段的审核/补录/召回。
+
+        与 ``tools/eval_extraction.py`` 共用 ``litprism.quality`` 的聚合 ——
+        同一份数据不允许出现两个数字。
+        """
+        with kb._tx_lock:
+            paper, _payload, digest, report, records = snapshot(kb, pid)
+            manual = list_claims(kb, paper['id'], digest)
+            return {'paper_id': paper['id'], 'analysis_hash': digest,
+                    **summarize(report, records, manual)}
+
+    @app.post('/api/paper/{pid}/semantic/claims')
+    def add_claim(pid: str, req: dict):
+        """人工补录一条机器未提出的陈述。
+
+        必须带原文引用（chunk_id + quote），否则不计入召回 —— 没有依据的补录
+        无法与"凭印象写一条"区分。
+        """
+        with kb.tx() as con:
+            paper, payload, digest, _report, _records = snapshot(kb, pid)
+            try:
+                claim = add(kb, paper['id'], digest, req)
+            except ClaimRejected as exc:
+                raise HTTPException(exc.status, exc.reason) from exc
+            machine = len((payload.get('_semantic_review') or {}).get('items') or [])
+            total = len(list_claims(kb, paper['id'], digest))
+        return {'ok': True, 'claim': claim, 'recall': recall(machine, total)}
+
+    @app.delete('/api/paper/{pid}/semantic/claims/{claim_id}')
+    def drop_claim(pid: str, claim_id: str):
+        with kb.tx() as con:
+            paper, payload, digest, _report, _records = snapshot(kb, pid)
+            if not delete(kb, paper['id'], digest, claim_id):
+                raise HTTPException(404, '补录不存在或属于其他解读版本。')
+            machine = len((payload.get('_semantic_review') or {}).get('items') or [])
+            total = len(list_claims(kb, paper['id'], digest))
+        return {'ok': True, 'recall': recall(machine, total)}
 
     @app.post('/api/paper/{pid}/semantic/{claim_id}/review')
     def review(pid: str, claim_id: str, req: dict):

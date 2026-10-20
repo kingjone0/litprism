@@ -42,12 +42,8 @@ def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def _norm(s: str | None) -> str:
-    return " ".join((s or "").split())
-
-
 def collect(kb) -> list[dict]:
-    """从 analyses 与 semantic_runs 收集 (报告, 审核记录)。"""
+    """从 analyses 与 semantic_runs 收集 (报告, 审核记录, 人工补录)。"""
     rows = []
 
     # 1) 挂在论文解读上的核查
@@ -66,6 +62,7 @@ def collect(kb) -> list[dict]:
             "source": "paper", "id": pid,
             "title": paper.get("display_title") or paper.get("title") or pid,
             "report": report, "reviews": reviews,
+            "manual": _manual(kb, pid, digest),
         })
 
     # 2) 独立的核查运行
@@ -76,7 +73,8 @@ def collect(kb) -> list[dict]:
             continue
         reviews = [dict(x) for x in kb._con.execute(
             "SELECT * FROM semantic_reviews WHERE run_id=? ORDER BY rowid", (r["id"],)).fetchall()]
-        rows.append({"source": "run", "id": r["id"], "title": r["title"], "report": report, "reviews": reviews})
+        rows.append({"source": "run", "id": r["id"], "title": r["title"],
+                     "report": report, "reviews": reviews, "manual": []})
 
     return rows
 
@@ -87,41 +85,21 @@ def _payload_hash(payload: dict) -> str:
     return payload_hash(payload)
 
 
+def _manual(kb, paper_id: str, digest: str) -> list[dict]:
+    """人工补录（N05）。没有补录时返回空列表，召回仍显示 n/a。"""
+    try:
+        from litprism.manual_claims import list_claims
+
+        return list_claims(kb, paper_id, digest)
+    except Exception:  # noqa: BLE001 - 旧库没有该表时按未采集处理
+        return []
+
+
 def aggregate(row: dict) -> dict:
-    items = {i["id"]: i for i in row["report"].get("items", [])}
+    """委托给 litprism.quality —— 界面面板与命令行必须同一套口径。"""
+    from litprism.quality import aggregate as _aggregate
 
-    # 同一陈述可能有多条记录（确认→撤销→再确认），以**最后一条**为准
-    last: dict[str, dict] = {}
-    for rec in row["reviews"]:
-        last[rec["claim_id"]] = rec
-
-    per_field = defaultdict(lambda: {
-        "total": 0, "reviewed": 0, "verbatim": 0, "corrected": 0, "rejected": 0,
-        "machine_supported": 0,
-    })
-    for cid, item in items.items():
-        f = per_field[item.get("field") or "正文"]
-        f["total"] += 1
-        if item.get("status") == "machine_supported":
-            f["machine_supported"] += 1
-
-    for cid, rec in last.items():
-        item = items.get(cid)
-        if item is None:
-            continue  # 陈述来自旧版本，已不在当前报告里
-        f = per_field[item.get("field") or "正文"]
-        if rec["action"] == "revoke":
-            continue  # 撤销是回退动作，不计入审核样本
-        f["reviewed"] += 1
-        if rec["action"] == "reject":
-            f["rejected"] += 1
-        elif rec["action"] == "confirm":
-            if _norm(rec.get("reviewed_text")) and _norm(rec.get("reviewed_text")) != _norm(item.get("text")):
-                f["corrected"] += 1
-            else:
-                f["verbatim"] += 1
-
-    return per_field
+    return _aggregate(row["report"], row["reviews"], row.get("manual"))
 
 
 def _pct(a: int, b: int) -> str:
@@ -154,7 +132,16 @@ def report_row(row: dict) -> str:
         f"{_pct(tot['verbatim'] + tot['corrected'], tot['reviewed']):>8}"
         f"{_pct(tot['reviewed'], tot['total']):>9}"
     )
-    lines.append("  召回（漏提）：n/a —— 审核界面没有「补一条机器未提及的陈述」入口，无法测量")
+    manual = row.get("manual") or []
+    machine = len((row["report"].get("items") or []))
+    if manual:
+        total = machine + len(manual)
+        lines.append(
+            f"  召回（漏提）：人工补录 {len(manual)} 条 / 机器 {machine} 条 → "
+            f"{len(manual) / total * 100:.0f}%（分母 {total}）"
+        )
+    else:
+        lines.append("  召回（漏提）：n/a —— 尚未有人工补录，不等于 0")
     if tot["reviewed"] == 0:
         lines.append("  ⚠️ 尚无人工审核记录：上面的覆盖为 0，指标不可用。")
     return "\n".join(lines)

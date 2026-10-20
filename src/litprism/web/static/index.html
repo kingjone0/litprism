@@ -72,7 +72,7 @@
 
     <!-- ==================== 中间工作区 ==================== -->
     <main class="work">
-      <div class="tabbar" id="tabbar"></div>
+      <div class="tabbar" id="tabbar" aria-live="polite"></div>
       <div class="work-body" id="workBody">
 
         <section class="pane" data-pane="library">
@@ -136,6 +136,7 @@
           <div class="page-head"><h1 class="page-title">发现文献</h1><p class="page-sub">检索学术数据库；模型只解释候选，不新增论文。导入前再次核验。</p></div>
           <form class="row" id="recommendForm"><input class="input" id="recommendTopic" placeholder="输入研究方向或关键词" required aria-label="研究方向"><button class="btn primary">检索推荐</button></form>
           <div id="recommendResults"></div>
+          <section class="pool" id="candidatePool" aria-live="polite" aria-label="候选池"></section>
         </section>
 
         <section class="pane" data-pane="memories">
