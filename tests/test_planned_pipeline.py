@@ -230,3 +230,71 @@ def test_abstract_only_paper_is_flagged_in_analysis(pipeline):
     assert coverage['material_level'] == 'abstract'
     assert coverage['partial_material'] is True
     assert '仅题录与摘要' in payload['field_notes']
+
+
+def test_structure_damage_is_retried_with_strict_json_and_archived(pipeline, monkeypatch):
+    """结构损坏要单独重试（不是复用字段修复），并留下原始片段。"""
+    cfg, kb, pid, llm, calls, _ = pipeline
+    original = llm.chat_json
+    state = {'n': 0}
+
+    def flaky(messages, *, task=None):
+        if task != 'extract':
+            return original(messages, task=task)
+        state['n'] += 1
+        if state['n'] == 1:
+            return {'这段被我写坏了': 'xxx'}          # 未知字段 → 结构损坏
+        return {'research_question': '问题？[P1 p.1]', 'methodology': '方法。[P1 p.1]',
+                'key_conclusions': '结论。[P1 p.1]'}
+
+    monkeypatch.setattr(llm, 'chat_json', flaky)
+    result = analyze_paper(kb, cfg, llm, pid, force=True, with_concepts=False, semantic_review=False)
+    coverage = result['_coverage']
+    assert coverage['structure_failures'], '结构损坏的原始片段必须留档'
+    assert '这段被我写坏了' in coverage['structure_failures'][0]['raw']
+    assert state['n'] >= 2, '应使用严格 JSON 提示重试一次'
+    # 采纳的是重试后的结果，闸门里不该残留"结构损坏"这一项
+    assert not any(g['name'] == 'structure_valid' for g in coverage['gates'][0]['results'])
+
+
+def test_structure_damage_is_retried_with_strict_json_and_archived(pipeline, monkeypatch):
+    """结构损坏要单独重试（不是复用字段修复），并留下原始片段。"""
+    cfg, kb, pid, llm, calls, _ = pipeline
+    original = llm.chat_json
+    state = {'n': 0}
+
+    def flaky(messages, *, task=None):
+        if task != 'extract':
+            return original(messages, task=task)
+        state['n'] += 1
+        if state['n'] == 1:
+            return {'这段被我写坏了': 'xxx'}          # 未知字段 → 结构损坏
+        return {'research_question': '问题？[P1 p.1]', 'methodology': '方法。[P1 p.1]',
+                'key_conclusions': '结论。[P1 p.1]'}
+
+    monkeypatch.setattr(llm, 'chat_json', flaky)
+    result = analyze_paper(kb, cfg, llm, pid, force=True, with_concepts=False, semantic_review=False)
+    coverage = result['_coverage']
+    assert coverage['structure_failures'], '结构损坏的原始片段必须留档'
+    assert '这段被我写坏了' in coverage['structure_failures'][0]['raw']
+    assert state['n'] >= 2, '应使用严格 JSON 提示重试一次'
+    # 采纳的是重试后的结果，闸门里不该残留结构损坏项
+    assert not any(g['name'] == 'structure_valid' for g in coverage['gates'][0]['results'])
+
+
+def test_coverage_reports_section_counts(pipeline):
+    cfg, kb, pid, llm, calls, _ = pipeline
+    result = analyze_paper(kb, cfg, llm, pid, force=True, with_concepts=False, semantic_review=False)
+    coverage = result['_coverage']
+    assert coverage['sections_total'] >= 1
+    assert isinstance(coverage['section_claims'], dict)
+    assert coverage['section_claims'], '正常解读至少要有一节的陈述计数'
+
+
+def test_coverage_reports_section_counts(pipeline):
+    cfg, kb, pid, llm, calls, _ = pipeline
+    result = analyze_paper(kb, cfg, llm, pid, force=True, with_concepts=False, semantic_review=False)
+    coverage = result['_coverage']
+    assert coverage['sections_total'] >= 1
+    assert isinstance(coverage['section_claims'], dict)
+    assert coverage['section_claims'], '正常解读至少要有一节的陈述计数'

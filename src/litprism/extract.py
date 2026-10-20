@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -65,6 +66,32 @@ def bounded_brief(entries: list[dict], *, limit: int = 8) -> str:
                      f"{item.get('claims', 0)} 条，字段 {item.get('fields') or '无'}")
     return ('前文已提取的概要（仅用于保持术语与结论一致，**不得作为引用依据**；'
             '任何陈述仍必须引用原文标签）：\n' + '\n'.join(lines))
+
+
+def _split_sentences(text: str) -> list[str]:
+    """按中英文句末标点切句；只用于"哪条陈述引用了哪一节"的归属统计。"""
+    return [s for s in re.split(r'(?<=[。！？；.!?])\s*', text or '') if s.strip()]
+
+
+def section_claim_counts(claims: list[dict], chunks: list[dict]) -> dict:
+    """按**章节**统计陈述数：陈述引用了哪些块，就算到对应章节名下。
+
+    为什么不按"指令的块有没有被引用"：whole 模式允许跨章节取证（结论引用方法细节是正常的），
+    按指令统计会把"从别处概括"误判成"漏读"。按章节看"这一章有没有被理解"才站得住。
+    """
+    by_tag = {f'P{index}': c for index, c in enumerate(chunks, 1)}
+    counts: dict[str, int] = {}
+    for claim in claims or []:
+        tags = list(claim.get('candidate_tags') or []) + list(claim.get('adjacent_tags') or [])
+        for tag in tags:
+            chunk = by_tag.get(str(tag))
+            if chunk is None:
+                continue
+            if (chunk.get('section_role') or '') == '参考文献':
+                continue
+            name = (chunk.get('section') or '正文').strip() or '正文'
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
@@ -153,6 +180,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     tracker = UsageTracker()
     from .tasks import checkpoint
     brief_entries: list[dict] = []
+    structure_failures: list[dict] = []
+    structure_failures: list[dict] = []
     for index, (directive, excerpts) in enumerate(units, 1):
         unit_label = directive.id if directive is not None else f'b{index}'
         checkpoint(f'解读原文第 {index}/{len(units)} 段')
@@ -168,7 +197,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
             unit_instruction = f'{instruction}\n\n{brief}'
         data, issues, gates = _run_with_repair(
             llm, extract_system, ctx, directive, unit_instruction, scope, unit_label, tracker,
-            meter=meter, available_tokens=cfg.context.available_tokens,
+            meter=meter, available_tokens=cfg.context.available_tokens, failures=structure_failures,
         )
         gate_log.append({'unit': unit_label, **gates.to_dict()})
         if gates.failed and data is not None:
@@ -272,6 +301,12 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     coverage['gates'] = gate_log
     coverage['uncovered_units'] = uncovered
     coverage['flagged_units'] = flagged
+    if structure_failures:
+        # 结构损坏的原始片段留档：否则这类失败事后无法复盘
+        coverage['structure_failures'] = structure_failures
+    if structure_failures:
+        # 结构损坏的原始片段留档：否则这类失败事后无法复盘
+        coverage['structure_failures'] = structure_failures
     coverage['flagged_units'] = flagged
     coverage['usage'] = tracker.to_dict()
     # 跨指令重复：条数正常但内容全是别人的 —— 条数闸门抓不到这一类
@@ -279,6 +314,28 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     overlaps = overlap_flags(unit_claims)
     if overlaps:
         coverage['overlaps'] = overlaps
+    # 章节口径：每章至少有一条陈述，才算这一章被"读到"。
+    review_items = (merged.get('_semantic_review') or {}).get('items') or []
+    if not review_items:
+        review_items = []
+        for field, _ in _FIELDS:
+            for sentence in _split_sentences(merged.get(field) or ''):
+                tags = re.findall(r'\[P(\d+)', sentence)
+                review_items.append({'candidate_tags': [f'P{t}' for t in tags]})
+    counts = section_claim_counts(review_items, chunks)
+    expected_sections = [name for name in dict.fromkeys(
+        (c.get('section') or '正文').strip() or '正文' for c in chunks
+        if (c.get('section_role') or '') != '参考文献')]
+    empty_sections = [name for name in expected_sections if not counts.get(name)]
+    coverage['section_claims'] = counts
+    coverage['sections_total'] = len(expected_sections)
+    if empty_sections:
+        coverage['sections_without_claims'] = empty_sections
+        coverage['complete'] = False
+        coverage['note'] = coverage.get('note', '') + (
+            f' {len(empty_sections)}/{len(expected_sections)} 个章节没有任何陈述：'
+            f'{"、".join(empty_sections[:6])}。')
+
     if uncovered or flagged:
         # 有段落没有可用产出或没通过闸门 —— 整体覆盖不完整，不伪装成通过。
         # 两者分开写：前者是真的没读到，后者是读到了但不合格。
@@ -361,7 +418,7 @@ def _validate_fields(data: dict, excerpts: list[dict]):
 
 def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
                      scope: list[dict], unit_label: str, tracker=None, *,
-                     meter=None, available_tokens=None):
+                     meter=None, available_tokens=None, failures: list | None = None):
     """跑一条指令，按闸门结果**有界修复**。
 
     返回 ``(data | None, issues, gates)``。``data is None`` 表示这条指令
@@ -396,6 +453,18 @@ def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
         if not isinstance(raw, dict):
             raise ValueError('解读必须返回 JSON 对象。')
         data, issues = _validate_fields(raw, scope)
+        broken = any('结构损坏' in i for i in issues)
+        if broken and failures is not None:
+            import json as _json
+            failures.append({'unit': unit_label, 'kind': 'structure',
+                             'raw': _json.dumps(raw, ensure_ascii=False)[:2000]})
+        if broken and attempt == 0:
+            # 结构损坏和"字段缺失"不是一类问题：用极简的格式要求重试一次，
+            # 而不是把同一段修复提示再说一遍（实测那样救不回来）。
+            allowed = '、'.join(name for _, name in _FIELDS)
+            text = (f'只输出一个 JSON 对象，键只能是：{allowed}（另可含 field_evidence/keywords/field_notes）。'
+                    '不要新增字段、不要解释、不要 Markdown 代码块。原文不变，请重新提取本批内容。')
+            continue
         gates = evaluate(data, _FIELDS, expected=expected, issues=issues)
         claims = count_claims(data, _FIELDS)
         # 先比"有没有闸门失败"，再比"提出多少条" —— 修完更差就不采纳

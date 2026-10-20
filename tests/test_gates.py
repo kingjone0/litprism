@@ -249,3 +249,14 @@ class TestRepairLoop:
         llm = StubLLM([payload(1)])
         data_, issues, gates = _run_with_repair(llm, 'S', 'CTX', None, 'F', SCOPE, 'b1')
         assert llm.calls == 1 and data_ is not None
+
+
+def test_structure_damage_gets_its_own_gate():
+    """结构损坏要单独成项，不能混在引用问题里。"""
+    from litprism.gates import evaluate
+    fields = [('research_question', '研究问题'), ('methodology', '方法')]
+    report = evaluate({}, fields, issues=['模型返回未知字段或结构损坏，本批字段未放行；请核对原始响应。'])
+    names = {g.name: g for g in report.results}
+    assert 'structure_valid' in names and names['structure_valid'].ok is False
+    # 空字段不该说"全部字段带来源"
+    assert '未形成引用' in names['has_citation'].detail

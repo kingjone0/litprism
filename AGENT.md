@@ -4,7 +4,8 @@
 
 ## 当前基线
 
-- 路线：Electron + Python sidecar + FastAPI/原生 JS；**Tauri 工程已于 2026-10-19 删除**（本机 Chromium GPU 崩溃后退场），electron-builder 打包已跑通但安装验收（N11）未做。当前 schema **v13**（v12 材料快照+块/分析版本绑定；v13 章节保留原文标题并新增 `chunks.section_role`）；解读按**章节分步**：章节优先读 PDF 书签（`ingest.pdf_outline`），单条指令的陈述配额上限 `MAX_CLAIMS_PER_DIRECTIVE=24`，指令间用**有界概要**（`extract.bounded_brief`，只回放"读过哪些节、各出几条"，不回放原文）。解读按**章节分步**：章节优先读 PDF 书签（`ingest.pdf_outline`），单条指令的陈述配额上限 `MAX_CLAIMS_PER_DIRECTIVE=24`，指令间用**有界概要**（`extract.bounded_brief`，只回放"读过哪些节、各出几条"，不回放原文）。最新测试及无窗口验收结果统一见当前状态页。
+- 路线：Electron + Python sidecar + FastAPI/原生 JS；**Tauri 工程已于 2026-10-19 删除**（本机 Chromium GPU 崩溃后退场），electron-builder 打包已跑通但安装验收（N11）未做。当前 schema **v13**（v12 材料快照+块/分析版本绑定；v13 章节保留原文标题并新增 `chunks.section_role`）；**覆盖口径按章节**：`extract.section_claim_counts()` 把陈述引用的块归到章节（参考文献不计），`complete` 要求"每节至少一条陈述 + 无零产出 + 无未过闸门"；**不要用"某条指令的块有没有被引用"判覆盖**——whole 模式允许跨节取证，那样会把"跨节概括"误判成漏读。结构损坏（未知字段/JSON 走形）单独重试一次，原始响应 2KB 记入 `coverage.structure_failures`。
+解读按**章节分步**：章节优先读 PDF 书签（`ingest.pdf_outline`），单条指令的陈述配额上限 `MAX_CLAIMS_PER_DIRECTIVE=24`，指令间用**有界概要**（`extract.bounded_brief`，只回放"读过哪些节、各出几条"，不回放原文）。解读按**章节分步**：章节优先读 PDF 书签（`ingest.pdf_outline`），单条指令的陈述配额上限 `MAX_CLAIMS_PER_DIRECTIVE=24`，指令间用**有界概要**（`extract.bounded_brief`，只回放"读过哪些节、各出几条"，不回放原文）。最新测试及无窗口验收结果统一见当前状态页。
 - N05 漏提补录与 N06 质量面板已实现（2026-10-19）：右栏「补一条」必须绑原文原句；`GET /api/paper/{pid}/quality` 分字段给出已审/接受率口径的精度/可用率/复核覆盖/已采集漏提占比，与 `tools/eval_extraction.py` 共用 `litprism.quality` 聚合，**同一份数据只允许一个数字**。旧接口键 `recall` 表示已采集漏提占比，不是真实召回率。比例分母为 0 一律 `None`（界面 n/a），不显示 0%。
 - 当前增量包含长文计划真实范围、完整请求预算、全阶段用量，以及单篇 N01 持久运行与恢复（阶段调用预算已取消）。详见 [N01 契约](docs/阶段预算与可续验进度-2026-10-18.md)。旧“重新解读”、对比、QA、Skill、CLI/MCP 尚未统一接入持久续跑。
 - 机器支持、人工确认、原文覆盖是不同状态。真实固定样本结果有限；fastText、GPT-3、RMSNorm 的不同版本/片段/回放不能拼成当前整篇长论文质量通过。

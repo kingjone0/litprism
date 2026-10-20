@@ -121,12 +121,20 @@ def evaluate(
         f'{nonempty}/{len(fields)} 个字段非空',
     ))
 
+    # 1b) 结构有效性：模型返回了未知字段/结构损坏时，整批字段已作废
+    broken = [i for i in (issues or []) if '结构损坏' in i]
+    if broken:
+        report.results.append(GateResult('structure_valid', False,
+                                         '模型返回了未知字段或结构损坏，整批字段作废', 'flag'))
+
     # 2) 引用存在性：字段有内容但没有任何来源标记
     missing = [label for k, label in fields
                if (data.get(k) or '').strip() and not _CITATION.search(data.get(k) or '')]
+    has_any = any((data.get(k) or '').strip() for k, _ in fields)
     report.results.append(GateResult(
         'has_citation', not missing,
-        '全部字段带来源' if not missing else f'缺来源：{"、".join(missing)}',
+        '全部字段带来源' if (not missing and has_any) else
+        ('各字段均无内容，未形成引用' if not has_any else f'缺来源：{"、".join(missing)}'),
         action='pass' if not missing else 'flag',
     ))
 
