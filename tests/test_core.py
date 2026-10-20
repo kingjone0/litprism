@@ -151,8 +151,11 @@ class TestIngest:
         ]
         secs = detect_sections(pages)
         names = [s.name for s in secs]
-        assert names.count("方法") == 1, names
-        assert "引言" in names and "结论" in names and "结果" in names
+        # 原文标题各自保留；归类才允许重复（两处都属"方法"）
+        assert names == ["Abstract", "1 Introduction", "2 Method", "4 Results", "5 Conclusion"], names
+        assert [s.role for s in detect_sections(pages)].count("方法") == 1
+        roles = [s.role for s in detect_sections(pages)]
+        assert "引言" in roles and "结论" in roles and "结果" in roles
 
     def test_chunk_pages_are_accurate(self):
         """页码必须来自真实位置，不能是章节首页（早期版本的真实 bug）。"""

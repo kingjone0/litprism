@@ -367,8 +367,10 @@ class KnowledgeBase:
                 if con.execute('SELECT 1 FROM chunks WHERE id=?', (cid,)).fetchone():
                     raise ValueError('原文块 ID 已存在，不能覆盖历史材料。')
                 cur = con.execute(
-                    "INSERT INTO chunks (id, paper_id, page, section, text, material_id) VALUES (?,?,?,?,?,?)",
-                    (cid, paper_id, c.get("page"), c.get("section"), text, mid),
+                    "INSERT INTO chunks (id, paper_id, page, section, section_role, text, material_id)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (cid, paper_id, c.get("page"), c.get("section"),
+                     c.get("section_role"), text, mid),
                 )
                 if cur.rowcount:
                     con.execute(
@@ -404,7 +406,8 @@ class KnowledgeBase:
         if material_id is None:
             paper = self.get_paper(paper_id)
             material_id = (paper or {}).get('current_material_id')
-        sql = "SELECT id, paper_id, page, section, text, material_id FROM chunks WHERE paper_id=? AND material_id=? ORDER BY rowid"
+        sql = ("SELECT id, paper_id, page, section, section_role, text, material_id FROM chunks "
+               "WHERE paper_id=? AND material_id=? ORDER BY rowid")
         if limit:
             sql += f" LIMIT {int(limit)}"
         return [dict(r) for r in self._con.execute(sql, (paper_id, material_id)).fetchall()]

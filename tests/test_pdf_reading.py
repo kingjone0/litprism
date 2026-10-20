@@ -14,7 +14,9 @@ def test_toc_cannot_supply_body_evidence_or_reset_later_sections():
              Page(33, '5 Limitations\n'+'ACTUAL limitation. '*12)]
     sections = detect_sections(pages)
     chunks = chunk_document(Document(sections=sections))
-    assert [s.name for s in sections] == ['目录', '引言', '局限']
+    # 章节名保留原文标题；归类（引言/局限）放在 role 里
+    assert [s.name for s in sections] == ['目录', '1 Introduction', '5 Limitations']
+    assert [s.role for s in sections] == ['目录', '引言', '局限']
     assert not any(c['page'] == 2 for c in chunks)
     assert all(c['page'] == 33 for c in chunks if 'ACTUAL' in c['text'])
 
@@ -171,3 +173,15 @@ def test_frozen_real_paper_page_and_table_regression():
         assert doc.pages[index].tables
         assert all(t['status'] == 'needs_review' for t in doc.pages[index].tables)
     assert doc.warnings
+
+
+def test_outline_defines_real_chapters_and_roles():
+    """有 PDF 大纲时按大纲分节：标题保留原文，role 才是归类。"""
+    from litprism.ingest import Page, detect_sections
+    pages = [Page(1, 'title\n' * 4), Page(2, 'retrieval\n' * 4),
+             Page(3, 'augment\n' * 4), Page(4, 'conclusion\n' * 4)]
+    outline = [(1, '1 Introduction', 1), (1, '2 Retrieval', 2), (1, '3 Conclusion', 4)]
+    sections = detect_sections(pages, outline)
+    assert [s.name for s in sections] == ['1 Introduction', '2 Retrieval', '3 Conclusion']
+    assert [s.role for s in sections] == ['引言', '正文', '结论']
+    assert sections[1].start_page == 2

@@ -194,3 +194,17 @@ def test_small_output_budget_does_not_promise_four_claims():
     from litprism.plan import quota_for
     assert quota_for(512) == 1
     assert quota_for(4096) == 4
+
+
+def test_section_runs_skips_bibliography():
+    """参考文献不是论证材料，不该占指令配额。"""
+    from litprism.config import Config
+    from litprism.context.meter import Meter
+    from litprism.plan import section_runs
+    chunks = [
+        {'id': 'c1', 'section': '1 Introduction', 'section_role': '引言', 'text': '正文。' * 40, 'page': 1},
+        {'id': 'c2', 'section': 'References', 'section_role': '参考文献', 'text': 'ref. ' * 200, 'page': 9},
+        {'id': 'c3', 'section': '2 Method', 'section_role': '方法', 'text': '方法。' * 40, 'page': 3},
+    ]
+    runs = section_runs(chunks, Meter(Config()))
+    assert [r.label for r in runs] == ['1 Introduction', '2 Method']

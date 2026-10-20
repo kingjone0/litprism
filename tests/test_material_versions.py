@@ -10,6 +10,7 @@ from test_workflow_guards import env, paper  # noqa: F401
 
 from litprism.evidence import stored_excerpts
 from litprism.manual_claims import ClaimRejected, add, list_claims
+from litprism.schema import SCHEMA_VERSION
 from litprism.schema import MIGRATIONS, apply_migrations
 from litprism.semantics import payload_hash
 
@@ -140,7 +141,9 @@ def test_v11_migration_preserves_ids_payload_and_fts(tmp_path, row_factory):
     con.execute('INSERT INTO analyses(paper_id,payload) VALUES (?,?)', ('p1', payload))
     con.commit()
     con.row_factory = row_factory
-    assert len(apply_migrations(con)) == 1
+    apply_migrations(con)  # v12 材料版本 + v13 章节标题
+    apply_migrations(con)  # v12 材料版本 + v13 章节标题
+    assert con.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
     assert con.row_factory is row_factory
     assert tuple(con.execute('SELECT id,rowid,text FROM chunks').fetchone()) == ('stable_id', rowid, 'legacy text')
     assert con.execute('SELECT payload FROM analyses').fetchone()[0] == payload

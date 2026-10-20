@@ -597,6 +597,22 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
     migrate(conn)
 
 
+def _migrate_v13(conn: sqlite3.Connection) -> None:
+    """章节区分「原文标题」与「归类」：靠标题才能按真实结构分步解读。"""
+    if not _column_exists(conn, 'chunks', 'section_role'):
+        conn.execute("ALTER TABLE chunks ADD COLUMN section_role TEXT")
+    # 老数据只有规范名，role 就等于原 section
+    conn.execute("UPDATE chunks SET section_role=section WHERE section_role IS NULL")
+
+
+def _migrate_v13(conn: sqlite3.Connection) -> None:
+    """章节区分「原文标题」与「归类」：靠标题才能按真实结构分步解读。"""
+    if not _column_exists(conn, 'chunks', 'section_role'):
+        conn.execute("ALTER TABLE chunks ADD COLUMN section_role TEXT")
+    # 老数据只有规范名，role 就等于原 section
+    conn.execute("UPDATE chunks SET section_role=section WHERE section_role IS NULL")
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
@@ -610,6 +626,7 @@ MIGRATIONS: list[Migration] = [
     Migration(10, '统一候选池 source_candidates', _migrate_v10),
     Migration(11, '人工补录机器漏提的陈述（manual_claims）', _migrate_v11),
     Migration(12, '原文材料版本及历史分析，保留原 chunk ID', _migrate_v12),
+    Migration(13, '章节保留原文标题 + 归类 section_role', _migrate_v13),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

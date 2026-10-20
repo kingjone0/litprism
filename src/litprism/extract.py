@@ -51,6 +51,22 @@ def paper_context(kb: KnowledgeBase, paper: dict, budget: int | None = None) -> 
     return blob if budget is None else truncate(blob, budget, ellipsis="\n…（正文过长，已截断）")
 
 
+def bounded_brief(entries: list[dict], *, limit: int = 8) -> str:
+    """把前面几条指令的结果压成"有界"提示：只保留章节与条数，不回放原文。
+
+    为什么不回放原文：历史越长，输入越贵、错误越容易传染，而且模型会开始
+    引用自己上一轮的句子。这里只给"读过哪些节、各出几条"，并要求仍需回原文取证。
+    """
+    if not entries:
+        return ''
+    lines = []
+    for item in entries[-limit:]:
+        lines.append(f"- {item.get('unit')}（{item.get('section') or '未标注章节'}）："
+                     f"{item.get('claims', 0)} 条，字段 {item.get('fields') or '无'}")
+    return ('前文已提取的概要（仅用于保持术语与结论一致，**不得作为引用依据**；'
+            '任何陈述仍必须引用原文标签）：\n' + '\n'.join(lines))
+
+
 def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
                   force: bool = False, with_concepts: bool = True, finalize=None,
                   semantic_review: bool = True) -> dict:
@@ -128,12 +144,15 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
 
     results, all_issues, all_concepts, concept_errors, semantic_inputs, batch_notes = [], [], [], [], [], []
     gate_log: list[dict] = []
-    uncovered: list[str] = []
+    uncovered: list[str] = []   # 完全没有产出
+    flagged: list[str] = []     # 有产出但没过闸门（内容可能在别处仍被引用）   # 完全没有产出
+    flagged: list[str] = []     # 有产出但没过闸门（内容可能在别处仍被引用）
     unit_claims: list[tuple[str, list[str]]] = []
     from .usage import UsageTracker
 
     tracker = UsageTracker()
     from .tasks import checkpoint
+    brief_entries: list[dict] = []
     for index, (directive, excerpts) in enumerate(units, 1):
         unit_label = directive.id if directive is not None else f'b{index}'
         checkpoint(f'解读原文第 {index}/{len(units)} 段')
@@ -143,13 +162,18 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         # 所以按全篇校验，而不是按本条指令的范围。
         scope = all_excerpts if shared_ctx is not None else excerpts
 
+        unit_instruction = instruction
+        brief = bounded_brief(brief_entries)
+        if brief:
+            unit_instruction = f'{instruction}\n\n{brief}'
         data, issues, gates = _run_with_repair(
-            llm, extract_system, ctx, directive, instruction, scope, unit_label, tracker,
+            llm, extract_system, ctx, directive, unit_instruction, scope, unit_label, tracker,
             meter=meter, available_tokens=cfg.context.available_tokens,
         )
         gate_log.append({'unit': unit_label, **gates.to_dict()})
         if gates.failed and data is not None:
-            uncovered.append(unit_label)
+            # 有产出但没过闸门：与"完全没产出"分开记，避免把有内容的段说成"未覆盖"
+            flagged.append(unit_label)
         if data is None:
             # 完全没拿到可用结果（例如输出被截断）：如实记未覆盖，不伪造空字段。
             all_issues.extend(issues)
@@ -159,6 +183,11 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         results.append(data)
         from .gates import claim_sentences
         unit_claims.append((unit_label, claim_sentences(data, _FIELDS)))
+        filled = [label for field, label in _FIELDS if (data.get(field) or '').strip()]
+        section_names = '、'.join(dict.fromkeys(
+            (r.label or '正文') for r in (directive.runs if directive is not None else [])))[:80]
+        brief_entries.append({'unit': unit_label, 'section': section_names,
+                              'claims': len(unit_claims[-1][1]), 'fields': '、'.join(filled)})
         semantic_inputs.append(([(field, data.get(field) or '', (data.get('field_evidence') or {}).get(field) or [])
                                  for field, _ in _FIELDS], scope))
         if isinstance(data.get('field_notes'), str) and data['field_notes'].strip():
@@ -242,18 +271,24 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         merged['field_notes'] = prefix + ' ' + merged.get('field_notes', '')
     coverage['gates'] = gate_log
     coverage['uncovered_units'] = uncovered
+    coverage['flagged_units'] = flagged
+    coverage['flagged_units'] = flagged
     coverage['usage'] = tracker.to_dict()
     # 跨指令重复：条数正常但内容全是别人的 —— 条数闸门抓不到这一类
     from .gates import overlap_flags
     overlaps = overlap_flags(unit_claims)
     if overlaps:
         coverage['overlaps'] = overlaps
-    if uncovered:
-        # 有段落没拿到可用产出 —— 整体覆盖不完整，不伪装成通过
+    if uncovered or flagged:
+        # 有段落没有可用产出或没通过闸门 —— 整体覆盖不完整，不伪装成通过。
+        # 两者分开写：前者是真的没读到，后者是读到了但不合格。
         coverage['complete'] = False
-        coverage['note'] = coverage.get('note', '') + (
-            f' 其中 {len(uncovered)} 段未完成提取闸门或没有可用产出：{"、".join(uncovered)}。'
-        )
+        parts = []
+        if uncovered:
+            parts.append(f'{len(uncovered)} 段没有可用产出：{"、".join(uncovered)}')
+        if flagged:
+            parts.append(f'{len(flagged)} 段未通过提取闸门：{"、".join(flagged)}')
+        coverage['note'] = coverage.get('note', '') + ' ' + '；'.join(parts) + '。'
     merged['_citation_check'] = {'passed': not all_issues, 'issues': list(dict.fromkeys(all_issues))}
     from .evidence import citations_for
     merged['_citations'] = citations_for(all_excerpts)

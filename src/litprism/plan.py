@@ -172,6 +172,11 @@ def section_runs(chunks: list[dict], meter: Any) -> list[SectionRun]:
     """按**连续段**切章节 —— 同名章节在文中出现多次时各自成段。"""
     runs: list[SectionRun] = []
     for index, c in enumerate(chunks, 1):
+        # 参考文献不是论证材料：整段排除，否则会占掉大量指令配额。
+        # 老材料没有 section_role，退回看 section 名（历史上会写成 REFERENCES）。
+        role = (c.get('section_role') or c.get('section') or '').strip().upper()
+        if role in ('参考文献', 'REFERENCES', 'BIBLIOGRAPHY'):
+            continue
         label = (c.get('section') or '正文').strip() or '正文'
         text = c.get('text') or ''
         tokens = meter.estimate_text(text)
@@ -237,6 +242,18 @@ def _partition_run(run, quota, meter):
     return pieces
 
 
+# 一条指令最多问多少条陈述：这条上限与输出预算无关。
+# 不设上限时，384K 输出会算出 466 条的配额，整篇章节就会被合并成一条指令，
+# "按结构分步"直接失效（实测 105 块只出 19 条陈述）。
+MAX_CLAIMS_PER_DIRECTIVE = 24
+
+
+# 一条指令最多问多少条陈述：这条上限与输出预算无关。
+# 不设上限时，384K 输出会算出 466 条的配额，整篇章节就会被合并成一条指令，
+# "按结构分步"直接失效（实测 105 块只出 19 条陈述）。
+MAX_CLAIMS_PER_DIRECTIVE = 24
+
+
 def build_plan(
     paper: dict,
     chunks: list[dict],
@@ -257,7 +274,7 @@ def build_plan(
     """
     runs = section_runs(chunks, meter)
     total = sum(r.tokens for r in runs)
-    quota = quota_for(max_tokens)
+    quota = min(quota_for(max_tokens), MAX_CLAIMS_PER_DIRECTIVE)
 
     if total + overhead_tokens > available_tokens:
         return Plan(

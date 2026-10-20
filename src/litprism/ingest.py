@@ -32,6 +32,8 @@ class Page:
 class Section:
     name: str
     level: int = 1
+    # name 保留原文标题（如 "3.1 Naive RAG"），role 是归类用的规范名（方法/正文…）
+    role: str = ''
     text: str = ""
     start_page: int | None = None
     # (页码, 行文本) —— 保留逐行页码，分块时才能给出准确的引用页码
@@ -397,7 +399,72 @@ def _extract_metadata(pages: list[Page], raw_meta: dict) -> dict:
 # ---------------------------------------------------------------------------
 # 章节切分
 # ---------------------------------------------------------------------------
-def detect_sections(pages: list[Page]) -> list[Section]:
+def pdf_outline(path: str | Path) -> list[tuple[int, str, int]]:
+    """读 PDF 自带大纲：(层级, 标题, 起始页)。读不到返回空列表。
+
+    为什么不靠猜标题：论文的章节名（Retrieval / Augmentation…）不在词表里，
+    但通常就写在 PDF 书签里 —— 那是结构化事实，不是启发式。
+    """
+    try:
+        import pymupdf
+    except ImportError:  # 打包漏带时退回启发式，不阻断解析
+        return []
+    try:
+        with pymupdf.open(str(path)) as doc:
+            toc = doc.get_toc(simple=True) or []
+    except Exception:  # noqa: BLE001 - 大纲损坏不该影响正文解析
+        return []
+    out = []
+    for level, title, page in toc:
+        title = clean_text(str(title or '')).strip()
+        if title and int(page or 0) >= 1:
+            out.append((int(level), title, int(page)))
+    return out
+
+
+def _sections_from_outline(pages: list[Page], outline: list[tuple[int, str, int]],
+                           max_level: int = 1) -> list[Section]:
+    """按大纲页码把正文切成章节；同页多条只取最浅的一条。"""
+    entries = [(lvl, title, page) for lvl, title, page in outline if lvl <= max_level]
+    if len(entries) < 3:
+        entries = [(lvl, title, page) for lvl, title, page in outline if lvl <= 2]
+    if len(entries) < 3:
+        return []
+    by_page: dict[int, tuple[int, str, int]] = {}
+    for entry in entries:
+        by_page.setdefault(entry[2], entry)
+    ordered = [by_page[page] for page in sorted(by_page)]
+    last_page = max((p.number for p in pages), default=1)
+
+    def lines_between(start: int, end: int) -> list[tuple[int, str]]:
+        return [(p.number, ln) for p in pages if start <= p.number <= end
+                for ln in (p.reading_text if p.reading_text is not None else p.text).split('\n')]
+
+    sections: list[Section] = []
+    first = ordered[0][2]
+    if first > 1:
+        lines = lines_between(1, first - 1)
+        if lines:
+            sections.append(Section(name='正文', role='正文', start_page=1, lines=lines,
+                                    text=clean_text('\n'.join(t for _, t in lines))))
+    for index, (_lvl, title, page) in enumerate(ordered):
+        end = ordered[index + 1][2] - 1 if index + 1 < len(ordered) else last_page
+        if end < page:
+            end = page
+        lines = lines_between(page, end)
+        if not lines:
+            continue
+        canon = _canonical_section(title) or '正文'
+        sections.append(Section(name=title[:120], role=canon, start_page=page, lines=lines,
+                                text=clean_text('\n'.join(t for _, t in lines))))
+    return sections
+
+
+def detect_sections(pages: list[Page], outline: list[tuple[int, str, int]] | None = None) -> list[Section]:
+    if outline:
+        from_outline = _sections_from_outline(pages, outline)
+        if from_outline:
+            return from_outline
     sections: list[Section] = []
     current: Section | None = None
     buf: list[tuple[int, str]] = []
@@ -421,7 +488,7 @@ def detect_sections(pages: list[Page]) -> list[Section]:
         toc |= sum(bool(re.search(r'\.{4,}', ln)) for ln in lines) >= 3
         if toc:
             flush()
-            sections.append(Section(name='目录', text=text, start_page=pg.number,
+            sections.append(Section(name='目录', role='目录', text=text, start_page=pg.number,
                                     lines=[(pg.number, ln) for ln in lines]))
             current = None
             continue
@@ -429,7 +496,9 @@ def detect_sections(pages: list[Page]) -> list[Section]:
             canon = _is_heading_line(line)
             if canon:
                 flush()
-                current = Section(name=canon, start_page=pg.number)
+                # 原文标题才是章节边界；canon 只是"这一段属于方法/结论"的分类
+                heading = clean_text(line).strip() or canon
+                current = Section(name=heading[:120], role=canon, start_page=pg.number)
             else:
                 if current is None:
                     current = Section(name="正文", start_page=pg.number)
@@ -483,12 +552,13 @@ def chunk_document(doc: Document, chunk_size: int = 900, overlap: int = 150) -> 
         buf: list[tuple[int | None, str]] = []
         buf_len = 0
 
-        def flush(section_name=sec.name, keep_short=substantial) -> None:
+        def flush(section_name=sec.name, section_role=sec.role or sec.name, keep_short=substantial) -> None:
             nonlocal buf, buf_len
             if buf:
                 text = "\n".join(t for _, t in buf).strip()
                 if text and (len(text) >= 60 or keep_short and any(c.isalpha() for c in text)):
-                    chunks.append({"text": text, "section": section_name, "page": buf[0][0]})
+                    chunks.append({"text": text, "section": section_name,
+                                   "section_role": section_role, "page": buf[0][0]})
             buf, buf_len = [], 0
 
         for pgno, line in src:
@@ -549,7 +619,7 @@ def load_document(path: str | Path) -> Document:
     doc.doi = meta["doi"]
     doc.arxiv_id = meta["arxiv_id"]
     doc.meta = meta["raw_meta"]
-    doc.sections = detect_sections(pages)
+    doc.sections = detect_sections(pages, pdf_outline(p) if p.suffix.lower() == '.pdf' else None)
     for page in pages:
         pending = sum(t['status'] == 'needs_review' for t in page.tables)
         if pending:
