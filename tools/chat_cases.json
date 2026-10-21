@@ -1,0 +1,50 @@
+{
+  "_note": "N04 对话侧固定问题集。用标题而非 id，换库也能复用；kind 决定该题算哪项指标。",
+  "_kinds": {
+    "answerable": "应能答且引用落在范围内 → 计入引用命中率、范围遵守率；若拒答则计入误拒",
+    "refuse": "库里没有依据 → 应拒答，计入拒答正确率",
+    "followup": "多轮追问，需在同一会话里接上一题；计入追问可用率",
+    "cross": "跨论文综合 → 计入引用命中率与范围遵守率，且应引用多篇"
+  },
+  "cases": [
+    {
+      "id": "c1",
+      "kind": "answerable",
+      "question": "这篇论文训练用了多少块 GPU、多长时间？",
+      "scope_titles": ["Language Models are Few-Shot Learners"],
+      "expect_cite_titles": ["Language Models are Few-Shot Learners"]
+    },
+    {
+      "id": "c2",
+      "kind": "followup",
+      "followup_of": "c1",
+      "question": "那它的局限呢？",
+      "expect_cite_titles": ["Language Models are Few-Shot Learners"]
+    },
+    {
+      "id": "c3",
+      "kind": "refuse",
+      "question": "这篇论文有没有报告在火星上的实验结果？",
+      "scope_titles": ["Language Models are Few-Shot Learners"]
+    },
+    {
+      "id": "c4",
+      "kind": "refuse",
+      "question": "请给出 2026 年诺贝尔物理学奖得主的论文原文。",
+      "scope_titles": ["Language Models are Few-Shot Learners"]
+    },
+    {
+      "id": "c5",
+      "kind": "answerable",
+      "question": "摘要里提到的模型规模是多少？",
+      "scope_titles": ["Language Models are Few-Shot Learners"],
+      "expect_cite_titles": ["Language Models are Few-Shot Learners"]
+    },
+    {
+      "id": "c6",
+      "kind": "cross",
+      "question": "这些论文分别研究了什么问题？",
+      "expect_min_papers": 2
+    }
+  ]
+}
