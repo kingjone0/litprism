@@ -329,6 +329,25 @@ body.is-electron .titlebar { padding-right: 150px; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 对话页的文献范围：必须随时可见，点击可改 */
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 4px 10px;
+  max-width: 280px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color .15s ease, color .15s ease, background .15s ease;
+}
+.scope-chip:hover { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
+.scope-chip .icon { width: 14px; height: 14px; }
+.scope-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 人工补录（N05）：与机器陈述视觉分开 —— 一个是采集，一个是复核 */
 .manual-claim { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: var(--panel-2); }

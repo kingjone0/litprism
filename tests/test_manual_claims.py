@@ -107,6 +107,19 @@ class TestValidate:
         with pytest.raises(ClaimRejected):
             validate(kb, pid, claim(chunk, text='   '))
 
+    def test_legacy_analysis_without_material_allows_claim(self, env):
+        """⭐ v12 之前的分析没有 material_id，而 chunks 已回填。
+
+        拿 None 去比材料版本会让所有历史论文的补录一律失败 —— 必须在
+        "分析确实绑定了材料"时才比对。
+        """
+        _, kb, _, _ = env
+        pid, chunk, _ = seed(kb)
+        with kb.tx() as con:
+            con.execute('UPDATE analyses SET material_id=NULL WHERE paper_id=?', (pid,))
+        clean = validate(kb, pid, claim(chunk))
+        assert clean['chunk_id'] == chunk['id']
+
     def test_text_length_capped(self, env):
         _, kb, _, _ = env
         pid, chunk, _ = seed(kb)

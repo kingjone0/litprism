@@ -17,10 +17,41 @@ from ..evidence import require_citable
 def register_workflows(app, kb, cfg, task_llm, verifier):
     @app.patch('/api/conversations/{cid}')
     def update_conversation(cid: str, req: dict):
+        """改会话名 / 置顶 / **文献范围**。
+
+        范围原先只能在建会话时设定，想加一篇新导入的论文就得重建会话、丢掉历史。
+        这里补上修改能力：只改 scope，不动消息。
+
+        ``paper_ids: []`` 表示**一篇都不选**，不是"全部" —— 空范围不得静默扩为全库。
+        """
+        from ..scope import paper_scope
+
         current = kb.resolve_conversation(cid)
         if current is None:
             raise HTTPException(404, '会话不存在')
         cid = current['id']
+
+        # 先校验再写：范围非法时不能留下半套更新
+        clean = None
+        resolved = None
+        if 'scope' in req:
+            raw = req.get('scope') or {}
+            if not isinstance(raw, dict):
+                raise HTTPException(400, '范围格式不正确')
+            clean = {}
+            if 'paper_ids' in raw:
+                ids = raw['paper_ids']
+                if not isinstance(ids, list) or any(not isinstance(v, str) for v in ids):
+                    raise HTTPException(400, '文献范围必须是 id 列表')
+                clean['paper_ids'] = ids
+            if raw.get('collection_id'):
+                clean['collection_id'] = raw['collection_id']
+            if clean:
+                try:
+                    resolved = paper_scope(kb, clean)
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from exc
+
         with kb.tx() as con:
             if 'title' in req:
                 title = str(req['title']).strip()
@@ -29,7 +60,14 @@ def register_workflows(app, kb, cfg, task_llm, verifier):
                 con.execute('UPDATE conversations SET title=? WHERE id=?', (title, cid))
             if 'pinned' in req:
                 con.execute('UPDATE conversations SET pinned=? WHERE id=?', (bool(req['pinned']), cid))
-        return {'ok': True}
+            if 'scope' in req:
+                con.execute('UPDATE conversations SET scope=? WHERE id=?',
+                            (json.dumps(clean, ensure_ascii=False) if clean else None, cid))
+        out = {'ok': True}
+        if 'scope' in req:
+            out['scope'] = clean or None
+            out['paper_count'] = None if resolved is None else len(resolved)
+        return out
 
     @app.post('/api/library/batch')
     def batch_papers(req: dict):

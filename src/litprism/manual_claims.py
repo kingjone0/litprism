@@ -96,7 +96,10 @@ def validate(kb, paper_id: str, req: dict) -> dict:
     if row['paper_id'] != paper_id:
         raise ClaimRejected('该原文块不属于这篇论文。')
     analysis = kb.get_analysis(paper_id)
-    if analysis and analysis.get('material_id') != row['material_id']:
+    # 只在**分析确实绑定了材料版本**时才比对。v12 之前的分析 material_id 为空，
+    # 而 chunks 已被迁移回填 —— 拿 None 去比会让所有历史论文的补录一律失败。
+    analysis_material = (analysis or {}).get('material_id')
+    if analysis_material and analysis_material != row['material_id']:
         raise ClaimRejected('原文块与当前分析的材料版本不一致，请选择该分析对应的原文。', status=409)
 
     if normalize_text(quote) not in normalize_text(row['text']):

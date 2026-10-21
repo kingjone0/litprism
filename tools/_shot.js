@@ -88,6 +88,18 @@ app.whenReady().then(async () => {
   await sleep(1800);
   await shot('chat-empty');
 
+  // 1b) 文献范围：默认全部 → 改成单篇，胶囊应随之变化
+  const scopeBefore = await run(`(document.querySelector('.scope-chip span')||{}).textContent || '(无胶囊)'`);
+  await run(`(async () => {
+    await api('/api/conversations/' + ${JSON.stringify(conv)},
+      { method: 'PATCH', body: { scope: { paper_ids: [${JSON.stringify(paper)}] } } });
+    await loadChat();
+  })()`);
+  await sleep(900);
+  const scopeAfter = await run(`(document.querySelector('.scope-chip span')||{}).textContent || '(无胶囊)'`);
+  log('范围胶囊:', scopeBefore, '→', scopeAfter);
+  await shot('chat-scope');
+
   // 2) 论文页：位置条应显示论文标题
   await run(`openView('paper', {paperId: ${JSON.stringify(paper)}})`);
   await sleep(1800);
@@ -96,7 +108,10 @@ app.whenReady().then(async () => {
 
   // 3) N05 补录：加一条 → 面板与召回应更新
   const added = await run(`(async () => {
-    const d = await api('/api/paper/' + ${JSON.stringify(paper)} + '/text');
+    const sem = await api('/api/paper/' + ${JSON.stringify(paper)} + '/semantic');
+    // 必须按**分析所属材料**取原文：二次导入后当前材料可能已是另一版
+    const mid = sem.material_id ? '?material_id=' + encodeURIComponent(sem.material_id) : '';
+    const d = await api('/api/paper/' + ${JSON.stringify(paper)} + '/text' + mid);
     const c = d.pages.flatMap(p => p.chunks)[0];
     const quote = (c.text || '').split(/[。.!?]/)[0].slice(0, 60);
     const r = await api('/api/paper/' + ${JSON.stringify(paper)} + '/semantic/claims',

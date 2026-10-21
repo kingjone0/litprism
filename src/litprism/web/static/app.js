@@ -16,6 +16,7 @@ const S = {
   activePaper: null,
   // 顶部只显示「当前这一页」：不累积多个标签，也没有关闭按钮。
   locLabel: '',
+  convScope: null,
   theme: localStorage.getItem('litprism-theme') || 'light',
   inspector: localStorage.getItem('litprism-evidence-panel') === '1',
   sidebar: localStorage.getItem('litprism-sidebar') !== '0',
@@ -229,13 +230,68 @@ function renderLocation() {
   const bar = $('#tabbar');
   if (!bar) return;
   const label = S.locLabel || VIEW_TITLES[S.activeView] || '';
-  bar.innerHTML = label ? `<span class="loc-chip" title="${esc(label)}">${esc(label)}</span>` : '';
+  const chip = label ? `<span class="loc-chip" title="${esc(label)}">${esc(label)}</span>` : '';
+  // 对话页额外显示文献范围：用户必须随时看得出"这次回答基于哪些文献"
+  const scope = (S.activeView === 'chat' && S.convScope)
+    ? `<button class="scope-chip" id="scopeChip" type="button"
+         title="本次对话的文献范围，点击修改">${icon('library')}<span>${esc(S.convScope.label)}</span></button>`
+    : '';
+  bar.innerHTML = chip + scope;
+  const btn = $('#scopeChip');
+  if (btn) btn.onclick = editConversationScope;
+}
+
+/** 把会话的 scope 解析成可读标签。空/缺失 = 全部可引用。 */
+function parseScope(raw) {
+  let scope = raw;
+  if (typeof scope === 'string') {
+    try { scope = JSON.parse(scope); } catch { scope = null; }
+  }
+  if (!scope || typeof scope !== 'object') return { kind: 'all', label: '全部可引用' };
+  if (scope.collection_id) {
+    const group = (S.collections || []).find(c => c.id === scope.collection_id);
+    return { kind: 'group', label: `分组：${group?.name || '已删除分组'}`, raw: scope };
+  }
+  const ids = Array.isArray(scope.paper_ids) ? scope.paper_ids : [];
+  if (!ids.length) return { kind: 'empty', label: '未选文献', raw: scope };
+  if (ids.length === 1) {
+    const p = (S.papers || []).find(x => x.id === ids[0]);
+    return { kind: 'papers', label: short(p?.display_title || p?.title || '1 篇文献', 24), raw: scope };
+  }
+  return { kind: 'papers', label: `${ids.length} 篇文献`, raw: scope };
 }
 
 function setLocation(label) {
   if (!label || S.locLabel === label) return;
   S.locLabel = label;
   renderLocation();
+}
+
+/** 修改当前对话的文献范围（不重建会话，历史保留）。 */
+function editConversationScope() {
+  if (!S.activeConv) return;
+  const current = S.convScope?.raw || {};
+  const options = [
+    `<option value=""${!current.paper_ids && !current.collection_id ? ' selected' : ''}>全部可引用文献与已审核知识</option>`,
+    ...(S.selectedPapers?.size
+      ? [`<option value="selected"${current.paper_ids && current.paper_ids.length === S.selectedPapers.size ? ' selected' : ''}>知识库中勾选的文献（${S.selectedPapers.size} 篇）</option>`] : []),
+    ...(S.papers || []).map(p => {
+      const picked = current.paper_ids?.length === 1 && current.paper_ids[0] === p.id;
+      return `<option value="p:${esc(p.id)}"${picked ? ' selected' : ''}>${esc(short(p.display_title || p.title, 42))}</option>`;
+    }),
+    ...(S.collections || []).map(c =>
+      `<option value="g:${esc(c.id)}"${current.collection_id === c.id ? ' selected' : ''}>分组：${esc(c.name)}</option>`),
+  ].join('');
+  workflowDialog('修改文献范围', `<label>文献范围<select class="select" name="scope">${options}</select></label>
+    <p class="source-intro">只影响之后的问题；已产生的回答与引用不会改写。</p>`, async values => {
+    let scope = {};
+    if (values.scope === 'selected') scope = { paper_ids: [...S.selectedPapers] };
+    else if (values.scope.startsWith('p:')) scope = { paper_ids: [values.scope.slice(2)] };
+    else if (values.scope.startsWith('g:')) scope = { collection_id: values.scope.slice(2) };
+    await api(`/api/conversations/${encodeURIComponent(S.activeConv)}`, { method: 'PATCH', body: { scope } });
+    toast('范围已更新');
+    await loadChat();
+  }, '保存');
 }
 
 /* ==========================================================================
@@ -415,6 +471,7 @@ async function loadPaperDetail(versionId = null) {
           </div>
           <span style="flex:1"></span>
           <div class="row" style="gap:6px">
+            <button class="btn sm" id="btnAskThis">就这篇提问</button>
             <button class="btn sm" id="btnRename">重命名</button>
             <button class="btn sm danger" id="btnDelete">删除</button>
             <button class="btn sm primary" id="btnReanalyze">重新解读</button>
@@ -524,6 +581,19 @@ async function loadPaperDetail(versionId = null) {
       } catch (e) { toast(e.message, true); }
     };
     $('#btnBudgetAnalyze').onclick = () => analysisRunDialog(p.id);
+
+    // 就这篇提问：新建一个只含本片的对话，而不是改现有会话 —— 改现有会话会把
+    // 之前基于其他文献的回答置于一个不一致的范围里。
+    $('#btnAskThis').onclick = async () => {
+      try {
+        const r = await api('/api/conversations', {
+          method: 'POST',
+          body: { title: short(p.display_title || p.title || '研究对话', 28), scope: { paper_ids: [p.id] } },
+        });
+        await loadSidebar();
+        openView('chat', { convId: r.id });
+      } catch (e) { toast(e.message, true); }
+    };
     loadAnalysisRuns(p.id);
 
     // 补录与质量面板：数据单独加载，避免拖慢首屏
@@ -875,6 +945,8 @@ async function loadChat() {
   const box = $('#chatDetail');
   const convId = S.activeConv;
   if (!S.activeConv) {
+    S.convScope = null;
+    renderLocation();
     box.innerHTML = `<div class="empty" style="padding-top:120px">
       <div class="ico">💬</div>
       <div class="title">没有选中的对话</div>
@@ -892,6 +964,8 @@ async function loadChat() {
     S.sources = d.sources || [];
     $('#tbTitle').textContent = d.conversation.title || '对话';
     setLocation(d.conversation.title || '对话');
+    S.convScope = parseScope(d.conversation.scope);
+    renderLocation();
 
     box.innerHTML = `
       <div class="chat-layout">
