@@ -28,11 +28,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
-from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
@@ -67,67 +68,105 @@ class StubLLM:
 
 def resolve_titles(kb, titles):
     """标题子串 → 论文 id。解析不到直接报错，不静默降级成"全部"。"""
+    if titles is None:
+        return None
     ids = []
-    for title in titles or []:
+    for title in titles:
         row = kb._con.execute(
             'SELECT id FROM papers WHERE deleted_at IS NULL AND (title LIKE ? OR display_title LIKE ?)'
-            ' ORDER BY rowid LIMIT 1', (f'%{title}%', f'%{title}%')).fetchone()
-        if row is None:
-            raise SystemExit(f'问题集引用的论文不在该库中：{title}')
-        ids.append(row['id'])
-    return ids or None
+            ' ORDER BY rowid LIMIT 2', (f'%{title}%', f'%{title}%')).fetchall()
+        if len(row) != 1:
+            raise SystemExit(f'问题集标题必须唯一命中论文：{title}（命中 {len(row)}）')
+        ids.append(row[0]['id'])
+    return ids
 
 
-def build_llm(mode, cfg):
+def build_llm(mode, cfg, kb=None):
     if mode == 'stub':
         return StubLLM()
-    from litprism.providers import ProviderStore
-    from litprism.llm import AnthropicClient, OpenAICompatClient
-
-    store = ProviderStore(cfg)
-    provider, model_id = store.get_active()
-    if provider is None:
-        raise SystemExit('未选择模型；真实模式需要先在设置里配置提供商。')
-    key = store.secrets.get(provider.api_key_ref)
-    cls = AnthropicClient if provider.protocol == 'anthropic' else OpenAICompatClient
-    print(f'· 真实模型：{provider.name} / {model_id}')
-    return cls(provider, model_id, key, cfg)
+    from litprism.llm import build_active_llm
+    if kb is None:
+        raise ValueError('真实验收必须显式传入隔离知识库。')
+    return build_active_llm(kb, cfg)
 
 
-def check_citations(kb, excerpts):
-    """每条引用是否解析到真实、可引用、未删除的片段。"""
+def check_citations(kb, excerpts, answer):
+    """Check distinct references actually written in the draft, including invalid ones."""
+    from litprism.evidence import citation_issues, stored_excerpts
+    from litprism.textutil import parse_citations
+    by_tag = {e['tag']: e for e in excerpts or []}
     rows = []
-    for e in excerpts or []:
-        row = kb._con.execute(
-            'SELECT c.paper_id, p.verify_level, p.deleted_at FROM chunks c'
-            ' JOIN papers p ON p.id = c.paper_id WHERE c.id = ?', (e.get('chunk_id'),)).fetchone()
-        ok = bool(row) and row['verify_level'] in CITABLE and not row['deleted_at']
-        rows.append({'chunk_id': e.get('chunk_id'), 'paper_id': e.get('paper_id') or (row['paper_id'] if row else None),
-                     'valid': ok})
+    for tag, page in dict.fromkeys(parse_citations(answer)):
+        e = by_tag.get(tag)
+        row = {'tag': tag, 'page': page, 'chunk_id': None, 'paper_id': None, 'valid': False}
+        if e:
+            ref = '[' + tag + (f' p.{page}' if page is not None else '') + ']'
+            try:
+                stored = stored_excerpts(kb, [e])[0]
+                row.update(chunk_id=stored['id'], paper_id=stored.get('paper_id'),
+                           valid=not citation_issues(ref, [stored]))
+            except ValueError:
+                pass
+        rows.append(row)
     return rows
 
 
 def run_case(agent, kb, case, conv_id, scope_ids):
+    import time
+
     from litprism.agents import QAAgent
 
+    user = kb.append_message(conv_id, 'user', case['question'], meta={'scope': scope_ids})
+    started = time.monotonic()
     ans = QAAgent(kb, agent['cfg'], agent['llm']).ask(
-        case['question'], paper_ids=scope_ids, conversation_id=conv_id)
-    cites = check_citations(kb, getattr(ans, 'excerpts', []) or [])
+        case['question'], paper_ids=scope_ids, conversation_id=conv_id, before_seq=user['seq'])
+    draft = ans.draft_answer or ans.answer
+    cites = check_citations(kb, ans.excerpts, draft)
+    # Publish only checked references; retain the blocked draft separately for audit.
+    published = [e for e in ans.excerpts if e['tag'] in {c['tag'] for c in cites if c['valid']}] if (
+        ans.status in ('answered', 'refused', 'needs_review') and ans.citation_check_passed) else []
+    kb.append_message(conv_id, 'assistant', ans.answer, citations=published,
+                      citation_check={'passed': ans.citation_check_passed, 'issues': ans.citation_issues},
+                      meta={'status': ans.status, 'scope': scope_ids, 'usage': ans.usage,
+                            'guard_issues': ans.guard_issues,
+                            'blocked_answer': draft if ans.status in ('invalid_citation', 'needs_review') else ''})
     return {
-        'id': case['id'],
-        'kind': case.get('kind', 'answerable'),
-        'question': case['question'],
-        'refused': bool(getattr(ans, 'insufficient_evidence', False)),
-        # 调用失败的回答不能算作"答过" —— 否则失败会被记成 100% 引用命中
-        'error': getattr(ans, 'confidence', '') == 'error',
-        'citation_check_passed': bool(getattr(ans, 'citation_check_passed', True)),
-        'citations': len(cites),
-        'valid_citations': sum(1 for c in cites if c['valid']),
-        'in_scope': all(scope_ids is None or c['paper_id'] in scope_ids for c in cites) if cites else True,
-        'papers': sorted({c['paper_id'] for c in cites if c['paper_id']}),
-        'usage': getattr(ans, 'provider_usage', None),
-        'answer': (ans.answer or '')[:400],
+        'id': case['id'], 'kind': case.get('kind', 'answerable'), 'question': case['question'],
+        'status': ans.status, 'refused': ans.status == 'refused',
+        'error': ans.status == 'error', 'citation_check_passed': ans.citation_check_passed,
+        'citations': len(cites), 'valid_citations': sum(c['valid'] for c in cites),
+        'in_scope': all(c['valid'] and (scope_ids is None or c['paper_id'] in scope_ids) for c in cites),
+        'papers': sorted({c['paper_id'] for c in cites if c['valid'] and c['paper_id']}),
+        'usage': ans.usage, 'elapsed_seconds': round(time.monotonic()-started, 3),
+        'retrieval': ans.retrieval, 'answer': ans.answer, 'draft_answer': draft,
+        'request_settings': ans.request_settings,
+        'guard_issues': ans.guard_issues,
     }
+
+
+def usable(row):
+    return (not row['error'] and not row['refused'] and row.get('citation_check_passed', True)
+            and row.get('status', 'answered') == 'answered'
+            and row['citations'] > 0 and row['valid_citations'] == row['citations'])
+
+
+def quality_passed(rows, cases_by_id):
+    if not rows:
+        return False
+    for row in rows:
+        case = cases_by_id[row['id']]
+        if case.get('kind') == 'refuse':
+            if row['error'] or not row['refused'] or row.get('status') != 'refused':
+                return False
+        elif not usable(row) or not row['in_scope']:
+            return False
+        if case.get('kind') == 'followup':
+            expected = case.get('_expect_ids') or []
+            if not expected or not row.get('parent_usable') or not set(expected) <= set(row['papers']):
+                return False
+        if case.get('kind') == 'cross' and len(row['papers']) < case.get('expect_min_papers', 2):
+            return False
+    return True
 
 
 def judge(rows, cases_by_id):
@@ -141,29 +180,29 @@ def judge(rows, cases_by_id):
 
     expected_refuse = [r for r in rows if cases_by_id[r['id']].get('kind') == 'refuse']
     answerable = [r for r in rows if cases_by_id[r['id']].get('kind') in ('answerable', 'cross')]
-    correct_refuse = [r for r in expected_refuse if r['refused']]
+    correct_refuse = [r for r in expected_refuse if r['refused'] and not r['error'] and r.get('status', 'refused') == 'refused']
     false_refuse = [r for r in answerable if r['refused']]
 
     followups = [r for r in rows if cases_by_id[r['id']].get('kind') == 'followup']
     followup_ok = 0
     for r in followups:
         expect = cases_by_id[r['id']].get('_expect_ids') or []
-        if expect and set(expect) & set(r['papers']):
+        if usable(r) and r.get('parent_usable', True) and expect and set(expect) <= set(r['papers']):
             followup_ok += 1
 
     cross = [r for r in rows if cases_by_id[r['id']].get('kind') == 'cross']
     cross_ok = 0
     for r in cross:
         need = cases_by_id[r['id']].get('expect_min_papers', 2)
-        if len(r['papers']) >= need:
+        if usable(r) and len(r['papers']) >= need:
             cross_ok += 1
 
     return {
         '调用失败': {'num': sum(1 for r in rows if r['error']), 'den': len(rows),
                     'ratio': ratio(sum(1 for r in rows if r['error']), len(rows))},
         '引用命中率': {'num': valid, 'den': total_cites, 'ratio': ratio(valid, total_cites)},
-        '范围遵守率': {'num': sum(1 for r in with_cites if r['in_scope']), 'den': len(with_cites),
-                     'ratio': ratio(sum(1 for r in with_cites if r['in_scope']), len(with_cites))},
+        '范围遵守率': {'num': sum(1 for r in with_cites if r['in_scope'] and r['valid_citations'] == r['citations']), 'den': len(with_cites),
+                     'ratio': ratio(sum(1 for r in with_cites if r['in_scope'] and r['valid_citations'] == r['citations']), len(with_cites))},
         '拒答正确率': {'num': len(correct_refuse), 'den': len(expected_refuse),
                      'ratio': ratio(len(correct_refuse), len(expected_refuse)),
                      'false_refuse': len(false_refuse), 'answerable': len(answerable)},
@@ -253,12 +292,33 @@ def main() -> int:
 
     # 必须在 import config 之前设：data_path 在模块导入时就由 APP_ROOT 决定了
     os.environ['LITPRISM_HOME'] = args.home
+    if args.out and Path(args.out).exists():
+        raise SystemExit('输出文件已存在，请使用新路径，保留先前失败及基线记录。')
 
-    from litprism.config import Config
+    from litprism.config import Config, _from_dict, _validate
     from litprism.db import KnowledgeBase
 
-    cfg = Config()
+    home = Path(args.home).resolve()
+    if not (home / 'data' / 'litprism.db').is_file():
+        raise SystemExit('隔离目录缺少 data/litprism.db；先准备固定样本副本，不创建或访问其他库。')
+    config_file = home / 'config' / 'config.yaml'
+    if config_file.is_file():
+        import yaml
+        cfg = _from_dict(yaml.safe_load(config_file.read_text(encoding='utf-8')) or {})
+    else:
+        cfg = Config()
+    _validate(cfg)
+    cfg.app.data_dir = str(home / 'data')
+    cfg.export.notes_dir = str(home / 'notes')
     kb = KnowledgeBase(cfg)
+    frozen = {'cases_sha256': hashlib.sha256(Path(args.cases).read_bytes()).hexdigest(),
+              'schema': kb._con.execute('PRAGMA user_version').fetchone()[0],
+              'code_sha256': {name: hashlib.sha256((Path(__file__).resolve().parents[1] / name).read_bytes()).hexdigest()
+                              for name in ('tools/chat_acceptance.py', 'src/litprism/agents.py',
+                                           'src/litprism/qa_retrieval.py', 'src/litprism/context/dialogue.py',
+                                           'src/litprism/search.py', 'src/litprism/llm.py')},
+              'materials': [dict(r) for r in kb._con.execute(
+                  'SELECT id,paper_id,content_hash FROM materials ORDER BY id')]}
     try:
         spec = json.loads(Path(args.cases).read_text(encoding='utf-8'))
         cases = spec['cases']
@@ -270,7 +330,7 @@ def main() -> int:
             summary, scores = verdict(rows, values)
             out = {'mode': 'sweep', 'top_k': 8, 'values': values,
                    'rows': rows, 'verdict': summary, 'scores': scores}
-            target = Path(args.out) if args.out else Path(args.cases).with_name('chat_sweep.json')
+            target = Path(args.out) if args.out else home / 'chat_sweep.json'
             target.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding='utf-8')
 
             print(f'{"题号":<6}{"类型":<12}' + ''.join(f'{v:>7}' for v in values))
@@ -294,25 +354,34 @@ def main() -> int:
             print(f'明细：{target}')
             return 0
 
-        llm = build_llm(args.mode, cfg)
+        llm = build_llm(args.mode, cfg, kb)
         agent = {'cfg': cfg, 'llm': llm}
+        runtime = getattr(llm, 'runtime_config', cfg)
+        frozen['runtime'] = {'model': getattr(llm, 'name', 'unknown'),
+                             'window_tokens': runtime.context.window_tokens,
+                             'max_output_tokens': runtime.llm.model_max_output_tokens,
+                             'top_k': runtime.retrieval.top_k, 'min_score': runtime.retrieval.min_score}
 
         # 预解析标题 → id；followup 复用被追问那题的会话与范围
-        convs: dict[str, str] = {}
+        completed = {}
         rows = []
         for case in cases:
             parent = case.get('followup_of')
-            base = by_id.get(parent) if parent else case
-            scope_ids = resolve_titles(kb, base.get('scope_titles'))
-            expect = resolve_titles(kb, case.get('expect_cite_titles') or base.get('expect_cite_titles'))
+            if parent and parent not in completed:
+                raise ValueError('追问必须排在其父题之后。')
+            base = by_id[parent] if parent else case
+            scope_ids = completed[parent]['scope'] if parent else resolve_titles(kb, base.get('scope_titles'))
+            expect = (resolve_titles(kb, case['expect_cite_titles']) if 'expect_cite_titles' in case
+                      else by_id[parent]['_expect_ids'] if parent else resolve_titles(kb, base.get('expect_cite_titles')))
             case['_expect_ids'] = expect
 
-            key = parent or case['id']
-            if key not in convs:
-                convs[key] = kb.add_conversation(
-                    f'验收 {key}', scope={'paper_ids': scope_ids} if scope_ids else None)
-            row = run_case(agent, kb, case, convs[key], scope_ids)
+            cid = completed[parent]['conversation_id'] if parent else kb.add_conversation(
+                f'验收 {case["id"]}', scope={'paper_ids': scope_ids} if scope_ids is not None else None)
+            row = run_case(agent, kb, case, cid, scope_ids)
             row['scope'] = scope_ids
+            row['conversation_id'] = cid
+            row['parent_usable'] = usable(completed[parent]) if parent else True
+            completed[case['id']] = row
             rows.append(row)
             print(f'· {case["id"]} [{row["kind"]}] 拒答={row["refused"]} 引用={row["citations"]}')
 
@@ -320,8 +389,10 @@ def main() -> int:
     finally:
         kb.close()
 
-    out = {'mode': args.mode, 'cases_file': args.cases, 'metrics': metrics, 'rows': rows}
-    target = Path(args.out) if args.out else Path(args.cases).with_name('chat_acceptance.json')
+    out = {'version': 3, 'mode': args.mode, 'cases_file': args.cases, 'metrics': metrics, 'rows': rows,
+           'quality_passed': quality_passed(rows, by_id) if args.mode == 'live' else None,
+           'quality_scope': 'structural_checks_only_semantics_require_human_review', 'frozen': frozen}
+    target = Path(args.out) if args.out else home / ('chat_acceptance-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f') + '.json')
     target.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding='utf-8')
 
     print()
@@ -337,7 +408,7 @@ def main() -> int:
             extra = f'（误拒 {m["false_refuse"]}/{m["answerable"]} 应答题）'
         print(f'{name:<10}{pct(m["ratio"]):>8}   {m["num"]}/{m["den"]}{extra}')
     print(f'\n逐题记录：{target}')
-    return 0
+    return 2 if failed else (int(not out['quality_passed']) if args.mode == 'live' else 0)
 
 
 if __name__ == '__main__':

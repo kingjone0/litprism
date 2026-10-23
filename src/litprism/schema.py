@@ -613,6 +613,41 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE chunks SET section_role=section WHERE section_role IS NULL")
 
 
+def _migrate_v14(conn: sqlite3.Connection) -> None:
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS chat_runs (
+          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          request_id TEXT NOT NULL, request TEXT NOT NULL, binding TEXT NOT NULL,
+          user_message TEXT NOT NULL, status TEXT NOT NULL, result TEXT, stop_reason TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(conversation_id,request_id)
+        );
+        CREATE TABLE IF NOT EXISTS chat_run_calls (
+          run_id TEXT NOT NULL REFERENCES chat_runs(id) ON DELETE CASCADE,
+          step INTEGER NOT NULL, attempt INTEGER NOT NULL, task TEXT NOT NULL,
+          request_hash TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL,
+          response TEXT, usage TEXT, request_settings TEXT, error_type TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          PRIMARY KEY(run_id,step,attempt)
+        );
+    ''')
+
+
+def _migrate_v15(conn):
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS evidence_lineage (
+          source_id TEXT PRIMARY KEY REFERENCES evidence_sources(id) ON DELETE CASCADE,
+          refs TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS chat_evidence_grants (
+          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, user_message_id TEXT NOT NULL,
+          source_id TEXT NOT NULL REFERENCES evidence_sources(id) ON DELETE CASCADE,
+          content_hash TEXT NOT NULL, query TEXT NOT NULL, created_at TEXT NOT NULL,
+          UNIQUE(user_message_id, source_id)
+        );
+    ''')
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
@@ -627,6 +662,8 @@ MIGRATIONS: list[Migration] = [
     Migration(11, '人工补录机器漏提的陈述（manual_claims）', _migrate_v11),
     Migration(12, '原文材料版本及历史分析，保留原 chunk ID', _migrate_v12),
     Migration(13, '章节保留原文标题 + 归类 section_role', _migrate_v13),
+    Migration(14, '对话请求、逐次响应与显式续验', _migrate_v14),
+    Migration(15, '知识来源依赖与本轮外部证据授权', _migrate_v15),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

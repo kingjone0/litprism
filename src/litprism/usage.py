@@ -186,3 +186,20 @@ def tracked_json(client, messages, *, task, tracker=None):
             usage = None
         if not getattr(client, 'last_call_replayed', False) and not getattr(client, 'last_call_not_sent', False):
             tracker.add(usage, task=task, failed=failed)
+
+
+class TrackedClient:
+    """Count query expansion and answer attempts through the same logical ledger."""
+
+    def __init__(self, client, tracker):
+        self.client, self.tracker = client, tracker
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def chat_json(self, messages, *, task='unknown', **kwargs):
+        # Production query/QA calls currently use this signature; do not invent
+        # transport-attempt counts from a client's internal retry loop.
+        if kwargs:
+            raise TypeError('TrackedClient only accepts logical task calls')
+        return tracked_json(self.client, messages, task=task, tracker=self.tracker)

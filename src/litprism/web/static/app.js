@@ -248,17 +248,19 @@ function parseScope(raw) {
     try { scope = JSON.parse(scope); } catch { scope = null; }
   }
   if (!scope || typeof scope !== 'object') return { kind: 'all', label: '全部可引用' };
+  if (!('paper_ids' in scope) && !scope.collection_id) return {kind:'all', label:scope.mode === 'strict' ? '仅限本地可引用' : '全库 · 可联网补充', raw:scope};
+  const prefix = scope.mode === 'strict' ? '仅限：' : '重点：';
   if (scope.collection_id) {
     const group = (S.collections || []).find(c => c.id === scope.collection_id);
-    return { kind: 'group', label: `分组：${group?.name || '已删除分组'}`, raw: scope };
+    return { kind: 'group', label: `${prefix}${group?.name || '已删除分组'}`, raw: scope };
   }
   const ids = Array.isArray(scope.paper_ids) ? scope.paper_ids : [];
   if (!ids.length) return { kind: 'empty', label: '未选文献', raw: scope };
   if (ids.length === 1) {
     const p = (S.papers || []).find(x => x.id === ids[0]);
-    return { kind: 'papers', label: short(p?.display_title || p?.title || '1 篇文献', 24), raw: scope };
+    return { kind: 'papers', label: prefix+short(p?.display_title || p?.title || '1 篇文献', 24), raw: scope };
   }
-  return { kind: 'papers', label: `${ids.length} 篇文献`, raw: scope };
+  return { kind: 'papers', label: `${prefix}${ids.length} 篇文献`, raw: scope };
 }
 
 function setLocation(label) {
@@ -283,11 +285,13 @@ function editConversationScope() {
       `<option value="g:${esc(c.id)}"${current.collection_id === c.id ? ' selected' : ''}>分组：${esc(c.name)}</option>`),
   ].join('');
   workflowDialog('修改文献范围', `<label>文献范围<select class="select" name="scope">${options}</select></label>
+    <label>来源使用<select class="select" name="mode"><option value="focus">以所选文献为重点，补充相关可信知识与联网证据</option><option value="strict" ${current.mode === 'strict' ? 'selected' : ''}>仅限所选文献（全库时仅限本地）</option></select></label>
     <p class="source-intro">只影响之后的问题；已产生的回答与引用不会改写。</p>`, async values => {
     let scope = {};
     if (values.scope === 'selected') scope = { paper_ids: [...S.selectedPapers] };
     else if (values.scope.startsWith('p:')) scope = { paper_ids: [values.scope.slice(2)] };
     else if (values.scope.startsWith('g:')) scope = { collection_id: values.scope.slice(2) };
+    scope.mode = values.mode;
     await api(`/api/conversations/${encodeURIComponent(S.activeConv)}`, { method: 'PATCH', body: { scope } });
     toast('范围已更新');
     await loadChat();
@@ -446,6 +450,8 @@ async function loadPaperDetail(versionId = null) {
     if (S.activePaper !== requestedPaper || request !== paperDetailRequest) return;
     const p = d.paper || d;
     const a = d.analysis || {};
+    const candidateView = d.candidate_analysis || a;
+    const reviewOnly = ['not_run', 'skipped_by_user'].includes(a._semantic_review?.status) && (a._candidates || []).length;
     setLocation(p.display_title || p.title || '');
     S.paperAnalysis = a;
     S.analysisMaterial = d.analysis_material?.id || null;
@@ -494,7 +500,7 @@ async function loadPaperDetail(versionId = null) {
         <div id="analysisRuns" aria-live="polite"></div>
         ${materialNote(a._coverage)}
         ${coverageNote(a._coverage)}
-        ${versionId ? '<p class="source-intro">历史分析只读。查看原文时请选择对应的历史材料；审核与补录请返回最新分析。</p>' : semanticReviewPanel(a._semantic_review, {kind: 'paper', id: p.id}, a._candidates)}
+        ${versionId ? '<p class="source-intro">历史分析只读。查看原文时请选择对应的历史材料；审核与补录请返回最新分析。</p>' : semanticReviewPanel(candidateView._semantic_review, {kind: 'paper', id: p.id}, candidateView._candidates)}
         ${versionId ? '' : qualityPanel(p.id)}
         ${versionId ? '' : manualClaimsPanel(p.id)}
         ${a._concepts_error ? `<div class="lui-degraded">术语提取未完成：${esc(a._concepts_error)}</div>` : ''}
@@ -502,7 +508,7 @@ async function loadPaperDetail(versionId = null) {
         ${a._model ? `<div class="source-intro">生成模型：${esc(a._model)}</div>` : ''}
         ${a._citation_check?.passed === false ? `<div class="lui-degraded">部分解读字段缺少可回溯证据，已留空：${esc((a._citation_check.issues || []).join('；'))}</div>` : ''}
         ${a.research_question && !a._citation_check ? '<div class="lui-degraded">旧版解读尚未经过字段级引用检查，请重新解读。</div>' : ''}
-        ${a._model || a.research_question ? `
+        ${(a._model || a.research_question) && !reviewOnly ? `
           <div class="card"><div class="card-body">
             ${analysisSection('研究问题', a.research_question)}
             ${analysisSection('方法', a.methodology)}
@@ -513,8 +519,8 @@ async function loadPaperDetail(versionId = null) {
           </div></div>` : `
           <div class="card"><div class="card-body">
             <div class="empty"><div class="ico">🧩</div>
-              <div class="title">尚未解读</div>
-              <div class="desc">点「重新解读」生成结构化解读（研究问题 / 方法 / 实验 / 结论 / 创新点 / 局限）。</div>
+              <div class="title">${candidateView._candidates?.length ? '正式解读尚未发布' : '尚未解读'}</div>
+              <div class="desc">${candidateView._candidates?.length ? '候选已保留，可在上方直接核对原文并人工审核。未经核实的候选不会显示为正式结论。' : '点「重新解读」生成结构化解读（研究问题 / 方法 / 实验 / 结论 / 创新点 / 局限）。'}</div>
             </div>
           </div></div>`}
       </div>
@@ -993,8 +999,8 @@ async function loadChat() {
                 </label>
                 <label class="composer-check">
                   <input type="checkbox" id="chatWebSearch">
-                  <span>同时搜索网页候选</span>
-                  <span class="composer-note">需人工审核</span>
+                  <span>联网补充</span>
+                  <span class="composer-note">标明来源 · 入库需审核</span>
                 </label>
               </div>
               <button class="composer-send" id="btnSend" title="发送（Ctrl + Enter）"
@@ -1009,6 +1015,7 @@ async function loadChat() {
       </div>`;
 
     LitUI.bind(box);
+    await refreshChatRuns(convId);
     loadModels();
 
     const input = $('#chatInput');
@@ -1029,7 +1036,7 @@ async function loadChat() {
 async function askQuestion() {
   const input = $('#chatInput');
   const q = (input?.value || '').trim();
-  if (!q || !S.activeConv || S.sending) return;
+  if (!q || !S.activeConv || S.sending || S.chatActiveRunning) return;
   S.sending = true;
   const convId = S.activeConv;
   const sendButton = $('#btnSend');
@@ -1053,7 +1060,7 @@ async function askQuestion() {
   stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
 
   try {
-    const r = await runTask('chat', { conv_id: convId, request: { question: q, web_search: !!$('#chatWebSearch')?.checked } });
+    const r = await startDurableChat(convId, { question: q, web_search: !!$('#chatWebSearch')?.checked });
     if (S.activeConv !== convId || S.activeView !== 'chat' || !stream.isConnected) return;
     S.messages.push(r.user, r.assistant);
     S.sources = r.sources || [];
@@ -1077,10 +1084,12 @@ async function askQuestion() {
     stream.insertAdjacentHTML('beforeend', `
       <div class="lui-degraded">${e.cancelled ? '任务已取消' : '回答失败'}：${esc(e.message)}</div>`);
     toast(e.message, !e.cancelled);
+    if (S.activeConv === convId && S.activeView === 'chat') await refreshChatRuns(convId);
   } finally {
     S.sending = false;
     sendButton.disabled = false;
     if ($('#btnSend')) $('#btnSend').disabled = false;
+    if (S.activeConv === convId && S.activeView === 'chat') await refreshChatRuns(convId);
     if (stream.isConnected) $('#chatInput')?.focus();
   }
 }
@@ -1143,19 +1152,27 @@ function renderMessage(m, fresh = false) {
     ? `<div class="lui-degraded" style="margin-top:8px">
          ⚠️ 引用校验未通过${(check.issues || []).length ? '：' + esc(check.issues.join('；')) : ''}
        </div>` : '';
+  const stateLabel = ({refused: '证据不足', invalid_citation: '来源校验未通过', needs_review: '证据归属待核对',
+    human_confirm:'已人工整理为知识', human_reject:'已人工拒绝', human_revoke:'知识入库已撤销',
+    error: '调用失败', budget_exceeded: '请求超出窗口'})[m.status];
 
   return `
-    <div class="chat-turn ${isUser ? 'from-user' : 'from-assistant'}">
+    <div class="chat-turn ${isUser ? 'from-user' : 'from-assistant'}" ${m.ref ? `data-message-ref="${esc(m.ref)}"` : ''}>
       <div class="chat-avatar">${isUser ? '我' : icon('prism')}</div>
       <div class="chat-message">
         ${isCheckpoint ? `<div class="badge accent" style="margin-bottom:6px">压缩检查点</div>` : ''}
+        ${!isUser && stateLabel ? `<p class="source-intro" role="status">${esc(stateLabel)}</p>` : ''}
+        ${!isUser && (m.guard_issues || []).length ? `<p class="source-intro">${m.guard_issues.map(esc).join('；')}</p>` : ''}
+        ${!isUser && (m.audit_warnings || []).length ? '<p class="source-intro">部分辅助对应记录需核对，可在右栏查看；未据此判定正文错误。</p>' : ''}
+        ${!isUser && m.retrieval?.delivered_chunks != null ? `<p class="source-intro">${m.retrieval.mode === 'full_material' && !m.retrieval.window_limited ? '本轮提供指定论文的完整当前材料' : '本轮提供原文片段'} · ${fmtNum(m.retrieval.delivered_chunks)} 块${m.retrieval.window_limited ? ' · 窗口限制，材料未全部送达' : ''}。材料送达不代表内容完整或结论已人工确认。</p>` : ''}
         ${!isUser && m.reasoning ? `<details class="chat-reasoning"><summary>模型思考 · 服务返回内容</summary><p>未经核验，不作为答案或引用依据。</p><pre>${esc(m.reasoning)}</pre></details>` : ''}
         <div class="chat-bubble ${isUser ? 'user' : ''}">${body}</div>
         ${!isUser && m.request_settings?.max_tokens ? `<div class="request-budget">本次${m.request_settings.output_mode === 'automatic' ? '自动分配' : '输出上限'} ${fmtNum(m.request_settings.max_tokens)} token（含推理） · 等待设置 ${esc(String(m.request_settings.timeout))} 秒${m.reasoning ? '' : ' · 服务未返回独立思考内容'}</div>` : ''}
         ${checkWarn}
-        ${!isUser && (m.source_links || []).length ? `<div class="answer-sources" aria-label="回答来源">来源：${m.source_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">[${esc(s.tag || '')}] ${esc(s.title || '原文来源')}${s.page == null ? '' : ' · p.'+esc(s.page)}</a>`).join(' ')}</div>` : ''}
-        ${!isUser && (m.candidate_links || []).length ? `<div class="answer-sources">待人工审核的网页候选（尚未作为事实依据）：${m.candidate_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">${esc(s.title)}</a>`).join(' ')}</div>` : ''}
-        ${!isUser && m.source_warning ? `<p class="lui-degraded">网页候选搜索未完成：${esc(m.source_warning)}</p>` : ''}
+        ${!isUser && m.qa_review_id ? `<p><a href="#chat-review-${esc(m.qa_review_id)}" data-chat-review="${esc(m.qa_review_id)}">${['needs_review', 'invalid_citation'].includes(m.status) ? '核对待审回复与原文' : '核对回复并整理为知识'}</a></p>` : ''}
+        ${!isUser && (m.source_links || []).length ? `<div class="answer-sources" aria-label="回答来源">${m.status === 'invalid_citation' ? '待核对来源' : '来源'}：${m.source_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">[${esc(s.tag || '')}] ${esc(s.title || '原文来源')}${s.page == null ? '' : ' · p.'+esc(s.page)}${s.citable === false ? ' · 依据失效（仅回溯）' : s.session_only ? ' · 搜索摘要（未审核）' : s.trust_level === 'historical' ? ' · 历史依据' : s.kind === 'knowledge' ? ' · 人工知识' : ''}</a>`).join(' ')}</div>` : ''}
+        ${!isUser && (m.candidate_links || []).length ? `<div class="answer-sources">本轮搜索快照（入库需人工审核）：${m.candidate_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">${esc(s.title)}</a>`).join(' ')}</div>` : ''}
+        ${!isUser && m.source_warning ? `<p class="lui-degraded">取证提示：${esc(m.source_warning)}</p>` : ''}
         <div style="margin-top:4px;font-size:10.5px;color:var(--muted);text-align:${isUser ? 'right' : 'left'}">
           ${isUser ? '你' : '文献棱镜'}${m.model ? ' · ' + esc(m.model) : ''}${m.created_at ? ' · ' + esc(m.created_at.slice(0, 16).replace('T', ' ')) : ''}
         </div>

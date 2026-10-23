@@ -96,7 +96,7 @@ def test_chat_scope_and_like_fallback_exclude_other_papers(env):
     _, kb, _, client = env
     a = paper(kb, title='A', text='aaa evidence')
     b = paper(kb, title='B', text='bbb evidence')
-    conv = client.post('/api/conversations', json={'scope': {'paper_ids': [a]}}).json()['id']
+    conv = client.post('/api/conversations', json={'scope': {'paper_ids': [a], 'mode':'strict'}}).json()['id']
     result = client.post('/api/chat/' + conv, json={'question': 'bbb'}).json()
     assert result['insufficient_evidence'] and result['sources'] == []
     hits = kb.search_match('(', paper_ids=[a], fallback_terms=['bbb', 'aaa'])
@@ -273,7 +273,8 @@ def test_context_overflow_retries_only_after_reducing_request(env):
     result = QAAgent(kb, cfg, model).ask('alphatopic', conversation_id=conv)
     qa = [messages for task, messages in model.calls if task == 'qa']
     assert result.citation_check_passed and len(qa) == 2
-    assert len(qa[1]) < len(qa[0])
+    assert sum(len(m['content']) for m in qa[1]) < sum(len(m['content']) for m in qa[0])
+    assert 'Old history' in str(qa[0]) and 'Old history' not in str(qa[1])
 
 
 def test_anthropic_json_contract_and_usage(env, monkeypatch):

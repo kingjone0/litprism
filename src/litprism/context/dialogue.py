@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
 from ..config import Config
 from ..memory.store import MemoryStore
 from ..memory.strategy import LayeredStrategy, MemoryBundle
+from ..textutil import parse_citations
 from .meter import Meter
 
 HISTORY_GUARD = (
@@ -18,19 +20,30 @@ HISTORY_GUARD = (
 )
 
 
+def is_followup(question):
+    return bool(re.search(r'这(?:篇|些|个|种|里)|其中|它(?:们)?|上述|前面|刚才|继续|后者|前者|那(?:篇|些|个|它)|\b(it|they|those|these|above|latter|former)\b', question, re.I))
+
+
 @dataclass
 class DialogueContext:
     history: list[dict] = field(default_factory=list)
     memory: MemoryBundle = field(default_factory=MemoryBundle)
+    referents: list[dict] = field(default_factory=list)
+    evidence_refs: list[dict] = field(default_factory=list)
 
-    def query(self, question: str) -> str:
+    def query(self, question: str, paper_ids=None) -> str:
         """只在明确追问时补上最近的问题，避免将旧话题带入新问题。"""
-        if not re.search(r"这(?:篇|些|个|种)|它(?:们)?|上述|前面|刚才|继续|那(?:篇|些|个)|\b(it|they|those|these|above)\b", question, re.I):
+        if not is_followup(question):
             return question
+        refs = [p['title'] for p in self.referents if paper_ids is None or p['id'] in paper_ids]
+        if self.referents and not refs:
+            return question  # previous sources are outside the current scope
         for msg in reversed(self.history):
             if (msg["role"] == "user" and msg["kind"] != "compact-checkpoint"
-                    and not re.search(r'它|上述|前面|刚才|继续|\b(it|they|those|these|above)\b', msg['content'], re.I)):
-                return f"{msg['content'][:600]}\n{question}"
+                    and not is_followup(msg['content'])):
+                return '\n'.join(refs+[msg['content'][:600], question])
+        if refs:
+            return '\n'.join(refs+[question])
         checkpoints = [m for m in self.history if m['kind'] == 'compact-checkpoint']
         if checkpoints:
             return f"{checkpoints[-1]['content'][:600]}\n{question}"
@@ -66,13 +79,56 @@ def build_dialogue(kb, cfg: Config, conversation_id: str, before_seq: int | None
     if kb.resolve_conversation(conversation_id) is None:
         raise ValueError("会话不存在")
     messages = [m for m in kb.get_messages(conversation_id) if before_seq is None or m["seq"] < before_seq]
+    # A blocked draft (including legacy citation failures) is audit data, not
+    # a previous factual answer for a follow-up or query rewrite.
+    from ..qa_reviews import latest_decision
+    def live_sources(message):
+        from ..evidence import stored_excerpts
+        try:
+            stored_excerpts(kb, json.loads(message.get('citations') or '[]'), allow_session=True)
+            return True
+        except ValueError:
+            return False
+    all_messages = messages
+    messages = [m for m in messages if m['role'] != 'assistant' or (
+        json.loads(m.get('meta') or '{}').get('status', 'answered') == 'answered'
+        and json.loads(m.get('citation_check') or '{}').get('passed') is not False
+        and not json.loads(m.get('meta') or '{}').get('error')
+        and not latest_decision(kb, json.loads(m.get('meta') or '{}').get('qa_review_id'))
+        and live_sources(m))]
+    excluded = {m['ref'] for m in all_messages} - {m['ref'] for m in messages}
     blocks = [dict(row) for row in kb._con.execute(
-        "SELECT id, summary, direct_refs, active FROM compaction_blocks"
+        "SELECT id, summary, direct_refs, effective_refs, active FROM compaction_blocks"
         " WHERE conversation_id = ? AND active = 1 ORDER BY created_at", (conversation_id,),
     )]
+    # A checkpoint that covered a later-corrected/rejected reply cannot preserve it
+    # as a fact. Keep the audit block in storage, omit it only from model context.
+    blocks = [b for b in blocks if not excluded.intersection(
+        json.loads(b['effective_refs'] or b['direct_refs'] or '[]'))]
     active_ids = {b["id"] for b in blocks}
     messages = [m for m in messages if m["kind"] != "compact-checkpoint" or m["block_id"] in active_ids]
     visible = {n.seq for n in Meter(cfg).measure_nodes(messages, blocks).nodes if n.seq >= 0}
     context = DialogueContext(history=[m for m in messages if m["seq"] in visible])
+    for message in reversed(context.history):
+        if message['role'] != 'assistant':
+            continue
+        used = {tag for tag, _ in parse_citations(message['content'])}
+        refs = json.loads(message.get('citations') or '[]')
+        from ..evidence import stored_excerpts
+        for ref in refs:
+            if ref.get('tag') not in used:
+                continue
+            try:
+                source = stored_excerpts(kb, [ref], allow_session=True)[0]
+                paper = kb.get_paper(source.get('paper_id')) or {}
+                if source.get('material_id') == paper.get('current_material_id'):
+                    context.evidence_refs.append(dict(chunk_id=source['id'], paper_id=source['paper_id']))
+            except ValueError:
+                continue
+        ids = {ref.get('paper_id') for ref in refs if ref.get('tag') in used}
+        context.referents = [dict(row) for row in kb._con.execute(
+            "SELECT id,title FROM papers WHERE deleted_at IS NULL AND verify_level IN ('verified','manual_confirmed')")
+            if row['id'] in ids]
+        break
     context.memory = LayeredStrategy(cfg).assemble(MemoryStore(kb, cfg), include_retrieved=False)
     return context

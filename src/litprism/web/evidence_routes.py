@@ -16,9 +16,12 @@ def _evidence_detail(kb, ref):
     chunk = source_chunk(kb, ref)
     source = get_source(kb, chunk['source_id'] if chunk else ref)
     if source:
-        return {**source, 'source_kind': source['kind'], 'trust_level': source['status'],
+        acquired = kb._con.execute('SELECT created_at FROM chat_evidence_grants WHERE source_id=? ORDER BY rowid DESC LIMIT 1',
+                                   (source['id'],)).fetchone()
+        return {**source, 'source_kind': source['kind'], 'trust_level': source['effective_status'],
+                'acquisition': 'search_summary' if acquired else None, 'acquired_at': acquired['created_at'] if acquired else None,
                 'text': chunk['text'] if chunk else source['content'][:5000], 'page': None,
-                'citable': source['status'] == 'manual_confirmed', 'chunk_id': chunk['id'] if chunk else None}
+                'citable': source['citable'], 'chunk_id': chunk['id'] if chunk else None}
     row = kb._con.execute('''SELECT c.*,p.title,p.url,p.doi,p.authors,p.verify_level,p.verify_evidence,
                       p.deleted_at FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE c.id=?''', (ref,)).fetchone()
     if row is None:
@@ -32,7 +35,9 @@ def _evidence_detail(kb, ref):
 def register_evidence(app, kb, cfg, verifier):
     @app.get('/api/evidence')
     def sources():
-        return {'items': [dict(r) for r in kb._con.execute('SELECT id,kind,title,url,status,created_at FROM evidence_sources ORDER BY rowid DESC LIMIT 300')]}
+        return {'items': [{k:s[k] for k in ('id','kind','title','url','status','effective_status','created_at')}
+                          for r in kb._con.execute('SELECT id FROM evidence_sources ORDER BY rowid DESC LIMIT 300')
+                          if (s := get_source(kb, r['id']))]}
 
     @app.post('/api/evidence')
     def create(req: dict):
@@ -165,4 +170,4 @@ def discover_web(kb, cfg, query):
     except Exception:  # noqa: BLE001 - 留档失败不影响已保存的快照
         pool = None
     return {'items': items, 'candidates': pool,
-            'note': '搜索摘要候选，尚未人工审核，不作为知识库事实依据。'}
+            'note': '搜索摘要快照，未人工审核；可在本轮明确授权时作外部证据，进入可信知识库须人工确认。'}

@@ -422,6 +422,56 @@ def pdf_outline(path: str | Path) -> list[tuple[int, str, int]]:
     return out
 
 
+def _is_contents_page(page: Page) -> bool:
+    text = page.reading_text if page.reading_text is not None else page.text
+    lines = text.split('\n')
+    return (any(re.fullmatch(r'\s*(?:contents|table of contents|目录)\s*', ln, re.I) for ln in lines[:8])
+            or sum(bool(re.search(r'\.{4,}', ln)) for ln in lines) >= 3)
+
+
+def _structural_boundaries(sections: list[Section]) -> list[Section]:
+    """Refine reference/appendix boundaries omitted by PDF bookmarks.
+
+    Only explicit structural headings are accepted. Ordinary method headings
+    continue to use the outline; reference entries cannot become headings.
+    """
+    out = []
+    for section in sections:
+        current = Section(name=section.name, role=section.role, level=section.level,
+                          start_page=section.start_page)
+        lines = section.lines or [(section.start_page, section.text)]
+        skip = set()
+        def flush():
+            current.text = clean_text('\n'.join(text for _, text in current.lines))
+            if current.text:
+                out.append(current)
+        for index, (page, text) in enumerate(lines):
+            if index in skip:
+                continue
+            heading, role = text.strip(), _is_heading_line(text)
+            structural = role in ('参考文献', '附录')
+            if not structural and current.role in ('参考文献', '附录'):
+                candidate = heading
+                if re.fullmatch(r'[A-Z](?:\.\d+)*', heading) and index+1 < len(lines):
+                    following = lines[index+1][1].strip()
+                    if 2 <= len(following) <= 100 and not _SENTENCE_END.search(following):
+                        candidate += ' '+following
+                        skip.add(index+1)
+                marker = re.match(r'^([A-Z])(?:\.\d+)*\.?\s+', candidate)
+                allowed_letter = (marker is not None and (
+                    current.role != '参考文献' or marker.group(1) == 'A'))
+                if (allowed_letter and not candidate.endswith(',') and
+                        re.fullmatch(r'[A-Z](?:\.\d+)*\.?\s+[A-Z][^.!?。！？;；]{1,100}', candidate)):
+                    heading, role, structural = candidate, '附录', True
+            if structural:
+                flush()
+                current = Section(name=heading[:120], role=role, start_page=page)
+            else:
+                current.lines.append((page, text))
+        flush()
+    return out
+
+
 def _sections_from_outline(pages: list[Page], outline: list[tuple[int, str, int]],
                            max_level: int = 1) -> list[Section]:
     """按大纲页码把正文切成章节；同页多条只取最浅的一条。"""
@@ -437,7 +487,7 @@ def _sections_from_outline(pages: list[Page], outline: list[tuple[int, str, int]
     last_page = max((p.number for p in pages), default=1)
 
     def lines_between(start: int, end: int) -> list[tuple[int, str]]:
-        return [(p.number, ln) for p in pages if start <= p.number <= end
+        return [(p.number, ln) for p in pages if start <= p.number <= end and not _is_contents_page(p)
                 for ln in (p.reading_text if p.reading_text is not None else p.text).split('\n')]
 
     sections: list[Section] = []
@@ -457,7 +507,7 @@ def _sections_from_outline(pages: list[Page], outline: list[tuple[int, str, int]
         canon = _canonical_section(title) or '正文'
         sections.append(Section(name=title[:120], role=canon, start_page=page, lines=lines,
                                 text=clean_text('\n'.join(t for _, t in lines))))
-    return sections
+    return _structural_boundaries(sections)
 
 
 def detect_sections(pages: list[Page], outline: list[tuple[int, str, int]] | None = None) -> list[Section]:
@@ -484,9 +534,7 @@ def detect_sections(pages: list[Page], outline: list[tuple[int, str, int]] | Non
         text = pg.reading_text if pg.reading_text is not None else pg.text
         lines = text.split('\n')
         # TOC entries are locators, not body sections or scientific evidence.
-        toc = any(re.fullmatch(r'\s*(?:contents|table of contents|目录)\s*', ln, re.I) for ln in lines[:8])
-        toc |= sum(bool(re.search(r'\.{4,}', ln)) for ln in lines) >= 3
-        if toc:
+        if _is_contents_page(pg):
             flush()
             sections.append(Section(name='目录', role='目录', text=text, start_page=pg.number,
                                     lines=[(pg.number, ln) for ln in lines]))
@@ -529,7 +577,7 @@ def detect_sections(pages: list[Page], outline: list[tuple[int, str, int]] | Non
     # 丢掉只是标题/作者/版权块的"正文"段（太短且已有其它章节）
     if len(merged) > 1:
         merged = [s for s in merged if not (s.name == "正文" and len(s.text) < 400)]
-    return merged
+    return _structural_boundaries(merged)
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +593,7 @@ def chunk_document(doc: Document, chunk_size: int = 900, overlap: int = 150) -> 
     overlap = max(0, min(overlap, chunk_size // 2))
 
     for sec in doc.sections:
-        if sec.name in ('参考文献', '目录'):
+        if sec.name in ('参考文献', '目录') or sec.role in ('参考文献', '目录'):
             continue
         src: list[tuple[int | None, str]] = sec.lines or [(sec.start_page, sec.text)]
         substantial = sum(len(t) for _, t in src) >= 60

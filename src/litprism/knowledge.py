@@ -22,11 +22,17 @@ def source_chunk(kb, cid):
     if row is None:
         return None
     result = dict(row)
-    result['citable'] = result['trust_level'] == 'manual_confirmed'
+    from .provenance import availability
+    dep = availability(kb, result['source_id'])
+    result['review_status'] = result['trust_level']
+    result['citable'] = result['trust_level'] == 'manual_confirmed' and dep['citable']
+    result['dependency_status'] = dep
+    if result['trust_level'] == 'manual_confirmed' and dep['state'] != 'current':
+        result['trust_level'] = dep['state']
     return result
 
 
-def create_source(kb, *, kind, title, content, url=''):
+def create_source(kb, *, kind, title, content, url='', dependencies=None, accept_pending=False, search_text=None):
     if kind not in ('web', 'knowledge'):
         raise ValueError('来源类型必须是网页或知识条目。')
     if not isinstance(title, str) or not isinstance(content, str) or (url is not None and not isinstance(url, str)):
@@ -34,6 +40,9 @@ def create_source(kb, *, kind, title, content, url=''):
     title, content, url = title.strip(), content.strip(), (url or '').strip()
     if not title or not content or len(content) > 400000:
         raise ValueError('标题与原文不能为空；单条原文最多 40 万字符。')
+    if search_text is not None and (not isinstance(search_text,str) or not search_text.strip() or len(search_text)>400000):
+        raise ValueError('可检索的人工正文必须为非空文本。')
+    indexed = content if search_text is None else search_text.strip()
     if (url or kind == 'web') and (urlparse(url).scheme not in ('http', 'https') or not urlparse(url).hostname):
         raise ValueError('网页来源必须提供有效的 http/https 地址。')
     sid = 'ev_'+uuid.uuid4().hex[:12]
@@ -41,9 +50,12 @@ def create_source(kb, *, kind, title, content, url=''):
     with kb.tx() as con:
         con.execute('INSERT INTO evidence_sources (id,kind,title,url,content,content_hash,status,created_at) VALUES (?,?,?,?,?,?,?,?)',
                     (sid, kind, title, url, content, digest, 'pending', now()))
-        for ordinal, start in enumerate(range(0, len(content), 1200)):
+        if dependencies is not None:
+            from .provenance import bind
+            bind(kb, sid, dependencies, accept_pending=accept_pending)
+        for ordinal, start in enumerate(range(0, len(indexed), 1200)):
             con.execute('INSERT INTO evidence_chunks (id,source_id,ordinal,text) VALUES (?,?,?,?)',
-                        ('ec_'+uuid.uuid4().hex[:12], sid, ordinal, content[start:start+1200]))
+                        ('ec_'+uuid.uuid4().hex[:12], sid, ordinal, indexed[start:start+1200]))
     return get_source(kb, sid)
 
 
@@ -54,6 +66,11 @@ def get_source(kb, sid):
     result = dict(row)
     result['chunks'] = [dict(r) for r in kb._con.execute('SELECT id,ordinal,text FROM evidence_chunks WHERE source_id=? ORDER BY ordinal', (sid,))]
     result['reviews'] = [dict(r) for r in kb._con.execute('SELECT * FROM evidence_reviews WHERE source_id=? ORDER BY rowid', (sid,))]
+    from .provenance import availability
+    result['dependency_status'] = availability(kb, sid)
+    result['citable'] = result['status'] == 'manual_confirmed' and result['dependency_status']['citable']
+    result['effective_status'] = (result['dependency_status']['state'] if result['status']=='manual_confirmed'
+                                  and result['dependency_status']['state'] != 'current' else result['status'])
     return result
 
 
@@ -64,6 +81,11 @@ def review_source(kb, sid, *, action, note, content_hash):
         row = con.execute('SELECT * FROM evidence_sources WHERE id=?', (sid,)).fetchone()
         if row is None or content_hash != row['content_hash']:
             raise ValueError('来源不存在或内容版本已变化，请重新查看原文后审核。')
+        if action == 'confirm':
+            from .provenance import availability
+            state = availability(kb, sid)
+            if not state['citable']:
+                raise ValueError('依据失效，需依据当前原文修订知识：'+'；'.join(state['issues']))
         status = {'confirm': 'manual_confirmed', 'reject': 'rejected', 'revoke': 'revoked'}[action]
         if row['status'] == status:
             raise ValueError('当前来源已经是该状态，请刷新查看审核记录。')
@@ -89,6 +111,10 @@ def search_knowledge(kb, query, top_k):
     hits = []
     for row in rows:
         hit = dict(row)
+        actual = source_chunk(kb, hit['id'])
+        if not actual['citable']:
+            continue
+        hit.update(dependency_status=actual['dependency_status'], trust_level=actual['trust_level'])
         text = (hit['paper_title']+' '+hit['text']).lower()
         matched = sum(term in text for term in terms)
         if matched:

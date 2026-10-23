@@ -108,11 +108,11 @@ def binding(kb, cfg, client, pid, with_concepts, semantic_review=True):
 
 
 @contextmanager
-def _run_lock(kb, rid):
+def _run_lock(kb, rid, *, prefix='ar_', directory='analysis-run-locks'):
     # rid comes from a DB row, but still validate before forming a filesystem path.
-    if not rid.startswith('ar_') or len(rid) != 35 or any(c not in '0123456789abcdef' for c in rid[3:]):
+    if not rid.startswith(prefix) or len(rid) != 35 or any(c not in '0123456789abcdef' for c in rid[3:]):
         raise RunConflict('无效运行 ID。')
-    folder = kb.db_path.resolve().parent/'analysis-run-locks'
+    folder = kb.db_path.resolve().parent/directory
     folder.mkdir(exist_ok=True)
     handle = (folder/(rid+'.lock')).open('a+b')
     acquired = False
@@ -200,10 +200,14 @@ class AnalysisRuns:
         spent = {k: usage['per_task'].get(k, {}).get('calls', 0) for k in DEFAULT_BUDGETS}
         calls = self.calls(rid)
         latest = {c['step']: c for c in calls}
+        from .candidate_snapshots import by_run
+        candidate = by_run(self.kb, row['paper_id'], rid)
         return {k: row[k] for k in ('id', 'paper_id', 'status', 'stage', 'stop_reason', 'created_at', 'updated_at')} | {
             'model': manifest['model'], 'with_concepts': manifest['with_concepts'],
             'semantic_review': manifest.get('semantic_review', True),
             'capability_missing': manifest.get('capability_missing'),
+            'candidate_snapshot_id': (candidate or {}).get('id'),
+            'candidate_count': len(((candidate or {}).get('payload') or {}).get('_candidates') or []),
             'budgets': limits, 'spent': spent, 'usage': usage,
             'retry_required': any(c['status'] != 'succeeded' for c in latest.values()),
             'steps': [{'step': c['step'], 'attempt': c['attempt'], 'task': c['task'], 'status': c['status'],
@@ -317,6 +321,8 @@ class JournalClient:
             response = self.client.chat_json(messages, task=task)
             serialized = _json(response)
         except Exception as exc:
+            from .llm import safe_failure
+            self.last_failure = safe_failure(exc)
             self.last_usage = getattr(self.client, 'last_usage', None)
             self._finish(attempt, 'failed', None, type(exc).__name__)
             from .llm import OutputLimitError
@@ -347,6 +353,8 @@ class JournalClient:
                                   'model_max_output_tokens', 'attempts') and numeric(v)}
         if settings.get('output_mode') in ('automatic', 'legacy_unknown_capability'):
             safe_settings['output_mode'] = settings['output_mode']
+        if status == 'failed' and getattr(self, 'last_failure', None):
+            safe_settings['failure'] = self.last_failure
         if isinstance(raw, dict):
             usage = {}
             for key, value in raw.items():

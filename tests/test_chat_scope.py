@@ -1,7 +1,7 @@
 """对话文献范围的可见可改（M04 缺口 1）。
 
 三条底线：
-1. 改范围后，同一问题的证据**只来自新范围**；
+1. 严格限定时，改范围后证据只来自新范围；默认重点模式允许补充；
 2. 范围含不存在/已删除文献时明确报错，**不得静默扩为全库**；
 3. ``paper_ids: []`` 表示"一篇都不选"，不是"全部"。
 """
@@ -36,12 +36,12 @@ class TestPatch:
         _, kb, _, client = env
         a = paper(kb, title='A', text='aaa evidence')
         b = paper(kb, title='B', text='bbb evidence')
-        conv = make(kb, client, {'paper_ids': [a]})
+        conv = make(kb, client, {'paper_ids': [a], 'mode':'strict'})
 
         first = client.post(f'/api/chat/{conv}', json={'question': 'bbb'}).json()
         assert first['insufficient_evidence'] and first['sources'] == []
 
-        r = client.patch(f'/api/conversations/{conv}', json={'scope': {'paper_ids': [b]}})
+        r = client.patch(f'/api/conversations/{conv}', json={'scope': {'paper_ids': [b], 'mode':'strict'}})
         assert r.status_code == 200 and r.json()['paper_count'] == 1
 
         second = client.post(f'/api/chat/{conv}', json={'question': 'bbb'}).json()

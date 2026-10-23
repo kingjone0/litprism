@@ -24,7 +24,7 @@ def register_workflows(app, kb, cfg, task_llm, verifier):
 
         ``paper_ids: []`` 表示**一篇都不选**，不是"全部" —— 空范围不得静默扩为全库。
         """
-        from ..scope import paper_scope
+        from ..scope import paper_scope, chat_strict
 
         current = kb.resolve_conversation(cid)
         if current is None:
@@ -39,6 +39,12 @@ def register_workflows(app, kb, cfg, task_llm, verifier):
             if not isinstance(raw, dict):
                 raise HTTPException(400, '范围格式不正确')
             clean = {}
+            if 'mode' in raw:
+                try:
+                    chat_strict(raw, '')
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                clean['mode'] = raw['mode']
             if 'paper_ids' in raw:
                 ids = raw['paper_ids']
                 if not isinstance(ids, list) or any(not isinstance(v, str) for v in ids):

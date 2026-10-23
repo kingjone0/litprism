@@ -28,6 +28,25 @@ from .tasks import TaskCancelled, checkpoint
 from .textutil import truncate
 
 
+def safe_failure(exc):
+    """Structured diagnostics only: never response bodies, URLs or headers."""
+    result = {'type': type(exc).__name__, 'kind': 'service_error'}
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        status = getattr(current, 'http_status', None)
+        if type(status) is int and 100 <= status <= 599:
+            result['http_status'] = status
+        name = type(current).__name__.lower()
+        if 'timeout' in name:
+            kind = 'connect_timeout' if 'connect' in name else 'read_timeout' if 'read' in name else 'timeout'
+            if result['kind'] not in ('connect_timeout', 'read_timeout'):
+                result['kind'] = kind
+        current = current.__cause__ or current.__context__
+    return result
+
+
 class LLMError(RuntimeError):
     def __init__(self, message='', *, http_status=None):
         super().__init__(message)
@@ -635,6 +654,35 @@ def build_llm_for(
     from .context.meter import Meter
     client = AnthropicClient(lc) if (protocol or 'openai').lower() == 'anthropic' else OpenAICompatClient(lc)
     client.meter = Meter(cfg)
+    return client
+
+
+def build_active_llm(kb, cfg: Config, *, allow_mock=False, mock_factory=None):
+    """Shared Web/acceptance runtime; never falls back from a broken selection."""
+    from copy import deepcopy
+    from urllib.parse import urlparse
+
+    from .backup import require_restored_credentials
+    from .providers import ProviderStore, apply_active_window
+
+    store = ProviderStore(kb, cfg.data_path)
+    active, model_id = store.get_active()
+    if active is None:
+        require_restored_credentials(cfg)
+        if allow_mock and (cfg.llm.provider or '').lower() == 'mock':
+            return (mock_factory or build_llm)(cfg)
+        raise ValueError('尚未选择模型：请先在设置里选择提供商与模型，再开始调用。')
+    if not model_id:
+        raise ValueError('当前提供商没有选定模型。')
+    key = store.secrets.get(active.api_key_ref)
+    if not key and urlparse(active.base_url).hostname not in ('localhost', '127.0.0.1', '::1'):
+        raise ValueError('当前提供商的密钥未配置或无法解密，请检查设置。')
+    runtime = deepcopy(cfg)
+    capability = apply_active_window(runtime, kb, require_active=True)
+    client = build_llm_for(runtime, base_url=active.base_url, api_key=key or '', model=model_id,
+                           protocol=active.protocol, max_tokens=runtime.llm.max_tokens)
+    client.runtime_config = runtime
+    client.capability_missing = capability.get('capability_missing')
     return client
 
 

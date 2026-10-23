@@ -11,8 +11,34 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 
-from chat_acceptance import judge, pct, verdict  # noqa: E402
+import pytest
+from chat_acceptance import (  # noqa: E402  # noqa: E402
+    build_llm,
+    check_citations,
+    judge,
+    pct,
+    quality_passed,
+    run_case,
+    verdict,
+)
+from test_workflow_guards import env as workflow_env  # noqa: E402, F401
+from test_workflow_guards import paper
 
+env = workflow_env
+
+
+def test_acceptance_preserves_checked_refusal_sources_like_web(env):
+    import json
+    cfg, kb, model, _ = env
+    pid = paper(kb)
+    def respond(messages, task='', **kwargs):
+        return {'answer': '证据不足，背景 [P1 p.1]', 'insufficient_evidence': True} if task == 'qa' else {}
+    model.chat_json = respond
+    cid = kb.add_conversation('Refused sources', scope={'paper_ids': [pid]})
+    result = run_case({'cfg': cfg, 'llm': model}, kb,
+                      {'id': 'r', 'question': 'alphatopic', 'kind': 'refuse'}, cid, [pid])
+    assert result['refused'] and result['valid_citations'] == 1
+    assert json.loads(kb.get_messages(cid)[-1]['citations'])[0]['paper_id'] == pid
 
 def srow(cid, kind, hits, top_score):
     return {'id': cid, 'kind': kind, 'hits': hits, 'papers': {}, 'top_score': top_score}
@@ -42,6 +68,12 @@ class TestCitationHit:
 
 
 class TestScope:
+    @pytest.mark.parametrize('status', ['answered', 'refused', 'needs_review'])
+    def test_valid_in_scope_sources_are_independent_of_publication_status(self, status):
+        r = row('a', 'answerable', citations=1, valid=1, papers=['p1'], refused=status == 'refused')
+        r['status'] = status
+        assert judge([r], cases(a=('answerable',)))['范围遵守率'] == {'num': 1, 'den': 1, 'ratio': 1.0}
+
     def test_out_of_scope_counts_against(self):
         rows = [row('a', 'answerable', citations=2, valid=2, in_scope=True),
                 row('b', 'answerable', citations=2, valid=2, in_scope=False)]
@@ -136,3 +168,134 @@ class TestSweepVerdict:
                 srow('r', 'refuse', {0.0: 8, 5.0: 0}, 4.0)]
         summary, _ = verdict(rows, [0.0, 5.0])
         assert summary[1]['separable'] is False
+
+
+def test_actual_references_not_retrieval_inventory(env):
+    _, kb, _, _ = env
+    a = paper(kb, title='A')
+    b = paper(kb, title='B')
+    excerpts = [{**kb.get_chunks(pid)[0], 'chunk_id': kb.get_chunks(pid)[0]['id'],
+                 'tag': f'P{i}', 'paper_id': pid} for i, pid in enumerate((a, b), 1)]
+    assert len(check_citations(kb, excerpts, 'Only A [P1 p.1]')) == 1
+    bad = check_citations(kb, excerpts, 'Invented [P99 p.999]')
+    assert len(bad) == 1 and not bad[0]['valid']
+    assert not check_citations(kb, excerpts, 'Wrong page [P1 p.999]')[0]['valid']
+    assert check_citations(kb, excerpts, 'No reference at all') == []
+
+
+def test_followup_really_reads_first_turn_and_counts_only_used_paper(env):
+    cfg, kb, model, _ = env
+    paper(kb, title='A', text='alpha evidence')
+    paper(kb, title='B', text='alpha evidence')
+    cid = kb.add_conversation('Audit')
+    agent = {'cfg': cfg, 'llm': model}
+    first = run_case(agent, kb, {'id': 'a', 'question': 'alpha FIRST_QUESTION'}, cid, None)
+    second = run_case(agent, kb, {'id': 'b', 'kind': 'followup', 'question': '它的 alpha 局限呢？'}, cid, None)
+    prompt = str([m for task, m in model.calls if task == 'qa'][-1])
+    assert 'FIRST_QUESTION' in prompt and len(kb.get_messages(cid)) == 4
+    assert len(second['papers']) == 1 and first['valid_citations'] == 1
+    assert second['usage']['calls'] == 2  # expand + answer, both unreported
+    assert second['usage']['unknown_usage_calls'] == 2
+
+
+def test_blocked_draft_cannot_pass_citation_or_cross_or_followup(env):
+    cfg, kb, model, _ = env
+    a = paper(kb, text='alpha evidence')
+    model.text = 'UNSUPPORTED_DRAFT [P99 p.999]'
+    cid = kb.add_conversation('Blocked')
+    result = run_case({'cfg': cfg, 'llm': model}, kb, {'id': 'f', 'kind': 'followup', 'question': 'alpha'}, cid, [a])
+    assert result['status'] == 'invalid_citation' and not result['refused']
+    assert 'UNSUPPORTED_DRAFT' not in result['answer'] and result['valid_citations'] == 0
+    assert result['citations'] == 1 and result['papers'] == []
+    result['parent_usable'] = True
+    metrics = judge([result], {'f': {'kind': 'followup', '_expect_ids': [a]}})
+    assert metrics['引用命中率']['ratio'] == 0 and metrics['追问可用率']['num'] == 0
+    assert not quality_passed([result], {'f': {'kind': 'followup', '_expect_ids': [a]}})
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_live_builder_uses_selected_runtime_without_network(env, monkeypatch, protocol):
+    from types import SimpleNamespace
+
+    from litprism.providers import ProviderStore
+    cfg, kb, _, _ = env
+    store = ProviderStore(kb)
+    p = store.create(name='local test', base_url='http://localhost/v1', chat_model='deepseek-v4.1-flash', protocol=protocol)
+    store.set_models(p.id, [{'model_id': 'deepseek-v4.1-flash', 'window_tokens': 1000000,
+                             'max_output_tokens': 384000}])
+    store.set_active_model(p.id, 'deepseek-v4.1-flash')
+    calls = []
+    def factory(runtime, **kwargs):
+        calls.append((runtime, kwargs))
+        return SimpleNamespace(name='offline-factory')
+    monkeypatch.setattr('litprism.llm.build_llm_for', factory)
+    client = build_llm('live', cfg, kb)
+    assert client.runtime_config is calls[0][0]
+    assert calls[0][1]['model'] == 'deepseek-v4.1-flash'
+    assert calls[0][1]['protocol'] == protocol
+    assert client.runtime_config.llm.model_window_tokens == 1000000
+    assert client.runtime_config.llm.model_max_output_tokens == 384000
+    assert cfg.llm.base_url != calls[0][1]['base_url']
+
+
+def test_live_builder_does_not_silently_mock(env):
+    cfg, kb, _, _ = env
+    with pytest.raises(ValueError, match='尚未选择模型'):
+        build_llm('live', cfg, kb)
+
+
+def test_error_never_passes_followup_even_with_matching_sources():
+    r = row('f', 'followup', citations=1, valid=1, papers=['p1'], error=True)
+    assert judge([r], cases(f=('followup', ['p1'])))['追问可用率']['num'] == 0
+
+
+def test_cli_stub_persists_chained_turns_and_freezes_inputs(tmp_path, monkeypatch):
+    import json
+
+    import chat_acceptance
+    monkeypatch.setenv('LITPRISM_HOME', str(tmp_path))
+    from litprism.config import Config
+    from litprism.db import KnowledgeBase
+    cfg = Config()
+    cfg.app.data_dir = str(tmp_path / 'data')
+    kb = KnowledgeBase(cfg)
+    pid = paper(kb, title='Frozen Paper', text='alpha method evidence')
+    kb.close()
+    cases_file = tmp_path / 'cases.json'
+    cases_file.write_text(json.dumps({'cases': [
+        {'id': 'a', 'kind': 'answerable', 'question': 'alpha', 'scope_titles': ['Frozen Paper'],
+         'expect_cite_titles': ['Frozen Paper']},
+        {'id': 'b', 'kind': 'followup', 'question': '它的 alpha 方法呢？', 'followup_of': 'a'},
+        {'id': 'c', 'kind': 'followup', 'question': '继续 alpha', 'followup_of': 'b'}]}), encoding='utf-8')
+    out = tmp_path / 'out.json'
+    monkeypatch.setattr(sys, 'argv', ['audit', '--home', str(tmp_path), '--cases', str(cases_file), '--out', str(out)])
+    assert chat_acceptance.main() == 0
+    data = json.loads(out.read_text(encoding='utf-8'))
+    assert data['quality_passed'] is None and data['frozen']['cases_sha256']
+    assert len({r['conversation_id'] for r in data['rows']}) == 1
+    assert all(r['scope'] == [pid] for r in data['rows'])
+    kb = KnowledgeBase(cfg)
+    assert len(kb.get_messages(data['rows'][0]['conversation_id'])) == 6
+    kb.close()
+
+
+def test_live_quality_failure_is_not_success_exit(tmp_path, monkeypatch):
+    import json
+
+    import chat_acceptance
+    monkeypatch.setenv('LITPRISM_HOME', str(tmp_path))
+    from litprism.config import Config
+    from litprism.db import KnowledgeBase
+    cfg = Config()
+    cfg.app.data_dir = str(tmp_path / 'data')
+    kb = KnowledgeBase(cfg)
+    paper(kb, text='alpha evidence')
+    kb.close()
+    spec = tmp_path / 'cases.json'
+    spec.write_text(json.dumps({'cases': [{'id': 'r', 'kind': 'refuse', 'question': 'alpha'}]}), encoding='utf-8')
+    monkeypatch.setattr(chat_acceptance, 'build_llm', lambda *args: chat_acceptance.StubLLM())
+    out = tmp_path / 'fail.json'
+    monkeypatch.setattr(sys, 'argv', ['audit', '--home', str(tmp_path), '--cases', str(spec),
+                                     '--mode', 'live', '--yes', '--out', str(out)])
+    assert chat_acceptance.main() == 1
+    assert json.loads(out.read_text(encoding='utf-8'))['quality_passed'] is False

@@ -68,7 +68,7 @@ def test_api_followup_sends_history_preferences_and_authoritative_sources(env, m
     assert "注意力方法是什么？" in prompt and "该方法只采用注意力机制" in prompt
     assert "回答请使用简短中文" in prompt and "不得作为事实依据" in prompt
     assert prompt.count("【问题】它有哪些局限？") == 1
-    assert "注意力方法是什么？" in queries[-1]
+    assert "Attention Study" in queries[-1]  # source-bound document identity
     assert "历史引用，本轮无效" in prompt
     source = followup.json()["sources"][0]["component"]["items"][0]
     assert source["page"] == 3 and source["text"] == hit["text"]

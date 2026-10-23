@@ -1,6 +1,18 @@
 """显式文献范围：未知、已删除或空范围不得静默扩展为全库。"""
 from __future__ import annotations
 
+import re
+
+
+def chat_strict(scope, question):
+    """Chat selection is a focus; explicit 'only' remains a hard boundary."""
+    if scope.get('mode') not in (None, 'focus', 'strict'):
+        raise ValueError('对话来源策略必须是重点补充或严格限定。')
+    if scope.get('mode') == 'strict':
+        return True
+    text = re.sub(r'(?:不要|不应|不必|无需)(?:仅|只)(?:依据|根据|使用|参考)', '', question)
+    return bool(re.search(r'(?:仅|只)(?:依据|根据|使用|参考|用|看)|\bonly (?:use|based on|using)\b', text, re.I))
+
 
 def collection_ids(kb, cid: str) -> list[str]:
     rows = {r['id']: r['parent_id'] for r in kb._con.execute('SELECT id,parent_id FROM collections WHERE deleted_at IS NULL')}

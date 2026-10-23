@@ -94,6 +94,32 @@ def test_side_by_side_tables_do_not_hide_each_other():
         assert all(t['status'] == 'structured' for t in tables)
 
 
+def test_stacked_table_caption_cannot_leak_from_previous_single_model_table():
+    fitz = pytest.importorskip('pymupdf')
+    with fitz.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        for top, caption, values in [(100, 'Table 4. Single-model validation results.', ['4.49', '5.71']),
+                                     (215, 'Table 5. Ensemble test results.', ['3.57', '4.82', '6.66', '7.32'])]:
+            bottom = top+42+20*len(values)
+            for y in [top, top+22, top+62, bottom]:
+                page.draw_line((60, y), (380, y))
+            page.insert_text((68, top+15), 'Model', fontsize=10)
+            page.insert_text((260, top+15), 'Error', fontsize=10)
+            for i, value in enumerate(values):
+                page.insert_text((68, top+38+20*i), 'Model'+str(i), fontsize=10)
+                page.insert_text((260, top+38+20*i), value, fontsize=10)
+            page.insert_text((60, bottom+15), caption, fontsize=10)
+        text, tables = reading_layout(page)
+        for table in tables:
+            if table['status'] == 'structured':
+                for row in table['rows']:
+                    if '3.57' in row:
+                        assert 'Table 5.' in table['caption'] and 'Ensemble' in table['caption']
+        # Either a fully bound row or an explicit unresolved table is safe;
+        # raw numeric tails must not leak outside the table replacement.
+        assert not any(line.strip() == '3.57' for line in text.splitlines())
+
+
 def test_numeric_data_rows_cannot_be_misread_as_column_headers():
     doc, page = _table_page(numeric_headers=True)
     try:
@@ -185,3 +211,53 @@ def test_outline_defines_real_chapters_and_roles():
     assert [s.name for s in sections] == ['1 Introduction', '2 Retrieval', '3 Conclusion']
     assert [s.role for s in sections] == ['引言', '正文', '结论']
     assert sections[1].start_page == 2
+
+
+def test_outline_does_not_turn_contents_page_into_evidence():
+    from litprism.ingest import Page, detect_sections
+    pages = [Page(1, 'Paper title\nAbstract text'),
+             Page(2, 'Contents\n1 Introduction .... 3\n2 Methods .... 4\n3 Results .... 5'),
+             Page(3, 'Real introduction'), Page(4, 'Real methods'), Page(5, 'Real results')]
+    sections = detect_sections(pages, [(1, 'Introduction', 3), (1, 'Methods', 4), (1, 'Results', 5)])
+    assert not any(page == 2 for section in sections for page, _ in section.lines)
+    assert 'Real methods' in '\n'.join(section.text for section in sections)
+
+
+@pytest.mark.parametrize('use_outline', [False, True])
+def test_references_end_at_explicit_appendix_even_without_appendix_bookmark(use_outline):
+    pages = [Page(1, '1 Introduction\n'+'INTRO '*20),
+             Page(2, '2 Methods\n'+'METHOD '*20),
+             Page(3, '3 Discussion\n'+'DISCUSS '*20+'\nReferences\n'+'CITATION '*20),
+             Page(4, 'A\nAdditional Details for Model\n'+'APPENDIX_TRAINING '*20)]
+    outline = [(1, '1 Introduction', 1), (1, '2 Methods', 2), (1, '3 Discussion', 3)] if use_outline else None
+    sections = detect_sections(pages, outline)
+    chunks = chunk_document(Document(sections=sections))
+    assert any(c['page'] == 4 and c['section_role'] == '附录' and 'APPENDIX_TRAINING' in c['text'] for c in chunks)
+    assert not any('CITATION' in c['text'] for c in chunks)
+    assert not any('APPENDIX_TRAINING' in c['text'] for c in chunks if c['section_role'] == '讨论')
+
+
+def test_author_initial_in_bibliography_is_not_an_appendix_boundary():
+    sections = detect_sections([Page(1, 'References\nN. Cesa-Bianchi,\n'+'CITATION '*20),
+                                Page(2, 'A Implementation Details\n'+'TRAINING '*20)])
+    chunks = chunk_document(Document(sections=sections))
+    assert not any('CITATION' in c['text'] for c in chunks)
+    assert any('TRAINING' in c['text'] for c in chunks)
+
+
+def test_n04_real_pdf_table_and_appendix_regression():
+    root = Path(__file__).resolve().parents[1] / '_selftest.n04-corpus-20261021/data/papers'
+    paths = [root / (name+'.pdf') for name in ('1512.03385v1', '1810.04805v2', '2005.11401v4')]
+    if not all(p.exists() for p in paths):
+        pytest.skip('Fixed N04 PDFs are local audit artifacts; synthetic boundary tests remain offline')
+    resnet, bert, rag = [load_document(p) for p in paths]
+    rows = [t for t in resnet.pages[5].tables if t['status'] == 'structured'
+            and any('3.57' in row for row in t['rows'])]
+    assert len(rows) == 1 and 'Table 5.' in rows[0]['caption'] and 'ensembles' in rows[0]['caption']
+    assert any(c['page'] == 13 and 'TPU' in c['text'] and c['section_role'] != '参考文献'
+               for c in chunk_document(bert))
+    chunks = chunk_document(rag)
+    assert not any(11 <= c['page'] <= 16 for c in chunks)
+    # Page 10 still has real Broader Impact text before References.
+    assert any(c['page'] == 10 and 'Broader Impact' in c['text'] for c in chunks)
+    assert not any('References\n' in c['text'] for c in chunks)

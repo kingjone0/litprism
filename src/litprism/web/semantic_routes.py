@@ -13,6 +13,17 @@ from ..quality import summarize
 from ..semantics import payload_hash
 
 
+def review_report(payload):
+    report = dict(payload.get('_semantic_review') or {})
+    items = {i['id']: i for i in report.get('items') or []}
+    for c in payload.get('_candidates') or []:
+        items.setdefault(c['id'], {**c, 'status': 'candidate', 'reason': '未经机器核查，可直接核对原文并人工审核。',
+                                   'quotes': [], 'facts': []})
+    report['items'] = list(items.values())
+    report['pending'] = sum(i.get('status') != 'machine_supported' for i in items.values())
+    return report
+
+
 def snapshot(kb, pid, run=False, version_id=None):
     if run:
         row = kb._con.execute('SELECT * FROM semantic_runs WHERE id=?', (pid,)).fetchone()
@@ -20,6 +31,8 @@ def snapshot(kb, pid, run=False, version_id=None):
             raise HTTPException(404, '核查记录不存在。')
         paper = {'id': pid, 'title': row['title'], 'url': ''}
         payload = json.loads(row['payload'])
+        if payload.get('_kind') == 'qa_review':
+            raise HTTPException(409, '对话回复须使用专用审核入口，重新核对所选来源。')
     else:
         paper = kb.resolve_paper(pid)
         if not paper or paper.get('deleted_at'):
@@ -27,9 +40,12 @@ def snapshot(kb, pid, run=False, version_id=None):
         analysis = kb.get_analysis(paper['id'], version_id=version_id) or {}
         if version_id and not analysis:
             raise HTTPException(404, '历史分析不存在。')
+        if not version_id:
+            from ..candidate_snapshots import pending
+            analysis = pending(kb, paper['id'], analysis) or analysis
         payload = analysis.get('payload') or {}
     digest = payload_hash(payload)
-    report = payload.get('_semantic_review') or {}
+    report = review_report(payload)
     column = 'run_id' if run else 'paper_id'
     records = [dict(r) for r in kb._con.execute(
         f'SELECT * FROM semantic_reviews WHERE {column}=? AND analysis_hash=? ORDER BY rowid', (paper['id'], digest))]
@@ -52,7 +68,12 @@ def register_semantics(app, kb):
             manual = [] if run else list_claims(kb, paper['id'], digest)
             machine = len(report.get('items') or [])
             analysis = {} if run else (kb.get_analysis(paper['id'], version_id=version_id) or {})
+            if not run and not version_id:
+                from ..candidate_snapshots import pending
+                analysis = pending(kb, paper['id'], analysis) or analysis
             return {'paper_id': paper['id'], 'analysis_hash': digest, 'report': report, 'reviews': records,
+                    'snapshot_id': analysis.get('id') if payload.get('_stage') == 'candidate' else None,
+                    'stage': payload.get('_stage', 'analysis'),
                     'material_id': analysis.get('material_id'), 'material_current': analysis.get('material_current'),
                     'sources': sources, 'candidates': payload.get('_candidates') or [],
                     'manual': manual, 'recall': recall(machine, len(manual))}
@@ -65,7 +86,9 @@ def register_semantics(app, kb):
             paper, payload, digest, report, records = snapshot(kb, pid, run)
             if req.get('analysis_hash') != digest:
                 raise HTTPException(409, '解读版本已变化，请重新读取陈述与原文后审核。')
-            claim = next((c for c in report.get('items', []) if c['id'] == claim_id), None)
+            pool = {c['id']: c for c in payload.get('_candidates') or []}
+            pool.update({c['id']: c for c in report.get('items') or []})
+            claim = pool.get(claim_id)
             if claim is None:
                 raise HTTPException(404, '陈述不存在，不能替换成其他陈述。')
             previous = next((r for r in reversed(records) if r['claim_id'] == claim_id), None)
@@ -73,7 +96,10 @@ def register_semantics(app, kb):
                 raise HTTPException(409, '此项已经是该审核状态。')
             if action != 'revoke':
                 try:
-                    stored_excerpts(kb, payload.get('_citations') or [])
+                    current = kb.get_paper(paper['id']) if not run else None
+                    sources_now = stored_excerpts(kb, payload.get('_citations') or [])
+                    if payload.get('_stage') == 'candidate' and any(e.get('material_id') != (current or {}).get('current_material_id') for e in sources_now):
+                        raise ValueError('审核对象不是当前原文材料。')
                 except ValueError as exc:
                     raise HTTPException(409, '来源状态已变化，请重新核对。') from exc
             source_id = None
@@ -87,7 +113,9 @@ def register_semantics(app, kb):
                 for difference in report.get('differences', []):
                     if claim_id in difference['claim_ids']:
                         related_ids.update(difference['claim_ids'])
-                tags = {tag for item in report['items'] if item['id'] in related_ids for tag in item['candidate_tags']}
+                tags = {tag for item in pool.values() if item['id'] in related_ids for tag in item.get('candidate_tags') or []}
+                if not tags or not tags <= sources.keys():
+                    raise HTTPException(409, '陈述缺少可回溯的原文依据，不能确认入库。')
                 for tag in sorted(tags):
                     e = sources.get(tag)
                     if e:
@@ -96,7 +124,7 @@ def register_semantics(app, kb):
                         +'\n\n原始来源（非本条陈述的自动证明）：\n'+'\n\n'.join(provenance)
                         +'\n\n解读版本：'+digest+'\n陈述 ID：'+claim_id)
                 source = create_source(kb, kind='knowledge', title='人工核对 · '+paper['title'], content=text,
-                                       url='')
+                                        url='', dependencies=[sources[tag] for tag in sorted(tags)], search_text=reviewed_text.strip())
                 review_source(kb, source['id'], action='confirm', note=note, content_hash=source['content_hash'])
                 source_id = source['id']
             if previous and previous.get('knowledge_id') and action in ('reject', 'revoke'):

@@ -77,6 +77,59 @@ def _numeric_records(page, box, divider):
     return names, body
 
 
+def _caption_regions(page, regions, captions):
+    """Bind a caption to its own ruled frame, never the next table's header.
+
+    Captions are often below tables. A previous caption can be nearer to the
+    next header than that table's own caption. Match from caption to frame
+    first, then expand through interior rules up to the caption boundary.
+    """
+    def same_column(a, b):
+        return a[0]-12 <= b[0] <= a[2] and min(a[2], b[2])-max(a[0], b[0]) > 20
+    def gap(a, b):
+        return min(abs(b[1]-a[3]), abs(b[3]-a[1]))
+    owners = {}
+    for ci, (caption_box, _) in enumerate(captions):
+        near = sorted((gap(box, caption_box), ri) for ri, (box, _) in enumerate(regions)
+                      if same_column(box, caption_box))
+        if near and near[0][0] < 120 and (len(near) == 1 or near[1][0]-near[0][0] > 3):
+            owners[ci] = near[0][1]
+    rules = [tuple(d['rect']) for d in page.get_drawings()
+             if d['rect'].width >= 100 and d['rect'].height <= 1]
+    bound, unresolved = [], []
+    for ri, (box, divider) in enumerate(regions):
+        assigned = [ci for ci, owner in owners.items() if owner == ri]
+        if len(assigned) != 1:
+            nearby = any(same_column(box, cb) and gap(box, cb) < 120 for cb, _ in captions)
+            unresolved.append((box, divider, '', 'ambiguous' if nearby else 'missing'))
+            continue
+        ci = assigned[0]
+        cb, caption = captions[ci]
+        peers = [b for j, (b, _) in enumerate(captions) if j != ci and same_column(box, b)]
+        if cb[1] >= box[3]:
+            low = max((b[3] for b in peers if b[3] < box[1]), default=0)
+            high = cb[1]
+        elif cb[3] <= box[1]:
+            low = cb[3]
+            high = min((b[1] for b in peers if b[1] > box[3]), default=page.rect.height)
+        else:
+            unresolved.append((box, divider, '', 'ambiguous'))
+            continue
+        lines = sorted({r[1] for r in rules if abs(r[0]-box[0]) < 4 and abs(r[2]-box[2]) < 4
+                        and low < r[1] < high})
+        if len(lines) >= 3 and 5 < lines[1]-lines[0] < 60 and lines[-1]-lines[0] < 700:
+            box, divider = (box[0], lines[0], box[2], lines[-1]), lines[1]
+        bound.append((box, divider, caption, 'bound'))
+    # An interior separator may have produced a second partial region; the
+    # full frame already owns it and must replace all its numeric raw text.
+    for region in unresolved:
+        box = region[0]
+        if not any(b[0] <= box[0]+1 and b[1] <= box[1]+1 and b[2] >= box[2]-1 and b[3] >= box[3]-1
+                   for b, *_ in bound):
+            bound.append(region)
+    return sorted(bound, key=lambda r: (r[0][1], r[0][0]))
+
+
 def reading_layout(page):
     """Return (reading text, table regions). Does not modify page/PDF bytes."""
     regions = _regions(page)
@@ -87,18 +140,18 @@ def reading_layout(page):
         for line in block.get('lines', []):
             lines.append((line['bbox'], ''.join(s['text'] for s in line['spans'])))
     captions = [(box, text) for box, text in lines if _CAPTION.match(text.strip())]
+    regions = _caption_regions(page, regions, captions)
     records, replacements = [], []
-    for index, (box, divider) in enumerate(regions, 1):
-        near = sorted(captions, key=lambda c: min(abs(c[0][1]-box[3]), abs(c[0][3]-box[1])))
-        caption = near[0][1] if near and min(abs(near[0][0][1]-box[3]), abs(near[0][0][3]-box[1])) < 120 else ''
+    for index, (box, divider, caption, caption_status) in enumerate(regions, 1):
         locator = f'p.{page.number+1} 表格区域{index}'
         if caption:
-            locator += ' 邻近表题：'+caption
+            locator += ' 已绑定表题：'+caption
         try:
-            result = _numeric_records(page, box, divider)
+            result = _numeric_records(page, box, divider) if caption_status != 'ambiguous' else None
         except Exception:
             result = None
-        record = {'bbox': list(box), 'locator': locator, 'status': 'structured' if result else 'needs_review'}
+        record = {'bbox': list(box), 'locator': locator, 'caption': caption, 'caption_status': caption_status,
+                  'status': 'structured' if result else 'needs_review'}
         if result:
             names, rows = result
             record.update(headers=names, rows=rows)

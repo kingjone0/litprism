@@ -98,11 +98,39 @@ const path = require('node:path');
     await page.locator('[data-ptab=concepts]').click();
     await expect(page.locator('[data-ppane=concepts]')).toContainText('alphatopic');
 
+    // Skip machine review: persisted candidates can still be reviewed and revoked.
+    await page.locator('#btnBudgetAnalyze').click();
+    await page.locator('#researchTask [name=semantic_review]').uncheck();
+    await page.locator('#researchTask [name=with_concepts]').uncheck();
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
+    await expect(page.locator('#paperDetail')).toContainText('候选');
+    await page.locator('[data-semantic-claim]').first().click();
+    await expect(page.locator('#inspSources')).toContainText('未经机器核查');
+    await page.locator('#semanticReview [name=reviewed_text]').fill('candidatehumanmarker 人工核对后的知识。');
+    await page.locator('#semanticReview [name=note]').fill('离线验收：直接人工查对候选原文。');
+    await page.locator('#semanticReview [value=confirm]').click();
+    await expect(page.locator('#semanticReview [value=confirm]')).toHaveText('已人工确认入库');
+    await page.locator('#semanticReview [name=note]').fill('候选入库后撤销验收');
+    await page.locator('#semanticReview [value=revoke]').click();
+    await expect(page.locator('#semanticReview [value=confirm]')).toBeEnabled();
+    await page.keyboard.press('Escape');
+
     // 新建会话范围、问答、原文证据与每轮请求快照。
     await page.locator('#btnNewConv').click();
     await page.locator('#researchTask [name=scope]').selectOption('p:' + process.env.LITPRISM_ACCEPTANCE_SEED);
     await page.locator('#researchTask [type=submit]').click();
     await expect(page.locator('#chatInput')).toBeVisible();
+    await expect(page.locator('#scopeChip')).toContainText('重点：');
+    await page.locator('#scopeChip').click();
+    await page.locator('#researchTask [name=mode]').selectOption('strict');
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#scopeChip')).toContainText('仅限：');
+    await page.locator('#scopeChip').click();
+    await expect(page.locator('#researchTask [name=mode]')).toHaveValue('strict');
+    await page.locator('#researchTask [name=mode]').selectOption('focus');
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#scopeChip')).toContainText('重点：');
     await page.locator('#chatInput').fill('alphatopic');
     await page.locator('#btnSend').click();
     await expect(page.locator('.from-assistant')).toHaveCount(1);
@@ -127,7 +155,185 @@ const path = require('node:path');
     await page.keyboard.press('Escape');
 
     // 知识快照：保存候选，在右侧核对并人工确认，再通过回复链接回看。
+    const auditConv = await page.evaluate(() => S.activeConv);
+    await page.locator('#chatInput').fill('alphatopic refusalcitationmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(2);
+    await expect(page.locator('.from-assistant').last()).toContainText('证据不足');
+    await page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]').first().click();
+    await expect(page.locator('#inspSources')).toContainText('论文原文');
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await expect(page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]')).toHaveCount(1);
+    await page.locator('#chatInput').fill('alphatopic invalidcitationmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(3);
+    await expect(page.locator('.from-assistant').last()).toContainText('已阻止展示结论');
+    await expect(page.locator('.chat-bubble').last()).not.toContainText('BLOCKED_UI_DRAFT');
+    await expect(page.locator('.from-assistant').last().locator('.answer-sources')).toHaveCount(0);
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await expect(page.locator('.from-assistant').last()).toContainText('已阻止展示结论');
+    // A blocked draft is available only in the audit sidebar; corrected text has to bind real sources.
+    await page.locator('.from-assistant').last().locator('[data-chat-review]').click();
+    await expect(page.locator('#inspSources')).toContainText('BLOCKED_UI_DRAFT');
+    await expect(page.locator('.chat-bubble').last()).not.toContainText('BLOCKED_UI_DRAFT');
+    await page.locator('#chatReviewForm [name=note]').fill('已核对实际原文，修正虚构编号。');
+    // P99 is unknown, so the actual delivered source is under the other-source disclosure.
+    await page.locator('#chatReviewForm summary').filter({hasText:'本轮其他原文'}).click();
+    await page.locator('#chatReviewForm .ev-source summary').first().click();
+    await page.locator('#chatReviewForm [name=source_tags]').first().check();
+    await page.locator('#chatReviewForm [value=confirm]').click();
+    await expect(page.locator('#chatReviewForm [role=alert]')).toContainText('引用仍有问题');
+    await expect(page.locator('#chatReviewForm [name=note]')).toHaveValue('已核对实际原文，修正虚构编号。');
+    await page.locator('#chatReviewForm [name=reviewed_text]').fill('经人工核对的原文说明。[P1]');
+    if (process.env.LITPRISM_UI_OUTPUT) {
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-review-light.png')});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.setViewportSize({width:850,height:880});
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-review-dark-narrow.png')});
+      await page.setViewportSize({width:1360,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+    }
+    await page.locator('#chatReviewForm [value=confirm]').click();
+    await expect(page.locator('#chatReviewForm [value=confirm]')).toHaveText('已确认入库');
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await page.locator('.from-assistant').last().locator('[data-chat-review]').click();
+    await expect(page.locator('#chatReviewForm [name=reviewed_text]')).toHaveValue('经人工核对的原文说明。[P1]');
+    await page.locator('#chatReviewForm [name=note]').fill('撤销本次离线验收知识。');
+    await page.locator('#chatReviewForm [value=revoke]').click();
+    await expect(page.locator('#inspSources')).toContainText('已撤销');
+    await page.locator('#btnChatReviewBack').click();
+    await page.locator('#chatInput').fill('alphatopic attributionmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(4);
+    await expect(page.locator('.from-assistant').last()).toContainText('待核对');
+    await expect(page.locator('.chat-bubble').last()).not.toContainText('使用 TriviaQA 训练');
+    await page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]').click();
+    await expect(page.locator('#inspSources')).toContainText('did not use TriviaQA');
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await expect(page.locator('.from-assistant').last()).toContainText('待核对');
+    await expect(page.locator('.chat-bubble').last()).not.toContainText('使用 TriviaQA 训练');
+    await expect(page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]')).toHaveCount(1);
+    if (process.env.LITPRISM_UI_OUTPUT) {
+      await page.locator('.from-assistant').last().scrollIntoViewIfNeeded();
+      await page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]').click();
+      await expect(page.locator('#inspSources')).toContainText('did not use TriviaQA');
+      await expect(page.locator('#toasts .toast')).toHaveCount(0);
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-guard-light.png')});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.setViewportSize({width:850,height:880});
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-guard-dark-narrow.png')});
+      await page.setViewportSize({width:1360,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+    }
+    // Numeric/condition mismatch uses the same held draft and stable sources.
+    await page.keyboard.press('Escape');
+    await page.locator('#chatInput').fill('alphatopic conditionalmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(5);
+    await expect(page.locator('.from-assistant').last()).toContainText('年份未对应');
+    await expect(page.locator('.chat-bubble').last()).not.toContainText('2020年领导人得67%');
+    await page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]').click();
+    await expect(page.locator('#inspSources')).toContainText('2024 leaders');
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await expect(page.locator('.from-assistant').last()).toContainText('年份未对应');
+    await expect(page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]')).toHaveCount(1);
+    await page.locator('#chatInput').fill('alphatopic tagcitationmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(6);
+    await expect(page.locator('.from-assistant').last().locator('.answer-sources')).toContainText('p.1');
+    await page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]').click();
+    await expect(page.locator('#inspSources')).toContainText('第 1 页');
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await expect(page.locator('.from-assistant').last()).toContainText('稳定片段编号');
+    await expect(page.locator('.from-assistant').last().locator('.answer-sources')).toContainText('p.1');
+    // Claim/quote inspection is not a semantic approval and must preserve form edits.
+    await page.locator('#chatInput').fill('alphatopic claimmappingmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(7);
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await page.locator('.from-assistant').last().locator('[data-chat-review]').click();
+    await page.locator('.qa-claim-map > summary').click();
+    await expect(page.locator('.qa-claim-map')).toContainText('claim_subject_marker');
+    await expect(page.locator('.qa-claim-map script')).toHaveCount(0);
+    await expect(page.locator('.qa-claim-map blockquote')).toHaveText('We did not use TriviaQA data for this model.');
+    await expect(page.locator('.qa-claim-map')).toContainText('原句可定位不等于支持结论');
+    await page.locator('#chatReviewForm [name=note]').fill('source navigation preserves this note');
+    await page.locator('[data-qa-map-source]').first().click();
+    await expect(page.locator('#chatReviewForm .ev-source summary').first()).toBeFocused();
+    await expect(page.locator('#chatReviewForm [name=note]')).toHaveValue('source navigation preserves this note');
+    await expect(page.locator('#chatReviewForm [name=source_tags]:checked')).toHaveCount(0);
+    if (process.env.LITPRISM_UI_OUTPUT) {
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'claim-map-light.png')});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.setViewportSize({width:850,height:880});
+      // Theme switches animate for 120ms; inspect the settled colors, not the transient frame.
+      await expect.poll(() => page.locator('.qa-claim-map .btn').first().evaluate(el => {
+        const style = getComputedStyle(el);
+        const light = c => {
+          const channels = c.match(/[\d.]+/g).slice(0,3).map(Number).map(x => x/255);
+          return channels.map(x => x <= .04045 ? x/12.92 : ((x+.055)/1.055)**2.4)
+            .reduce((sum,x,i) => sum+x*[.2126,.7152,.0722][i],0);
+        };
+        const a = light(style.color), b = light(style.backgroundColor);
+        return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+      })).toBeGreaterThanOrEqual(4.5);
+      assert.equal(await page.locator('.qa-claim-map').evaluate(el => el.scrollWidth > el.clientWidth), false);
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'claim-map-dark-narrow.png'), animations:'disabled'});
+      await page.setViewportSize({width:1360,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+    }
+    // 本轮外部证据可引用；确认后在同一重点会话重新检索，撤销上游则失效。
+    await page.locator('#chatWebSearch').check();
+    await page.locator('#chatInput').fill('alphatopic mixedwebmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(8);
+    const webAnswer = page.locator('.from-assistant').last();
+    await expect(webAnswer.locator('.chat-bubble')).toContainText('本轮搜索摘要');
+    await expect(webAnswer.locator('.answer-sources').first()).toContainText('搜索摘要（未审核）');
+    const webTag = (await webAnswer.locator('.answer-sources a').first().innerText()).match(/\[(P\d+)\]/)[1];
+    await webAnswer.locator('[data-chat-review]').click();
+    await page.locator(`#chatReviewForm input[value="${webTag}"]`).check();
+    await page.locator('#chatReviewForm [name=reviewed_text]').fill(`alphatopic mixedcorrectedmarker 已核对的修订知识。[${webTag}]`);
+    await page.locator('#chatReviewForm [name=note]').fill('仅确认当前知识所需的摘要依据，保留网页未审核状态。');
+    await page.locator('#chatReviewForm [value=confirm]').click();
+    await expect(page.locator('#chatReviewForm [value=confirm]')).toHaveText('已确认入库');
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await page.locator('#chatInput').fill('alphatopic mixedcorrectedmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(9);
+    await expect(page.locator('.from-assistant').last().locator('.chat-bubble')).toContainText('新确认的知识');
+    await expect(page.locator('.from-assistant').last().locator('.answer-sources').first()).toContainText('人工知识');
+    await page.locator('.from-assistant').last().locator('.answer-sources a').first().click();
+    await expect(page.locator('#inspSources')).toContainText('知识依据与当前状态');
+    await page.locator('#inspSources details a[data-evidence-ref]').filter({hasText:'混合取证外部快照'}).click();
+    await expect(page.locator('#inspSources')).toContainText('待人工审核');
+    if (process.env.LITPRISM_UI_OUTPUT) {
+      await expect(page.locator('#inspSources')).toContainText('尚未加入可信知识库');
+      await expect(page.locator('#inspSources')).toContainText('搜索摘要获取时间');
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT,'mixed-evidence-light.png')});
+      await page.evaluate(() => document.documentElement.dataset.theme='dark');
+      await page.setViewportSize({width:850,height:880});
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT,'mixed-evidence-dark-narrow.png'),animations:'disabled'});
+      await page.setViewportSize({width:1360,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme='light');
+    }
+    await page.locator('#evidenceReview [name=note]').fill('撤回上游依据，检验派生知识停止引用。');
+    await page.locator('#evidenceReview [value=reject]').click();
+    await expect(page.locator('#inspSources')).toContainText('已拒绝');
+    await page.reload();
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await expect(page.locator('.from-assistant').last()).toContainText('来源校验未通过');
+    await expect(page.locator('.from-assistant').last().locator('.answer-sources')).toContainText('依据失效（仅回溯）');
     await page.locator('[data-view=knowledge]').first().click();
+    await expect(page.locator('#knowledgeList')).toContainText('依据失效');
     await page.locator('#btnAddKnowledge').click();
     await page.locator('#researchTask [name=title]').fill('reviewmarker 审核来源');
     await page.locator('#researchTask [name=content]').fill('reviewmarker 知识快照的测试内容。');
@@ -399,6 +605,47 @@ const path = require('node:path');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     // N08: download, inspect, recover to a new isolated directory, switch/cancel.
     await page.setViewportSize({width:1360,height:880});
+    // Durable QA: reload while waiting, recover one receipt, explicitly retry one failure.
+    const beforeDurableConv = await page.evaluate(() => S.activeConv);
+    await page.locator('#btnNewConv').click();
+    await page.locator('#researchTask [name=title]').fill('持久对话验收');
+    await page.locator('#researchTask [name=scope]').selectOption('p:' + process.env.LITPRISM_ACCEPTANCE_SEED);
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => S.activeConv)).not.toBe(beforeDurableConv);
+    await expect(page.locator('.chat-welcome')).toBeVisible();
+    const durableConv = await page.evaluate(() => S.activeConv);
+    await page.locator('#chatInput').fill('alphatopic durablereloadmarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('.task-progress')).toHaveCount(1);
+    await page.reload();
+    await page.locator(`[data-conv="${durableConv}"]`).click();
+    await expect(page.locator('#chatRunPanel')).toContainText('durablereloadmarker');
+    await expect.poll(async () => page.evaluate(async cid => (await api('/api/conversations/'+cid+'/chat-runs')).items[0].status, durableConv)).toBe('completed');
+    if (!await page.locator('#chatRunPanel').evaluate(el => el.open)) await page.locator('#chatRunPanel > summary').click();
+    await page.locator('[data-chat-result]').first().click();
+    await expect(page.locator('.from-assistant')).toHaveCount(1);
+    assert.equal(await page.evaluate(async cid => (await api('/api/conversations/'+cid+'/chat-runs')).items.length, durableConv), 1);
+    await page.locator('#chatInput').fill('alphatopic durableretrymarker');
+    await page.locator('#btnSend').click();
+    await expect(page.locator('[data-chat-resume][data-retry=true]')).toHaveText('重新请求（可能再次计费）');
+    await page.reload();
+    await page.locator(`[data-conv="${durableConv}"]`).click();
+    await expect(page.locator('#chatRunPanel')).toContainText('用量未知');
+    if (process.env.LITPRISM_UI_OUTPUT) {
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-runs-light.png')});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.setViewportSize({width:850,height:880});
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-runs-dark-narrow.png')});
+      await page.setViewportSize({width:1360,height:880});
+      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+    }
+    await page.locator('[data-chat-resume][data-retry=true]').click();
+    await expect(page.locator('.from-assistant')).toHaveCount(2);
+    const retried = await page.evaluate(async cid => (await api('/api/conversations/'+cid+'/chat-runs')).items[0], durableConv);
+    assert.equal(retried.status, 'completed');
+    assert.deepEqual(retried.calls.filter(c => c.task === 'qa').map(c => c.status), ['failed','succeeded']);
+    assert.equal(await page.locator('.from-user').count(), 2);
     await page.locator('[data-view=settings]').first().click();
     await page.locator('#settingsNav [data-set=backup]').click();
     await expect(page.locator('.backup-settings')).toContainText('密钥不随备份迁移');

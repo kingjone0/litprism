@@ -74,36 +74,11 @@ def create_app(cfg: Config) -> FastAPI:
     verifier = PaperVerifier(cfg, Whitelist(kb))
 
     def task_llm():
-        from copy import deepcopy
-        from urllib.parse import urlparse
-
-        from ..llm import build_llm_for
-        from ..providers import ProviderStore, apply_active_window
-
-        store = ProviderStore(kb, cfg.data_path)
-        active, model_id = store.get_active()
-        if active is None:
-            from ..backup import BackupError, require_restored_credentials
-            try:
-                require_restored_credentials(cfg)
-            except BackupError as exc:
-                raise HTTPException(400, str(exc)) from exc
-            # 真实调用必须显式选模；只有 mock（离线/测试）才允许无提供商运行。
-            if (cfg.llm.provider or '').lower() == 'mock':
-                return build_llm(cfg)
-            raise HTTPException(400, '尚未选择模型：请先在设置里选择提供商与模型，再开始调用。')
-        key = store.secrets.get(active.api_key_ref)
-        if not model_id:
-            raise HTTPException(400, "当前提供商没有选定模型。")
-        if not key and urlparse(active.base_url).hostname not in ('localhost', '127.0.0.1', '::1'):
-            raise HTTPException(400, "当前提供商的密钥未配置或无法解密，请检查设置。")
-        runtime = deepcopy(cfg)
-        capability = apply_active_window(runtime, kb, require_active=True)
-        client = build_llm_for(runtime, base_url=active.base_url, api_key=key or '', model=model_id, protocol=active.protocol,
-                               max_tokens=runtime.llm.max_tokens)
-        client.runtime_config = runtime
-        client.capability_missing = capability.get('capability_missing')
-        return client
+        from ..llm import build_active_llm
+        try:
+            return build_active_llm(kb, cfg, allow_mock=True, mock_factory=build_llm)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     # 静态资源（app.css / app.js）
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -229,7 +204,7 @@ def create_app(cfg: Config) -> FastAPI:
                 raise HTTPException(404, '未找到论文')
             return {'items': kb.list_materials(p['id']), 'current_material_id': p.get('current_material_id'),
                     'analyses': [dict(r) for r in kb._con.execute(
-                        'SELECT id,material_id,model,created_at FROM analysis_versions WHERE paper_id=? ORDER BY rowid DESC', (p['id'],))]}
+                        "SELECT id,material_id,model,created_at FROM analysis_versions WHERE paper_id=? AND id NOT LIKE 'ac_%' ORDER BY rowid DESC", (p['id'],))]}
 
     @app.get("/api/paper/{paper_id}")
     def paper(paper_id: str, version_id: str | None = None):
@@ -243,9 +218,12 @@ def create_app(cfg: Config) -> FastAPI:
             payload = dict((analysis or {}).get("payload") or {})
             payload.setdefault('concepts', kb.list_concepts(p['id']) if not version_id else [])
             p.pop("full_text", None)
+            from ..candidate_snapshots import pending
+            candidate = pending(kb, p['id'], analysis) if not version_id else None
             return {
                 "paper": p,
                 "analysis": payload,
+                'candidate_analysis': (candidate or {}).get('payload'),
                 "markdown": format_analysis(p, payload) if payload else "",
                 "chunks": len(kb.get_chunks(p["id"])),
                 'analysis_material': {'id': (analysis or {}).get('material_id'),
@@ -253,7 +231,7 @@ def create_app(cfg: Config) -> FastAPI:
                 'materials': kb.list_materials(p['id']),
                 'analysis_version_id': version_id,
                 'analysis_history': [dict(r) for r in kb._con.execute(
-                    'SELECT id,material_id,model,created_at FROM analysis_versions WHERE paper_id=? ORDER BY rowid DESC', (p['id'],))],
+                    "SELECT id,material_id,model,created_at FROM analysis_versions WHERE paper_id=? AND id NOT LIKE 'ac_%' ORDER BY rowid DESC", (p['id'],))],
             }
 
     @app.post("/api/analyze/{paper_id}")
@@ -444,6 +422,16 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.post("/api/conversations")
     def create_conversation(req: dict):
+        from ..scope import paper_scope, chat_strict
+        scope = req.get('scope')
+        if scope is not None:
+            if not isinstance(scope, dict):
+                raise HTTPException(400, '范围格式不正确。')
+            try:
+                paper_scope(kb, scope)
+                chat_strict(scope, '')
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
         cid = kb.add_conversation(req.get("title") or "新会话", scope=req.get("scope"))
         return {"id": cid}
 
@@ -479,7 +467,7 @@ def create_app(cfg: Config) -> FastAPI:
             try:
                 source = evidence_detail(kb, cite['chunk_id'])
                 links.append({'ref': cite['chunk_id'], 'tag': cite.get('tag'), 'title': source.get('title') or source.get('paper_title'),
-                              'kind': source['source_kind'], 'page': source.get('page'), 'trust_level': source['trust_level']})
+                              'kind': source['source_kind'], 'page': source.get('page'), 'trust_level': source['trust_level'], 'session_only': bool(cite.get('web_grant_id') and source['trust_level'] == 'pending'), 'citable': bool(source['citable'] or cite.get('web_grant_id') and source['trust_level']=='pending')})
             except HTTPException:
                 links.append({'ref': cite['chunk_id'], 'title': '来源已失效', 'tag': cite.get('tag')})
         return links
@@ -494,19 +482,49 @@ def create_app(cfg: Config) -> FastAPI:
         items = kb.get_messages(conv["id"])
         # 每条消息附带 segments（组件已由框架注入核验状态与页码）
         for m in items:
-            m["segments"] = genui_process(m.get("content") or "", kb).segments
             meta = json.loads(m.get('meta') or '{}')
+            check = json.loads(m.get('citation_check') or '{}')
+            saved_cites = json.loads(m.get('citations') or '[]')
+            if m['role'] == 'assistant' and saved_cites:
+                from ..evidence import citation_issues, stored_excerpts
+                try:
+                    issues = citation_issues(m['content'], stored_excerpts(kb, saved_cites, allow_session=True))
+                except ValueError as exc:
+                    issues = [str(exc)]
+                if issues:
+                    check = {'passed': False, 'issues': issues}
+            m['citation_check'] = check
             m['model'] = meta.get('model')
             m['candidate_links'] = meta.get('candidate_links') or []
             m['source_warning'] = meta.get('source_warning') or ''
             m['reasoning'] = meta.get('reasoning') or ''
             m['request_settings'] = meta.get('request_settings') or {}
-            m['source_links'] = evidence_links(m.get('citations'), m.get('content') or '')
+            m['status'] = ('invalid_citation' if check.get('passed') is False else meta.get('status') or 'answered')
+            m['usage'] = meta.get('usage') or {}
+            m['retrieval'] = meta.get('retrieval') or {}
+            m['guard_issues'] = meta.get('guard_issues') or []
+            m['audit_warnings'] = meta.get('audit_warnings') or []
+            m['scope_snapshot'] = meta.get('scope_snapshot')
+            m['qa_review_id'] = meta.get('qa_review_id')
+            from ..qa_reviews import latest_decision
+            m['human_review'] = latest_decision(kb, m['qa_review_id'])
+            if m['role'] == 'assistant' and m['human_review'] and m['status'] == 'answered':
+                m['status'] = 'human_'+m['human_review']['action']
+                m['content'] = '此回复已完成人工裁决，原始草稿留在审核记录中。请查看修订正文与知识快照。'
+            audit_links = evidence_links(saved_cites, m.get('content') or '')
+            if m['role'] == 'assistant' and m['status'] == 'invalid_citation':
+                m['content'] = '回答的来源校验未通过，已阻止展示结论。请核对原文后重新提问。'
+                m['citations'] = []
+            m['segments'] = genui_process(m.get('content') or '', kb).segments
+            m['source_links'] = audit_links
         latest = next((m for m in reversed(items) if m["role"] == "assistant"), {})
         return {"conversation": conv, "items": items, "sources": citation_sources(latest.get("citations"))}
 
     @app.post("/api/chat/{conv_id}")
     def chat(conv_id: str, req: dict):
+        return chat_body(conv_id, req)
+
+    def chat_body(conv_id: str, req: dict, *, execution=None):
         """问答：写入用户消息 → 调模型 → 写入回答（含引用校验）→ 返回 segments。
 
         若模型的回答里没有 ``lit-ui`` 围栏，**框架会自动附加一个 citation-list** ——
@@ -529,38 +547,49 @@ def create_app(cfg: Config) -> FastAPI:
         except (ValueError, TypeError):
             raise HTTPException(400, '召回数必须在 1–50 之间。') from None
 
-        user_msg = kb.append_message(conv["id"], "user", question)
-
-        chat_llm = task_llm()
-        chat_cfg = getattr(chat_llm, 'runtime_config', cfg)
-        candidates, source_warning = [], ''
-        if req.get('web_search'):
-            from ..tasks import checkpoint
-            from .evidence_routes import discover_web
-            checkpoint('检索网页候选；候选尚未审核，不作为事实依据')
-            try:
-                discovered = discover_web(kb, chat_cfg, question)
-                candidates = [{'ref': s['id'], 'title': s['title']} for s in discovered['items']]
-            except HTTPException as exc:
-                source_warning = str(exc.detail)
         scope = conv.get('scope') or {}
         if isinstance(scope, str):
             scope = json.loads(scope)
-        paper_ids = scope.get('paper_ids')
-        if scope.get('collection_id'):
-            from ..scope import paper_scope
+        from ..scope import paper_scope, chat_strict
+        try:
+            paper_ids = paper_scope(kb, scope)
+            strict_scope = chat_strict(scope, question) or paper_ids == []
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        scope_snapshot = {'scope': scope, 'paper_ids': paper_ids, 'strict': strict_scope}
+        chat_llm = execution['client'] if execution else task_llm()
+        chat_cfg = getattr(chat_llm, 'runtime_config', cfg)
+        user_msg = execution['user'] if execution else kb.append_message(conv["id"], "user", question, meta={'scope_snapshot': scope_snapshot})
+        candidates, source_warning, external = [], '', []
+        if req.get('web_search') and strict_scope:
+            source_warning = '本轮明确限制来源，未进行联网补充。'
+        if req.get('web_search') and not strict_scope:
+            from ..tasks import checkpoint
+            from .evidence_routes import discover_web
+            checkpoint('检索本轮外部证据；保留搜索摘要及未审核标识')
             try:
-                paper_ids = paper_scope(kb, scope)
+                discover = lambda: discover_web(kb, chat_cfg, question)
+                discovered = chat_llm.invoke('web_search', {'question': question}, discover) if execution else discover()
+                candidates = [{'ref': s['id'], 'title': s['title']} for s in discovered['items']]
+                from ..chat_evidence import grant, excerpts as web_excerpts
+                external = web_excerpts(kb, grant(kb, conv['id'], user_msg['id'], question, discovered['items']))
+            except HTTPException as exc:
+                source_warning = str(exc.detail)
             except ValueError as exc:
+                if execution:
+                    from ..analysis_runs import RunConflict
+                    raise RunConflict(str(exc)) from exc
                 raise HTTPException(409, str(exc)) from exc
-
         try:
             ans = QAAgent(kb, chat_cfg, chat_llm).ask(
                 question, top_k=top_k,
                 conversation_id=conv["id"], before_seq=user_msg["seq"],
                 paper_ids=paper_ids,
+                strict_scope=strict_scope, external=external,
             )
         except Exception as e:  # noqa: BLE001
+            if execution:
+                raise
             kb.append_message(
                 conv["id"], "assistant",
                 f"回答失败：{type(e).__name__}: {e}",
@@ -568,12 +597,25 @@ def create_app(cfg: Config) -> FastAPI:
             )
             raise HTTPException(500, f"回答失败：{e}") from e
 
-        excerpts = getattr(ans, "excerpts", []) or []
+        if execution:
+            execution['validate']()
+            if ans.status == 'error':
+                raise RuntimeError('模型调用失败；请求状态与用量已留存。')
+            ans.usage = execution['usage']()
+
+        # Refusals may explain the evidence boundary with valid quotations.
+        # Preserve their checked links without treating the refusal as a fact.
+        excerpts = (getattr(ans, "excerpts", []) or []) if (
+            ans.status in ('answered', 'refused', 'needs_review') and ans.citation_check_passed) else []
+        from ..textutil import parse_citations
+        used_tags = {tag for tag, _ in parse_citations(ans.answer)}
+        excerpts = [e for e in excerpts if e.get('tag') in used_tags]
         cites = [
             {
                 "tag": e.get("tag"), "chunk_id": e.get("chunk_id"),
                 "paper_id": e.get("paper_id"), "page": e.get("page"),
                 "section": e.get("section"),
+                "web_grant_id": e.get('web_grant_id'),
             }
             for e in excerpts
         ]
@@ -587,7 +629,7 @@ def create_app(cfg: Config) -> FastAPI:
         checkpoint('保存回答与引用检查')
         # 模型没输出结构化围栏时，框架补一个引用片段组件
         if excerpts and not parse_fences(content):
-            chunk_ids = [e["chunk_id"] for e in excerpts if e.get("chunk_id")]
+            chunk_ids = [e["chunk_id"] for e in excerpts if e.get("chunk_id") and not e.get("web_grant_id")]
             if chunk_ids:
                 content += (
                     "\n\n```lit-ui\n"
@@ -598,14 +640,57 @@ def create_app(cfg: Config) -> FastAPI:
                     + "\n```"
                 )
 
-        asst = kb.append_message(
-            conv["id"], "assistant", content,
-            citations=cites, citation_check=check_dict,
-            meta={'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens,
-                  'reasoning': ans.reasoning, 'request_settings': ans.request_settings,
-                  'candidate_links': candidates, 'source_warning': source_warning},
-        )
-        last_request = {'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens}
+        import uuid
+        qa_review_id = ('qr_'+uuid.uuid4().hex[:16]) if ans.draft_answer and ans.excerpts and ans.status in (
+            'answered', 'needs_review', 'invalid_citation', 'refused') else None
+        proc = genui_process(content, kb)
+        auto_compact = None
+        def result_payload():
+            return {
+                "user": user_msg,
+                "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict, 'model': ans.model,
+                              'source_links': evidence_links(cites, ans.answer), 'candidate_links': candidates,
+                              'source_warning': source_warning, 'reasoning': ans.reasoning,
+                              'request_settings': ans.request_settings, 'status': ans.status,
+                              'guard_issues': ans.guard_issues, 'audit_warnings': ans.evidence_audit.get('warnings', []),
+                              'qa_review_id': qa_review_id,
+                              'usage': ans.usage, 'retrieval': ans.retrieval, 'scope_snapshot': scope_snapshot},
+                "confidence": getattr(ans, "confidence", None),
+                "insufficient_evidence": bool(getattr(ans, "insufficient_evidence", False)),
+                "sources": citation_sources(cites),
+                "issues": proc.issues,
+                "auto_compact": auto_compact,
+                "model": ans.model,
+                'status': ans.status,
+                'usage': ans.usage,
+                'retrieval': ans.retrieval,
+            }
+
+        with kb.tx():
+            if execution:
+                execution['validate']()
+            if cites:
+                from ..evidence import stored_excerpts
+                stored_excerpts(kb, cites, allow_session=True)
+            asst = kb.append_message(
+                conv["id"], "assistant", content,
+                citations=cites, citation_check=check_dict,
+                meta={'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens,
+                      'reasoning': ans.reasoning, 'request_settings': ans.request_settings,
+                      'status': ans.status, 'usage': ans.usage, 'retrieval': ans.retrieval,
+                      'guard_issues': ans.guard_issues, 'audit_warnings': ans.evidence_audit.get('warnings', []),
+                      'scope_snapshot': scope_snapshot,
+                      'blocked_answer': ans.draft_answer if ans.status in ('invalid_citation', 'needs_review') else '',
+                      'candidate_links': candidates, 'source_warning': source_warning, 'qa_review_id': qa_review_id,
+                      'chat_run_id': execution['rid'] if execution else None},
+            )
+            if qa_review_id:
+                from ..qa_reviews import save as save_qa_review
+                save_qa_review(kb, qa_review_id, asst, conv['id'], question, ans, scope_snapshot)
+            if execution:
+                execution['publish'](result_payload())
+        last_request = {'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens,
+                        'usage': ans.usage, 'status': ans.status}
         with kb.tx() as con:
             con.execute("INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                         ('last_request:'+conv['id'], json.dumps(last_request)))
@@ -659,19 +744,7 @@ def create_app(cfg: Config) -> FastAPI:
         except Exception:  # noqa: BLE001 - 自动压缩失败绝不能影响回答
             auto_compact = None
 
-        return {
-            "user": user_msg,
-            "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict, 'model': ans.model,
-                          'source_links': evidence_links(cites, ans.answer), 'candidate_links': candidates,
-                          'source_warning': source_warning, 'reasoning': ans.reasoning,
-                          'request_settings': ans.request_settings},
-            "confidence": getattr(ans, "confidence", None),
-            "insufficient_evidence": bool(getattr(ans, "insufficient_evidence", False)),
-            "sources": citation_sources(cites),
-            "issues": proc.issues,
-            "auto_compact": auto_compact,
-            "model": ans.model,
-        }
+        return result_payload()
 
     # ---------------------------------------------------------------- 上下文
     @app.get("/api/context/{conv_id}")
@@ -1093,10 +1166,14 @@ def create_app(cfg: Config) -> FastAPI:
     register_evidence(app, kb, cfg, verifier)
     from .semantic_routes import register_semantics
     register_semantics(app, kb)
+    from ..qa_reviews import register_qa_reviews
+    register_qa_reviews(app, kb)
     from ..tasks import register_tasks
     register_tasks(app)
     from .analysis_run_routes import register_analysis_runs
     register_analysis_runs(app, kb, cfg, task_llm)
+    from .chat_run_routes import register_chat_runs
+    register_chat_runs(app, kb, cfg, task_llm, chat_body, messages)
     from .backup_routes import register_backups
     register_backups(app, kb, cfg)
     return app

@@ -108,6 +108,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         if cached and cached.get('payload') and cached.get('material_current'):
             return cached['payload']
     chunks = kb.get_chunks(paper_id)
+    from .semantics import payload_hash
+    parent_hash = payload_hash((kb.get_analysis(paper_id) or {}).get('payload') or {})
     material_id = chunks[0]['material_id'] if chunks else None
     if sum(len(c['text']) for c in chunks) < 150:
         raise ValueError('正文过少，无法解读；扫描件需先转写。')
@@ -256,13 +258,19 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         merged[field] = '\n\n'.join(parts)
     merged['field_evidence'] = {k: list(dict.fromkeys(v)) for k, v in evidence.items()}
     from .semantics import make_units, run_review, supported_fields
-    # 候选陈述先落盘：人工审核不依赖机器复核是否运行、是否通过。
-    # 复用 make_units（确定性 ID），所以复核结果与候选是同一套编号。
+    # Immutable candidates are saved separately; the published analysis stays
+    # unchanged until every final publication/version guard has succeeded.
     candidates = []
     for batch, (fields, sources) in enumerate(semantic_inputs, 1):
         candidates.extend(make_units(fields, sources, batch))
     merged['_candidates'] = [{k: u[k] for k in ('id', 'field', 'text', 'batch', 'candidate_tags', 'adjacent_tags')}
                              for u in candidates]
+    from .candidate_snapshots import save as save_candidates
+    candidate_id = save_candidates(kb, paper_id, material_id, merged['_candidates'], all_excerpts,
+                                  model=getattr(llm, 'name', 'unknown'), run_id=getattr(llm, 'rid', None),
+                                  parent_hash=parent_hash)
+    if candidate_id:
+        merged['_candidate_snapshot_id'] = candidate_id
     if semantic_review:
         semantic = run_review(semantic_inputs, all_excerpts, cfg, llm, tracker=tracker)
     else:
@@ -364,6 +372,9 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         if (kb.get_paper(paper_id) or {}).get('current_material_id') != material_id:
             from .materials import MaterialChanged
             raise MaterialChanged('解读期间原文材料已变化；保留旧分析，请对当前版本重新解读。')
+        if payload_hash((kb.get_analysis(paper_id) or {}).get('payload') or {}) != parent_hash:
+            from .materials import MaterialChanged
+            raise MaterialChanged('解读期间分析版本已变化；保留已发布版本。')
         if finalize is not None:
             finalize(merged)
         con.execute('DELETE FROM concepts WHERE paper_id=?', (paper_id,))
@@ -398,8 +409,13 @@ def _validate_fields(data: dict, excerpts: list[dict]):
         refs = evidence.get(field) or []
         if isinstance(refs, str):
             refs = [refs]
-        if not isinstance(refs, list):
-            refs = []
+        if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs):
+            # Objects can contain a citation-looking string but are not valid
+            # evidence references. Reject the batch before merging or review.
+            clean = {key: '' for key, _ in _FIELDS}
+            clean.update(field_evidence={key: [] for key, _ in _FIELDS}, keywords=[],
+                         field_notes='引用结构损坏，本批字段未放行。')
+            return clean, [f'{field}: field_evidence 结构损坏，必须为字符串引用数组。']
         if data.get('_mock'):
             refs = [e['tag'] + (f" p.{e['page']}" if e['page'] is not None else '')
                     for e in excerpts if any(part.strip()[:50] in e['text'] for part in value.split('\n') if len(part.strip()) >= 15)]
@@ -452,7 +468,10 @@ def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
 
         if not isinstance(raw, dict):
             raise ValueError('解读必须返回 JSON 对象。')
-        data, issues = _validate_fields(raw, scope)
+        from copy import deepcopy
+        # Validation clears rejected fields; retain the original response for
+        # the bounded structure-failure audit below.
+        data, issues = _validate_fields(deepcopy(raw), scope)
         broken = any('结构损坏' in i for i in issues)
         if broken and failures is not None:
             import json as _json
@@ -461,8 +480,9 @@ def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
         if broken and attempt == 0:
             # 结构损坏和"字段缺失"不是一类问题：用极简的格式要求重试一次，
             # 而不是把同一段修复提示再说一遍（实测那样救不回来）。
-            allowed = '、'.join(name for _, name in _FIELDS)
+            allowed = '、'.join(key for key, _ in _FIELDS)
             text = (f'只输出一个 JSON 对象，键只能是：{allowed}（另可含 field_evidence/keywords/field_notes）。'
+                    'field_evidence 必须为对象，其每个字段值必须是字符串引用数组，不得放来源对象。'
                     '不要新增字段、不要解释、不要 Markdown 代码块。原文不变，请重新提取本批内容。')
             continue
         gates = evaluate(data, _FIELDS, expected=expected, issues=issues)
@@ -505,6 +525,9 @@ def analyze_all(
 # 呈现与导出
 # ---------------------------------------------------------------------------
 def format_analysis(paper: dict, analysis: dict, *, include_concepts: bool = True) -> str:
+    if (analysis.get('_semantic_review') or {}).get('status') in ('not_run', 'skipped_by_user') and analysis.get('_candidates'):
+        # Raw extraction remains in the audit payload, not normal conclusions.
+        analysis = dict(analysis, **{key: '' for key, _ in _FIELDS}, field_evidence={})
     lines: list[str] = []
     lines.append(f"# {paper['title']}")
     meta = []
@@ -595,6 +618,8 @@ def export_notes(kb: KnowledgeBase, cfg: Config, paper_id: str | None = None) ->
         if not analysis.get('material_current'):
             raise ValueError('分析基于旧材料或未绑定材料，请重新解读当前原文后导出。')
         analysis = dict(analysis.get("payload") or analysis)
+        if (analysis.get('_semantic_review') or {}).get('status') in ('not_run', 'skipped_by_user') and analysis.get('_candidates'):
+            raise ValueError('候选尚未经核对，不能作为正式解读导出；请先人工审核相应知识正文。')
         from .deliverables import Deliverable, DeliverableStore
         if not (analysis.get('_citation_check') or {}).get('passed'):
             raise ValueError('解读未通过引用校验，请重新解读后导出。')

@@ -51,7 +51,7 @@ def citations_for(excerpts: list[dict]) -> list[dict]:
     return out
 
 
-def stored_excerpts(kb, citations: list[dict]) -> list[dict]:
+def stored_excerpts(kb, citations: list[dict], *, allow_session: bool = False) -> list[dict]:
     """重新读取引用，不信任调用方、缓存或模型保存的原文与页码。"""
     result = []
     tags = set()
@@ -65,7 +65,12 @@ def stored_excerpts(kb, citations: list[dict]) -> list[dict]:
         if row is None:
             from .knowledge import source_chunk
             e = source_chunk(kb, cite.get('chunk_id') or cite.get('id'))
-            if e is None or e['trust_level'] != 'manual_confirmed':
+            if allow_session and e is not None and cite.get('web_grant_id'):
+                from .chat_evidence import allowed
+                if allowed(kb, e, cite['web_grant_id']):
+                    e['web_grant_id'] = cite['web_grant_id']
+                    e['session_only'] = e['review_status'] == 'pending'
+            if e is None or not (e['citable'] or e.get('web_grant_id')):
                 raise ValueError('引用知识已失效或未经人工确认，禁止导出。')
         else:
             if row['deleted_at'] or not is_citable(row['verify_level']):

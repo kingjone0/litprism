@@ -136,7 +136,7 @@ def test_explicit_paper_scope_excludes_global_knowledge(env):
     p = paper(kb, text='otherterm ' * 40)
     source = candidate(client)
     client.post('/api/evidence/'+source['id']+'/review', json={'action': 'confirm', 'note': '核对', 'content_hash': source['content_hash']})
-    conv = client.post('/api/conversations', json={'scope': {'paper_ids': [p]}}).json()['id']
+    conv = client.post('/api/conversations', json={'scope': {'paper_ids': [p], 'mode':'strict'}}).json()['id']
     result = client.post('/api/chat/'+conv, json={'question': 'reviewmarker'}).json()
     assert result['insufficient_evidence']
 
@@ -149,7 +149,7 @@ def test_bad_url_and_unconfigured_search_do_not_create_fake_sources(env):
     assert client.get('/api/evidence').json()['items'] == []
 
 
-def test_web_search_returns_pending_snapshots_only(env, monkeypatch):
+def test_web_search_pending_snapshots_are_bound_to_request_not_global_knowledge(env, monkeypatch):
     cfg, kb, _, client = env
     monkeypatch.setattr('litprism.secrets.SecretStore.get', lambda *_: 'offline-test-only')
     monkeypatch.setattr('requests.post', lambda *a, **kw: type('Response', (), {
@@ -159,12 +159,14 @@ def test_web_search_returns_pending_snapshots_only(env, monkeypatch):
     assert result['items'][0]['status'] == 'pending'
     assert not search_knowledge(kb, 'reviewmarker', 8)
     model = env[2]
+    model.text = '据本轮搜索摘要（未审核）得到的说明。[P1]'
     conv = client.post('/api/conversations', json={}).json()['id']
     reply = client.post('/api/chat/'+conv, json={'question': 'reviewmarker', 'web_search': True}).json()
-    assert reply['insufficient_evidence']
-    assert reply['assistant']['source_links'] == []
+    assert not reply['insufficient_evidence'] and reply['status']=='answered'
+    assert reply['assistant']['source_links'][0]['session_only']
     assert reply['assistant']['candidate_links'][0]['title'] == '网页快照'
-    assert not model.calls, '待审网页不能进入模型的事实证据上下文'
+    assert model.calls, '实际取得的搜索摘要可作本轮有标识的外部证据'
+    assert not search_knowledge(kb, 'reviewmarker', 8), '本轮引用不会自动确认全局知识'
     history = client.get('/api/conversations/'+conv+'/messages').json()
     assert history['items'][-1]['candidate_links']
 

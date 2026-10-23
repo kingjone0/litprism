@@ -29,6 +29,7 @@ class QAAnswer:
     insufficient_evidence: bool = False
     open_questions: list[str] = field(default_factory=list)
     evidence_map: list[dict] = field(default_factory=list)
+    evidence_audit: dict = field(default_factory=dict)  # mechanical location only, audit sidebar
     excerpts: list[dict] = field(default_factory=list)
     citation_issues: list[str] = field(default_factory=list)
     citation_check_passed: bool = True
@@ -38,6 +39,11 @@ class QAAnswer:
     request_tokens: int = 0
     reasoning: str = ''
     request_settings: dict = field(default_factory=dict)
+    status: str = 'answered'
+    draft_answer: str = ''  # audit only; never a normal answer or history input
+    usage: dict = field(default_factory=dict)
+    retrieval: dict = field(default_factory=dict)
+    guard_issues: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -47,6 +53,7 @@ class QAAnswer:
             "insufficient_evidence": self.insufficient_evidence,
             "open_questions": self.open_questions,
             "evidence_map": self.evidence_map,
+            "evidence_audit": self.evidence_audit,
             "excerpts": [
                 {
                     "tag": e["tag"], "chunk_id": e.get("chunk_id"),
@@ -65,6 +72,10 @@ class QAAnswer:
             'request_tokens': self.request_tokens,
             'reasoning': self.reasoning,
             'request_settings': self.request_settings,
+            'status': self.status,
+            'usage': self.usage,
+            'retrieval': self.retrieval,
+            'guard_issues': self.guard_issues,
         }
 
 
@@ -89,10 +100,19 @@ class QAAgent:
         top_k: int | None = None,
         conversation_id: str | None = None,
         before_seq: int | None = None,
+        strict_scope: bool = True,
+        external: tuple | list = (),
     ) -> QAAnswer:
         from .context.dialogue import HISTORY_GUARD, DialogueContext, build_dialogue
         from .context.meter import Meter
+        from .usage import TrackedClient, UsageTracker
 
+        tracker = UsageTracker()
+        client = TrackedClient(self.llm, tracker)
+        res = QAAnswer(question=question, model=getattr(self.llm, 'name', 'unknown'))
+        def finish():
+            res.usage = tracker.to_dict()
+            return res
         dialogue = build_dialogue(self.kb, self.cfg, conversation_id, before_seq) if conversation_id else DialogueContext()
         meter = Meter(self.cfg)
         def freeze_refusal(outcome, request):
@@ -104,12 +124,41 @@ class QAAgent:
                     'preferences': [m.to_dict() for m in dialogue.memory.resident]})
         if meter.estimate_text(question) > self.cfg.context.available_tokens // 2:
             freeze_refusal('question_over_budget', [])
-            return QAAnswer(question=question, answer='问题过长，请缩短后重试。', insufficient_evidence=True, confidence='none')
+            res.answer, res.status = '问题过长，请缩短后重试。', 'budget_exceeded'
+            res.insufficient_evidence, res.confidence = True, 'none'
+            return finish()
         top_k = top_k or self.cfg.retrieval.top_k
-        hits = search_local(self.kb, dialogue.query(question), top_k=top_k, paper_ids=paper_ids, llm=self.llm, citable_only=True)
-        res = QAAnswer(question=question, model=getattr(self.llm, "name", "unknown"))
+        from .qa_retrieval import as_excerpts, material_text, retrieve
+        from .qa_evidence import manifest, material_risks
+        scope = '全库可引用论文与人工确认知识，以及本轮取得的外部证据（如有；保留类型与审核状态）'
+        delivery = {}
+        if paper_ids:
+            titles = [self.kb.get_paper(p) for p in paper_ids]
+            scope = ('仅限指定论文：' if strict_scope else '重点论文（同时补充相关可信知识及本轮外部证据）：')+'、'.join(truncate(t['title'], 40) for t in titles if t)
+        def messages_for(excerpts, history=''):
+            import json
+            nonlocal delivery
+            delivery = manifest(self.kb, excerpts)
+            system = QA_SYSTEM+'\n\n'+HISTORY_GUARD+'\n\n'+dialogue.memory.prompt_block()
+            if any(e.get('source_kind') != 'paper' for e in excerpts):
+                system += '\n部分片段为人工确认知识或本轮搜索摘要。必须按程序标记区分来源/审核状态；搜索摘要未必经人工审核，不能称为网页正文或核验论文。'
+            # Keep source bytes before changing history/question for caching.
+            content = (f'检索范围：{scope}\n\n【片段】\n'+material_text(excerpts)
+                       +'\n\n【程序送达记录】\n'+json.dumps(delivery, ensure_ascii=False)
+                       +'\n\n'+history+f'\n\n【问题】{question}\n\n'
+                       +'请仅依据上述片段作答，并在每条结论后只标注片段编号（如 [P1]），不生成页码；来源链接由程序展示真实页码。'
+                       +'未提供的论文或章节不能声称已读完，题录/摘要不等于全文。'
+                       +'证据不足应明确拒答，不能依据历史回答补事实。')
+            return [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]
+        from .context.dialogue import is_followup
+        hits, res.retrieval = retrieve(self.kb, question, dialogue.query(question, paper_ids), paper_ids=paper_ids,
+                                      top_k=top_k, llm=client, search=search_local, cfg=self.cfg,
+                                      fits_full=lambda hs: sum(meter.estimate_message(m) for m in messages_for(as_excerpts(hs)))+8 <= self.cfg.context.available_tokens,
+                                      prior_refs=dialogue.evidence_refs if is_followup(question) else (),
+                                      strict_scope=strict_scope, external=external)
 
         if not hits:
+            res.status = 'refused'
             res.insufficient_evidence = True
             res.confidence = "none"
             res.answer = (
@@ -120,62 +169,12 @@ class QAAgent:
             if conversation_id:
                 from .memory.view import TurnViewStore
                 TurnViewStore(self.kb).freeze(conversation_id, read_refs={'request': [], 'outcome': 'no_evidence', 'question': question})
-            return res
+            return finish()
 
-        excerpts = []
-        for i, h in enumerate(hits, 1):
-            excerpts.append(
-                {
-                    "tag": f"P{i}",
-                    "chunk_id": h.get("id"),
-                    "paper_id": h["paper_id"],
-                    "title": h.get("paper_title") or "",
-                    "year": h.get("paper_year"),
-                    "page": h.get("page"),
-                    "section": h.get("section") or "",
-                    "score": h.get("score"),
-                    "text": h["text"],
-                    'source_id': h.get('source_id'), 'source_kind': h.get('source_kind', 'paper'), 'url': h.get('url'),
-                }
-            )
+        excerpts = as_excerpts(hits)
         res.excerpts = excerpts
-
-        blocks = []
-        for e in excerpts:
-            head = f"[{e['tag']}] 论文：《{e['title']}》"
-            if e.get('source_kind') != 'paper':
-                head = f"[{e['tag']}] 人工确认的{'网页快照' if e['source_kind'] == 'web' else '知识条目'}：《{e['title']}》 地址：{e.get('url') or '用户知识条目'}（不是自动核验的论文）"
-            if e.get("year"):
-                head += f"（{e['year']}）"
-            loc = []
-            if e.get("page"):
-                loc.append(f"第 {e['page']} 页")
-            if e.get("section"):
-                loc.append(f"章节：{e['section']}")
-            if loc:
-                head += "  " + " · ".join(loc)
-            blocks.append(f"{head}\n{e['text']}")
-        material = "\n\n---\n\n".join(blocks)
-
-        scope = "全库可引用论文与人工确认知识（保留原始来源类型）"
-        if paper_ids:
-            titles = [self.kb.get_paper(p) for p in paper_ids]
-            scope = "指定论文：" + "、".join(truncate(t["title"], 40) for t in titles if t)
-
-        messages = [
-            {"role": "system", "content": QA_SYSTEM + "\n\n" + HISTORY_GUARD + "\n\n" + dialogue.memory.prompt_block()},
-            {
-                "role": "user",
-                "content": (
-                    f"检索范围：{scope}\n\n"
-                    f"【片段】\n{material}\n\n"
-                    f"【问题】{question}\n\n"
-                    "请仅依据上述片段作答，并在每条结论后标注来源（如 [P1 p.3]）。"
-                ),
-            },
-        ]
-        if any(e.get('source_kind') != 'paper' for e in excerpts):
-            messages[0]['content'] += '\n部分片段是用户人工确认的知识/网页快照。可以依其原文回答，但必须明确称为知识条目或网页快照，不能称为核验论文；人工确认并不证明客观真实性。'
+        material = material_text(excerpts)
+        messages = messages_for(excerpts)
 
         meter = Meter(self.cfg)
         while sum(meter.estimate_message(m) for m in messages) + 8 > self.cfg.context.available_tokens:
@@ -184,25 +183,29 @@ class QAAgent:
                 res.insufficient_evidence = True
                 res.excerpts = []
                 res.confidence = 'none'
+                res.status = 'budget_exceeded'
                 freeze_refusal('evidence_over_budget', messages)
-                return res
+                return finish()
             excerpts.pop()
-            old_material = material
-            material = '\n\n---\n\n'.join(blocks[:len(excerpts)])
-            messages[-1]['content'] = messages[-1]['content'].replace('【片段】\n'+old_material, '【片段】\n'+material, 1)
+            material = material_text(excerpts)
+            messages = messages_for(excerpts)
         remaining = max(0, self.cfg.context.available_tokens - sum(meter.estimate_message(m) for m in messages) - 8)
         history, history_refs = dialogue.prompt(meter, remaining)
         if history:
-            messages.insert(1, {"role": "user", "content": history})
+            messages = messages_for(excerpts, history)
         from copy import deepcopy
         attempts = []
         error = None
         for retry in range(self.cfg.context.overflow_retries + 1):
             attempts.append(deepcopy(messages))
             try:
-                data = self.llm.chat_json(messages, task='qa')
+                data = client.chat_json(messages, task='qa')
                 if not isinstance(data, dict):
                     raise ValueError('模型没有返回 JSON 对象。')
+                if not isinstance(data.get('answer'), str) or not data['answer'].strip():
+                    raise ValueError('模型没有返回非空回答文本。')
+                if 'insufficient_evidence' in data and type(data['insufficient_evidence']) is not bool:
+                    raise ValueError('证据不足标记必须为布尔值。')
                 error = None
                 break
             except Exception as exc:
@@ -211,16 +214,19 @@ class QAAgent:
                 if not overflow or retry >= self.cfg.context.overflow_retries:
                     break
                 if history:
-                    messages.pop(1)
                     history, history_refs = '', []
                 elif len(excerpts) > 1:
                     excerpts.pop()
-                    old_material = material
-                    material = '\n\n---\n\n'.join(blocks[:len(excerpts)])
-                    messages[-1]['content'] = messages[-1]['content'].replace('【片段】\n'+old_material, '【片段】\n'+material, 1)
+                    material = material_text(excerpts)
                 else:
                     break
+                messages = messages_for(excerpts, history)
         res.request_tokens = sum(meter.estimate_message(m) for m in messages)
+        res.retrieval.update(delivered_chunks=len(excerpts),
+                             delivered_chunk_ids=[e['chunk_id'] for e in excerpts],
+                             evidence_papers=list(dict.fromkeys(e['paper_id'] for e in excerpts if e['paper_id'])),
+                             window_limited=len(excerpts) < res.retrieval['candidate_chunks'])
+        res.retrieval['evidence_manifest'] = delivery
         res.provider_usage = getattr(self.llm, 'last_usage', None) if error is None else None
         res.reasoning = getattr(self.llm, 'last_reasoning', '') if error is None else ''
         res.request_settings = dict(getattr(self.llm, 'last_request_settings', {}) or {})
@@ -236,16 +242,22 @@ class QAAgent:
                 retrieved_tokens=meter.estimate_text(material),
             )
         if error:
-            res.answer = f'模型调用失败：{error}'
+            from .llm import safe_failure
+            res.request_settings['failure'] = safe_failure(error)
+            res.answer = '模型调用失败，请检查服务状态后重试。'
+            res.status = 'error'
             res.confidence = 'error'
-            res.warnings.append(str(error))
-            return res
+            res.warnings.append('模型请求失败：'+str(res.request_settings['failure']))
+            return finish()
 
         res.answer = str(data.get("answer") or "").strip()
+        res.draft_answer = res.answer
         res.confidence = str(data.get("confidence") or "unknown")
         res.insufficient_evidence = bool(data.get("insufficient_evidence"))
         res.open_questions = list(data.get("open_questions") or [])
-        res.evidence_map = list(data.get("evidence_map") or [])
+        from .qa_claims import audit_map
+        res.evidence_audit = audit_map(res.draft_answer, data.get('evidence_map'), res.excerpts)
+        res.evidence_map = res.evidence_audit['items']
 
         self._check_citations(res)
         # 偏好守卫与引用检查是独立约束，不能因关闭常规检查而绕过。
@@ -256,7 +268,29 @@ class QAAgent:
                 res.citation_check_passed = False
                 res.citation_issues.extend(v.message for v in result.violations)
                 res.warnings.append(result.summary())
-        return res
+        if not res.citation_check_passed:
+            res.status = 'invalid_citation'
+            res.answer = '回答的来源校验未通过，已阻止展示结论。请核对原文后重新提问。'
+            res.open_questions, res.evidence_map = [], []
+        else:
+            from .qa_guard import answer_risks
+            from .qa_conditions import conditional_risks
+            res.guard_issues = list(dict.fromkeys(
+                answer_risks(res.answer, res.excerpts)
+                + conditional_risks(res.answer, res.excerpts)
+                + material_risks(res.answer, res.excerpts, res.retrieval['evidence_manifest'])
+                + res.evidence_audit['blocking_issues']))
+            res.warnings.extend(res.evidence_audit['warnings'])
+            if res.guard_issues:
+                from .textutil import parse_citations
+                refs = [f'[{tag}'+(f' p.{page}' if page is not None else '')+']'
+                        for tag, page in dict.fromkeys(parse_citations(res.answer))]
+                res.status, res.confidence = 'needs_review', 'none'
+                res.answer = '回答的证据归属存在疑点，已隔离生成草稿。请核对原文后再判断。\n'+' '.join(refs)
+                res.open_questions, res.evidence_map = [], []
+            elif res.insufficient_evidence:
+                res.status = 'refused'
+        return finish()
 
     def _check_citations(self, res: QAAnswer) -> None:
         """校验回答中的引用标记是否都能对应到真实片段。"""
@@ -265,8 +299,9 @@ class QAAgent:
         from .textutil import parse_citations
         used = {tag for tag, _ in parse_citations(res.answer)}
         try:
-            stored_excerpts(self.kb, [{'tag': e['tag'], 'chunk_id': e.get('chunk_id'), 'paper_id': e.get('paper_id')}
-                                      for e in res.excerpts if e['tag'] in used])
+            stored_excerpts(self.kb, [{'tag': e['tag'], 'chunk_id': e.get('chunk_id'), 'paper_id': e.get('paper_id'),
+                                      'web_grant_id': e.get('web_grant_id')}
+                                      for e in res.excerpts if e['tag'] in used], allow_session=True)
         except ValueError as exc:
             res.citation_issues.append(str(exc))
             res.answer = '来源状态在生成期间发生变化，已阻止展示结论，请核对右栏来源后重试。'
