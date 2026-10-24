@@ -144,6 +144,7 @@ class RetrievalConfig:
 class QAConfig:
     strict_citation_check: bool = True
     refuse_when_no_evidence: bool = True
+    evidence_anchor_trial: bool = False  # Isolated opt-in trial; no settings UI.
 
 
 @dataclass
@@ -387,6 +388,8 @@ def _validate(cfg: Config) -> None:
     """
     from .invariants import ContextConfigView, check_config
 
+    if type(cfg.qa.evidence_anchor_trial) is not bool:
+        raise ValueError('原文锚点试验开关必须为布尔值。')
     if any(not isinstance(v, int) or isinstance(v, bool) for v in (cfg.llm.max_tokens, cfg.context.window_tokens, cfg.context.output_reserve_tokens, cfg.retrieval.top_k)):
         raise ValueError('窗口、输出预算和召回数必须是整数。')
     view = ContextConfigView(

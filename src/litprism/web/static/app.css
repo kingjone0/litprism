@@ -1222,15 +1222,34 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
 #recommendForm .btn { flex: none; white-space: nowrap; }
 
 /* Reply review shares the source inspector's palette and scroll area. */
-#chatReviewForm fieldset { min-inline-size: 0; margin: 18px 0; padding: 12px;
+:is(#chatReviewForm, #chatUnitReviewForm) fieldset { min-inline-size: 0; margin: 18px 0; padding: 12px;
   border: 1px solid var(--border); border-radius: var(--radius); }
-#chatReviewForm legend { padding-inline: 4px; font-weight: 600; }
-#chatReviewForm > label { display: block; margin-block: 14px; }
-#chatReviewForm .textarea { display: block; margin-block-start: 6px; }
-#chatReviewForm .reading-text, .qa-review-draft { max-block-size: 20rem; overflow: auto; }
-#chatReviewForm blockquote { margin: 10px 0; }
-#chatReviewForm input[type=checkbox] { accent-color: var(--accent); }
-#chatReviewForm summary { overflow-wrap: anywhere; }
+:is(#chatReviewForm, #chatUnitReviewForm) legend { padding-inline: 4px; font-weight: 600; }
+:is(#chatReviewForm, #chatUnitReviewForm) > label { display: block; margin-block: 14px; }
+:is(#chatReviewForm, #chatUnitReviewForm) .textarea { display: block; margin-block-start: 6px; }
+:is(#chatReviewForm, #chatUnitReviewForm) .reading-text, .qa-review-draft, .qa-unit-original { max-block-size: 20rem; overflow: auto; }
+:is(#chatReviewForm, #chatUnitReviewForm) blockquote { margin: 10px 0; }
+:is(#chatReviewForm, #chatUnitReviewForm) input[type=checkbox] { accent-color: var(--accent); }
+:is(#chatReviewForm, #chatUnitReviewForm) summary { overflow-wrap: anywhere; }
+.qa-unit-context { margin-block: 20px; overflow-wrap: anywhere; }
+.qa-unit-evidence { display: block; margin-block: 16px; }
+.qa-unit-evidence > .reading-text { display: block; margin-block-start: 6px; }
+.qa-unit-list { margin-block: 24px; }
+.qa-unit-row { padding-block: 16px; border-block-end: 1px solid var(--border); }
+.qa-unit-row > summary { cursor: pointer; overflow-wrap: anywhere; }
+.qa-unit-row > summary .reading-text { display: inline; font-weight: 400; }
+.qa-unit-row-state { display: block; margin-block-start: 8px; }
+.qa-unit-row [data-unit-slot] > .btn { margin-block-start: 16px; }
+.qa-unit-list .reading-text { white-space: pre-wrap; }
+.qa-unit-list .btn { white-space: normal; text-align: start; }
+.qa-unit-other-sources { margin-block-start: 20px; }
+.qa-unit-other-sources label { display: block; margin-block: 12px; }
+.qa-unit-other-sources .input { display: block; margin-block-start: 6px; max-inline-size: 100%; }
+.qa-unit-supplement { margin-block: 16px; }
+.qa-unit-actions { position: sticky; inset-block-end: 0; padding-block: 12px;
+  background: var(--panel); border-block-start: 1px solid var(--border); }
+#qaWholeReplyReview { margin-block: 24px; }
+#chatUnitReviewForm .btn { white-space: normal; max-inline-size: 100%; }
 .qa-claim-map { margin-block: 16px; overflow-wrap: anywhere; }
 .qa-claim-map section { margin-block: 20px; }
 .qa-claim-map h4 { margin-block: 0 8px; font-size: 14px; }

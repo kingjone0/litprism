@@ -82,6 +82,10 @@ def review_source(kb, sid, *, action, note, content_hash):
         if row is None or content_hash != row['content_hash']:
             raise ValueError('来源不存在或内容版本已变化，请重新查看原文后审核。')
         if action == 'confirm':
+            unit = con.execute('''SELECT v.claim_id,r.payload FROM semantic_reviews v
+                JOIN semantic_runs r ON r.id=v.run_id WHERE v.knowledge_id=? ORDER BY v.rowid DESC LIMIT 1''', (sid,)).fetchone()
+            if unit and unit['claim_id'].startswith('ans_') and json.loads(unit['payload']).get('_kind') == 'qa_review':
+                raise ValueError('此知识由单元裁决管理，请从原单元修订并重新入库，不能单独恢复旧版本。')
             from .provenance import availability
             state = availability(kb, sid)
             if not state['citable']:

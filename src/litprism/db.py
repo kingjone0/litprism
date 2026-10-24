@@ -433,7 +433,7 @@ class KnowledgeBase:
         if not match:
             return []
         sql = [
-            "SELECT c.id, c.paper_id, c.page, c.section, c.text,",
+            "SELECT c.id, c.paper_id, c.material_id, c.page, c.section, c.text,",
             "       p.title AS paper_title, p.year AS paper_year,",
             "       bm25(chunks_fts) AS raw_score",
             "FROM chunks_fts f JOIN chunks c ON c.rowid = f.rowid",
@@ -465,7 +465,7 @@ class KnowledgeBase:
         conds = " OR ".join(["c.text LIKE ?"] * len(terms))
         vals: list[Any] = [f"%{t}%" for t in terms]
         sql = (
-            "SELECT c.id, c.paper_id, c.page, c.section, c.text, p.title AS paper_title,"
+            "SELECT c.id, c.paper_id, c.material_id, c.page, c.section, c.text, p.title AS paper_title,"
             " p.year AS paper_year FROM chunks c JOIN papers p ON p.id=c.paper_id WHERE p.deleted_at IS NULL AND c.material_id=p.current_material_id AND (" + conds + ")"
         )
         if paper_ids:
@@ -644,6 +644,7 @@ class KnowledgeBase:
             )
         return cid
 
+    @_locked
     def list_conversations(self, limit: int = 100, query: str = '') -> list[dict]:
         rows = self._con.execute(
             "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count"
@@ -663,6 +664,7 @@ class KnowledgeBase:
             cur = con.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         return cur.rowcount > 0
 
+    @_locked
     def resolve_conversation(self, ref: str) -> dict | None:
         """按 id / id 前缀 / 标题片段定位会话；``ref`` 为空时取最近一个。"""
         ref = (ref or "").strip()
@@ -727,6 +729,7 @@ class KnowledgeBase:
             )
         return {"id": mid, "seq": seq, "ref": ref, "role": role, "content": content, "kind": kind}
 
+    @_locked
     def get_messages(self, conversation_id: str, *, limit: int | None = None) -> list[dict]:
         sql = (
             "SELECT seq, ref, role, content, citations, citation_check, kind, shadowed_refs,"

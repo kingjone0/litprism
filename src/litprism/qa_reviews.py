@@ -45,15 +45,19 @@ def snapshot(kb, rid):
         raise HTTPException(404, '不是对话回复审核快照。')
     digest = payload_hash(payload)
     records = [dict(r) for r in kb._con.execute(
-        'SELECT * FROM semantic_reviews WHERE run_id=? AND analysis_hash=? ORDER BY rowid', (rid, digest))]
+        "SELECT * FROM semantic_reviews WHERE run_id=? AND analysis_hash=? AND claim_id='reply' ORDER BY rowid", (rid, digest))]
     return payload, digest, records
 
 
 def latest_decision(kb, rid):
     if not rid:
         return None
-    row = kb._con.execute('SELECT action,knowledge_id FROM semantic_reviews WHERE run_id=? ORDER BY rowid DESC LIMIT 1', (rid,)).fetchone()
-    return dict(row) if row else None
+    row = kb._con.execute("SELECT action,knowledge_id FROM semantic_reviews WHERE run_id=? AND claim_id='reply' ORDER BY rowid DESC LIMIT 1", (rid,)).fetchone()
+    if row:
+        return dict(row)
+    if kb._con.execute('SELECT 1 FROM semantic_reviews WHERE run_id=? LIMIT 1', (rid,)).fetchone():
+        return {'action': 'partial', 'knowledge_id': None, 'scope': 'units'}
+    return None
 
 
 def resolve(kb, ref, scope):
@@ -93,11 +97,18 @@ def register_qa_reviews(app, kb):
                 sources.append(item)
             last = records[-1] if records else None
             knowledge = get_source(kb, last['knowledge_id']) if last and last['knowledge_id'] else None
+            from .qa_unit_reviews import inventory, review_mode, unit_state, completion
+            from .qa_claims import presentation_warnings
+            units = [dict(u, **unit_state(kb, rid, digest, u['id'])) for u in inventory(payload)]
             return {'id': rid, 'snapshot_hash': digest, 'review_token': last['id'] if last else '',
                     'question': payload['question'], 'draft': payload['draft'], 'status': payload['status'],
                     'issues': payload['issues'], 'sources': sources, 'reviews': records,
                     'evidence_audit': payload.get('evidence_audit') or {'state': 'missing', 'items': [], 'issues': []},
-                    'knowledge_status': knowledge['effective_status'] if knowledge else None}
+                    'knowledge_status': knowledge['effective_status'] if knowledge else None,
+                    'review_mode': review_mode(kb, rid), 'units': units,
+                    'review_summary': completion(payload, units),
+                    'audit_display': dict(zip(('warnings', 'notices'), presentation_warnings(
+                        (payload.get('evidence_audit') or {}).get('warnings', []))))}
 
     @app.post('/api/chat-reviews/{rid}/review')
     def review(rid: str, req: dict):
@@ -106,6 +117,9 @@ def register_qa_reviews(app, kb):
             raise HTTPException(400, '请选择审核动作并填写核对依据（最多 5000 字符）。')
         with kb.tx() as con:
             payload, digest, records = snapshot(kb, rid)
+            from .qa_unit_reviews import review_mode
+            if review_mode(kb, rid) == 'units':
+                raise HTTPException(409, '此回复已按单元裁决，请继续使用单元入口，不能混用整答审核。')
             last = records[-1] if records else None
             if req.get('snapshot_hash') != digest or req.get('review_token') != (last['id'] if last else ''):
                 raise HTTPException(409, '回复或审核状态已变化，请重新打开审核面板。')
@@ -153,3 +167,6 @@ def register_qa_reviews(app, kb):
                         ('sr_'+uuid.uuid4().hex[:12], None, rid, digest, 'reply', action,
                          note.strip(), text, source_id, now()))
         return {'ok': True, 'knowledge_id': source_id}
+
+    from .qa_unit_reviews import register_unit_reviews
+    register_unit_reviews(app, kb)

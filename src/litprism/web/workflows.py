@@ -22,9 +22,9 @@ def register_workflows(app, kb, cfg, task_llm, verifier):
         范围原先只能在建会话时设定，想加一篇新导入的论文就得重建会话、丢掉历史。
         这里补上修改能力：只改 scope，不动消息。
 
-        ``paper_ids: []`` 表示**一篇都不选**，不是"全部" —— 空范围不得静默扩为全库。
+        聊天 ``paper_ids: []`` 表示未限定论文；显式分组和无效文献仍须校验。
         """
-        from ..scope import paper_scope, chat_strict
+        from ..scope import chat_paper_scope, chat_strict
 
         current = kb.resolve_conversation(cid)
         if current is None:
@@ -54,7 +54,7 @@ def register_workflows(app, kb, cfg, task_llm, verifier):
                 clean['collection_id'] = raw['collection_id']
             if clean:
                 try:
-                    resolved = paper_scope(kb, clean)
+                    resolved = chat_paper_scope(kb, clean)
                 except ValueError as exc:
                     raise HTTPException(409, str(exc)) from exc
 

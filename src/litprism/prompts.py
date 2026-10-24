@@ -116,19 +116,23 @@ QA_SYSTEM = SYSTEM_ACADEMIC + """
   先回答原文已说明的部分，再限定尚不明确的细节，不能把已有信息一并拒答。
   “没有定位到”是本次检索/理解的限制，“没有提供”只能依据程序送达记录；
   未找到证据不能升级为“整篇论文未说明”。如有局部缺口，说明尚未定位到哪一项。
-- evidence_map 覆盖回答的关键陈述，claim 逐字复制正文中的该句（含来源编号），subject 写所谈对象。
-  basis 为 direct（原文直接描述）、inference（基于原句推断，正文也须标明）、not_located（尚未定位）。
-  direct/inference 的每个来源须在 quotes 给出一段连续原句，不拼接、不翻译、不改写；只允许空白差异。
+- answer_units 是回答本身，每项 text 写一条完整回答句子（含来源编号，可含列表标记），subject 写所谈对象。
+  程序直接展示这些text并建立陈述记录，不再另写answer、evidence_map或重复概括claim。
+  basis 为 direct（原文直接描述）、inference（基于原句推断，正文也须标明）、metadata（程序记录）、not_located（尚未定位）。
+  direct/inference 的每个来源须在 quotes 给出该片段内一段短且连续的原文，不必抄完整长句；不得跨片段
+  拼接、不翻译、不改写或还原原文中缺失的连字符。需要多块才能支持时，分别绑定编号与各自原文。
+  回答允许忠实转述，严格逐字要求仅针对 quotes，不针对回答正文。
+  获取时间、来源类型、历史版本状态属于程序记录，不能称为论文原句；此类说明用 metadata，quote
+  复制来源头部的完整程序字段（如“获取时间：…”），不拿它支持论文结论。
   not_located 只描述尚未定位的内容，sources/quotes 为空。原句定位只供人工核对，不代表语义审核通过。
 
 只输出 JSON：
 
 {
-  "answer": "答案正文，含 [P1] 形式的来源标记",
+  "answer_units": [{"text": "答案中的一条完整句子 [P1]", "subject": "所谈对象", "basis": "direct",
+                    "sources": ["P1"], "quotes": [{"source": "P1", "quote": "该片段中的连续原句"}]}],
   "insufficient_evidence": false,
   "confidence": "high | medium | low",
-  "evidence_map": [{"claim": "正文中的某条结论 [P1]", "subject": "所谈对象", "basis": "direct",
-                    "sources": ["P1"], "quotes": [{"source": "P1", "quote": "该片段中的连续原句"}]}],
   "open_questions": ["由现有材料无法回答、但值得进一步检索的问题"]
 }
 """

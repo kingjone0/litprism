@@ -10,6 +10,26 @@ import re
 from .textutil import parse_citations
 
 
+_LOCATION_NOTICES = frozenset({
+    '原句按明确排版等价定位；展示保留原始字符。',
+    '匹配程序记录，仅用于来源、获取时间或版本说明，不是论文原句或语义支持证明。',
+    '试验锚点原文由程序回填；位置有效不代表对象归属或语义支持已通过。',
+})
+
+
+def presentation_warnings(messages):
+    """Separate known explanations from defects, including saved legacy messages.
+
+    This is a display projection only: immutable audits and blocking checks stay
+    intact. Never classify an unknown warning as harmless by keyword matching.
+    """
+    warnings, notices = [], []
+    for message in messages:
+        text = re.sub(r'^claim-\d+：', '', message)
+        (notices if text in _LOCATION_NOTICES else warnings).append(message)
+    return warnings, notices
+
+
 def _canonical(text):
     chars, positions = [], []
     ligatures = str.maketrans({'ﬁ':'fi','ﬂ':'fl','ﬀ':'ff','ﬃ':'ffi','ﬄ':'ffl'})
@@ -39,15 +59,18 @@ def locate(text, quote):
     return {'start':a,'end':b,'quote':text[a:b], 'normalization':'typography'}
 
 
-def audit_map(answer, proposed, excerpts):
+def audit_map(answer, proposed, excerpts, *, anchor_trial=False, answer_bindings=None,
+              answer_protocol='legacy_answer_v1'):
     """Missing/legacy maps are explicit unknowns, not semantic approval or refusal.
 
     Auxiliary structure errors warn; unverifiable proposed quotations hold the draft. A located
     quotation only proves its bytes occurred in a delivered source, never that
     the source discusses the claimed subject or supports the claim.
     """
-    result = {'version': 1, 'state': 'missing', 'semantic_status': 'unreviewed',
+    result = {'version': 2, 'state': 'missing', 'semantic_status': 'unreviewed',
               'items': [], 'issues': [], 'blocking_issues': [], 'warnings': []}
+    result['protocol'] = 'anchors_trial_v2' if anchor_trial else 'quotes_v1'
+    result['answer_protocol'] = answer_protocol
     if proposed is None or proposed == []:
         return result
     if not isinstance(proposed, list):
@@ -67,9 +90,19 @@ def audit_map(answer, proposed, excerpts):
         claim = raw.get('claim')
         if isinstance(claim, str):
             item['claim'] = claim
+        from .qa_answer import bind
+        binding = bind(answer, claim)
+        if answer_bindings is not None and pos <= len(answer_bindings):
+            candidate = answer_bindings[pos-1]
+            s = candidate['span']
+            if answer[s['start']:s['end']] != claim or s['text'] != claim:
+                raise ValueError('程序回答位置与正文不一致。')
+            binding = candidate
+        item['answer_binding'] = binding
         extended = any(k in raw for k in ('subject', 'basis', 'quotes'))
-        if extended and not locate(answer, claim):
-            issues.append('陈述未对应草稿中的原句。')
+        if extended and binding['state'] != 'bound':
+            issues.append('陈述在草稿中重复出现，无法唯一绑定。' if binding['state'] == 'ambiguous'
+                          else '陈述未对应草稿中的原句。')
         tags = raw.get('sources')
         if not isinstance(tags, list) or any(not isinstance(t, str) or t not in pool for t in tags):
             issues.append('来源编号不属于本轮实际送达来源。')
@@ -88,8 +121,8 @@ def audit_map(answer, proposed, excerpts):
             issues.append('缺少所谈对象。')
         else:
             item['subject'] = subject
-        if basis not in ('direct', 'inference', 'not_located'):
-            issues.append('依据类型必须为直接描述、推断或尚未定位。')
+        if basis not in ('direct', 'inference', 'metadata', 'not_located'):
+            issues.append('依据类型必须为直接描述、推断、程序记录或尚未定位。')
         else:
             item['basis'] = basis
         quotes = raw.get('quotes')
@@ -100,9 +133,34 @@ def audit_map(answer, proposed, excerpts):
         for q in quotes:
             if not isinstance(q, dict) or not isinstance(q.get('source'), str) or q['source'] not in tags:
                 issues.append('原句引用了未绑定的来源。')
+                if isinstance(q, dict) and 'anchor_id' in q:
+                    issues.append('证据锚点无效：未绑定本轮实际来源。')
                 continue
             tag = q['source']
-            found = locate(pool[tag]['text'], q.get('quote'))
+            if 'anchor_id' in q:
+                try:
+                    if not anchor_trial or basis == 'metadata':
+                        raise ValueError('证据锚点无效：本轮未启用原文锚点试验，或将其误作程序记录。')
+                    from .qa_anchors import resolve
+                    found = resolve(pool[tag], q['anchor_id'])
+                    # Additional copied text remains subject to the old strict
+                    # locator. An anchor cannot make a known bad quote disappear.
+                    if 'quote' in q and not locate(found['quote'], q['quote']):
+                        raise ValueError('证据锚点无效：附带引句不在所选原文中，不能用锚点绕过原句检查。')
+                    item['quotes'].append({'source': tag, **found})
+                    quoted.add(tag)
+                except ValueError as exc:
+                    issues.append(str(exc))
+                continue
+            found = locate(pool[tag]['text'], q.get('quote')) if basis != 'metadata' else None
+            if not found and isinstance(q.get('quote'), str):
+                from .qa_evidence import source_metadata
+                # A metadata quote must match a complete known field, not an
+                # arbitrary substring of a URL/date or model-invented metadata.
+                for field, value in source_metadata(pool[tag]).items():
+                    if _canonical(q['quote'])[0].strip() == _canonical(value)[0].strip():
+                        found = {'quote': value, 'kind': 'program_metadata', 'field': field}
+                        break
             if not found:
                 issues.append(f'[{tag}] 中无法定位所给原句（仅允许空白及明确排版等价）。')
                 continue
@@ -119,11 +177,15 @@ def audit_map(answer, proposed, excerpts):
         if item['issues']:
             item['state'] = 'invalid'
             result['issues'].extend(f"{item['id']}：{s}" for s in dict.fromkeys(item['issues']))
-        item['blocking_issues'] = [s for s in item['issues'] if '中无法定位所给原句' in s]
+        item['blocking_issues'] = [s for s in item['issues'] if '中无法定位所给原句' in s or '证据锚点无效' in s]
         item['warnings'] = [s for s in item['issues'] if s not in item['blocking_issues']]
         result['blocking_issues'].extend(f"{item['id']}：{s}" for s in item['blocking_issues'])
         if any(q.get('normalization') for q in item['quotes']):
             item['warnings'].append('原句按明确排版等价定位；展示保留原始字符。')
+        if any(q.get('kind') == 'program_metadata' for q in item['quotes']):
+            item['warnings'].append('匹配程序记录，仅用于来源、获取时间或版本说明，不是论文原句或语义支持证明。')
+        if any(q.get('kind') == 'source_anchor' for q in item['quotes']):
+            item['warnings'].append('试验锚点原文由程序回填；位置有效不代表对象归属或语义支持已通过。')
         result['warnings'].extend(f"{item['id']}：{s}" for s in item['warnings'])
     result['state'] = ('invalid' if result['issues'] else
                        'legacy' if any(i['state'] == 'legacy' for i in result['items']) else 'recorded')

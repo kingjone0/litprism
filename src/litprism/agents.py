@@ -149,6 +149,16 @@ class QAAgent:
                        +'请仅依据上述片段作答，并在每条结论后只标注片段编号（如 [P1]），不生成页码；来源链接由程序展示真实页码。'
                        +'未提供的论文或章节不能声称已读完，题录/摘要不等于全文。'
                        +'证据不足应明确拒答，不能依据历史回答补事实。')
+            if self.cfg.qa.evidence_anchor_trial:
+                from .qa_anchors import catalog
+                content += '\n\n【试验定位锚点（程序生成，不是语义结论）】\n'+json.dumps(catalog(excerpts), ensure_ascii=False)
+                system += ('\n本轮开启原文锚点小范围试验。回答使用answer_units，每项保留text/subject/basis/sources结构；'
+                           'answer_units各项原文quotes优先只选择本轮目录中该来源的anchor_id，形如'
+                           '{"source":"P1","anchor_id":"qa_…"}，不要再复制quote。'
+                           '原文由程序按材料版本和字符范围回填，不得发明锚点或引用其他来源的锚点。'
+                           '程序记录仍使用metadata及实际完整字段。锚点位置正确不代表能支持陈述。')
+                system += ('优先选择覆盖实际依据的短句/短段锚点；需要多句或多个片段时分别列出各自锚点，'
+                           '不得把邻近内容自动当成依据，短段边界不认证语义完整。')
             return [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]
         from .context.dialogue import is_followup
         hits, res.retrieval = retrieve(self.kb, question, dialogue.query(question, paper_ids), paper_ids=paper_ids,
@@ -202,8 +212,8 @@ class QAAgent:
                 data = client.chat_json(messages, task='qa')
                 if not isinstance(data, dict):
                     raise ValueError('模型没有返回 JSON 对象。')
-                if not isinstance(data.get('answer'), str) or not data['answer'].strip():
-                    raise ValueError('模型没有返回非空回答文本。')
+                from .qa_answer import compile_answer
+                answer, mapping, answer_bindings, answer_protocol = compile_answer(data)
                 if 'insufficient_evidence' in data and type(data['insufficient_evidence']) is not bool:
                     raise ValueError('证据不足标记必须为布尔值。')
                 error = None
@@ -250,13 +260,16 @@ class QAAgent:
             res.warnings.append('模型请求失败：'+str(res.request_settings['failure']))
             return finish()
 
-        res.answer = str(data.get("answer") or "").strip()
+        res.answer = answer
         res.draft_answer = res.answer
         res.confidence = str(data.get("confidence") or "unknown")
         res.insufficient_evidence = bool(data.get("insufficient_evidence"))
         res.open_questions = list(data.get("open_questions") or [])
         from .qa_claims import audit_map
-        res.evidence_audit = audit_map(res.draft_answer, data.get('evidence_map'), res.excerpts)
+        res.evidence_audit = audit_map(res.draft_answer, mapping, res.excerpts,
+                                       anchor_trial=self.cfg.qa.evidence_anchor_trial,
+                                       answer_bindings=answer_bindings, answer_protocol=answer_protocol)
+        res.retrieval['evidence_protocol'] = res.evidence_audit['protocol']
         res.evidence_map = res.evidence_audit['items']
 
         self._check_citations(res)

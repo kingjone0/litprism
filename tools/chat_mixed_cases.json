@@ -1,0 +1,69 @@
+{
+  "version": 2,
+  "purpose": "N04 current durable Web mixed evidence, controlled human workflow and source lifecycle",
+  "groups": [
+    {
+      "id": "mixed",
+      "available": ["transformer", "bert"],
+      "focus": ["transformer"],
+      "cases": [
+        {"id": "m1", "web": ["1810.04805"], "question": "以当前 Transformer 论文为重点，结合本轮 BERT 网页摘要，比较 Transformer 原始序列到序列架构与 BERT 编码器的上下文方向。请分别标出论文原文与未审核搜索摘要来源；摘要没有的细节不要补写。", "expect": "区分原始 Transformer 编码器与带因果约束的解码器，BERT 为双向编码器；本地论文与外部摘要均有对应依据，并说明摘要未审核。"},
+        {"id": "m2", "web": ["1706.03762", "1810.04805"], "question": "这两篇论文首次提交分别是哪一年？本轮网页的获取时间或页面修订日期能否当成研究首次提出的年份？请依据本地题录与本轮页面记录区分这些时间，不把首次提出年份说成今天。", "expect": "Transformer 首次提交2017，BERT首次提交2018；获取/修订日期与首次提交日期分开，有对应引用。"}
+      ]
+    },
+    {
+      "id": "abstract",
+      "available": ["transformer"],
+      "focus": ["transformer"],
+      "cases": [
+        {"id": "a1", "web": ["1810.04805"], "question": "请根据本轮取得的 BERT 网页摘要，给出 BERT 预训练的学习率峰值、warmup 比例、batch size 与 Adam 参数。库中重点论文是 Transformer，不能把它的训练参数套到 BERT。若本轮 BERT 摘要未给这些参数，请逐项说明无法据此确定。", "expect": "明确BERT摘要未提供这些训练参数，不冒称已读BERT全文，不套用Transformer参数。"}
+      ]
+    },
+    {
+      "id": "conflict",
+      "available": ["bert"],
+      "focus": ["bert"],
+      "seed_conflict": true,
+      "cases": [
+        {"id": "c1", "web": ["1810.04805"], "question": "BERT 编码器预训练是只用左侧上下文还是同时使用左右上下文？请综合当前论文、人工确认的 BERT 阅读笔记和本轮网页摘要。若不同来源相互矛盾，请分别标明来源与冲突，不因知识已确认就自动认定它正确。", "expect": "发现人工旧笔记的单向说法与BERT原文/摘要双向说法冲突；有逐来源引用，不静默覆盖或盲从可信标签。", "after": "confirm_bert"},
+        {"id": "c2", "web": [], "question": "上一轮核对后的 BERT 预训练知识如何表述？请重新检索本轮可用的人工确认知识，并与论文原文对应，不直接拿旧回答当证据。", "expect": "实际召回新人工确认知识并正确回答双向；旧错误笔记和旧答不作新事实。", "require_curated": true, "after": "withdraw_bert"},
+        {"id": "c3", "web": ["1810.04805"], "question": "BERT 预训练的双向性目前有哪些仍有效的依据？请按本轮可用来源回答；已撤销原始依据的旧确认知识不能当成当前有效证据。", "expect": "剔除上游已失效的派生知识和旧回答，可依据新的未审核BERT网页摘要作有来源的回答，状态清楚。", "exclude_curated": true}
+      ]
+    },
+    {
+      "id": "strict",
+      "available": ["transformer", "bert"],
+      "focus": ["transformer"],
+      "mode": "strict",
+      "cases": [
+        {"id": "s1", "web": ["1810.04805"], "question": "仅依据指定 Transformer 论文，说明编码器和解码器如何处理注意力的方向，不使用额外论文或网页。", "expect": "只用指定论文；联网开关也不触发搜索补充，编码器与因果解码器不混淆。"},
+        {"id": "s2", "web": ["1810.04805"], "empty_scope": true, "scope_mode": "focus", "question": "BERT 预训练是双向的吗？", "expect": "空选择表示不限定，检索相关本地项并使用已开启的本轮网页；回答有实际来源，未审网页不自动入可信库。"}
+      ]
+    },
+    {
+      "id": "version",
+      "available": ["transformer"],
+      "focus": ["transformer"],
+      "cases": [
+        {"id": "v1", "web": [], "question": "Transformer 原论文提出的基本架构是否依赖循环网络或卷积？请给出直接来源。", "expect": "依据原文解释其基本架构基于注意力且不依赖循环/卷积。", "after": "confirm_and_resegment"},
+        {"id": "v2", "web": [], "question": "当前 Transformer 材料与人工知识有什么版本关系？请依据当前材料说明架构是否依赖循环或卷积；如果人工知识基于历史材料，请明确这一点，不把它自动当成新材料的审核结论。", "expect": "当前材料正确回答，历史知识如被使用则明确历史依据；不声称旧审核自动覆盖新版本。"}
+      ]
+    },
+    {
+      "id": "publish",
+      "available": ["transformer"],
+      "focus": ["transformer"],
+      "cases": [
+        {"id": "p1", "web": ["1706.03762"], "publication_fault": true, "question": "Transformer 原论文是否以注意力替代了循环与卷积？结合论文与本轮摘要说明，并分别引用来源。", "expect": "真实响应保存后模拟发布中断，重开/明确续验仅复用已存响应；模型和搜索都不重复发送。"}
+      ]
+    },
+    {
+      "id": "search_unavailable",
+      "available": ["transformer"],
+      "focus": ["transformer"],
+      "cases": [
+        {"id": "u1", "web": [], "real_missing_search": true, "question": "Transformer 原论文架构是否依赖循环或卷积？请说明本轮有没有取得外部搜索证据，并依据真正可用的来源作答。", "expect": "真实未配置Tavily明确告警，仍可依本地原文回答；不造网页来源。"}
+      ]
+    }
+  ]
+}

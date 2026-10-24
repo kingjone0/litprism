@@ -121,12 +121,14 @@ def report_row(row: dict) -> str:
     for field, f in sorted(per_field.items(), key=lambda kv: -kv[1]["total"]):
         for k in tot:
             tot[k] += f[k]
+        state = {'not_analyzed':'未解读', 'not_extracted':'未提取', 'manually_supplemented':'机器未提取/人工已补录',
+                 'unreviewed':'未审核', 'partly_reviewed':'部分已审核', 'reviewed':'已审核'}.get(f['status'],'')
         lines.append(
             f"  {FIELD_LABELS.get(field, field):<10}{f['total']:>5}{f['reviewed']:>5}"
             f"{f['verbatim']:>5}{f['corrected']:>5}{f['rejected']:>5}"
             f"{_pct(f['verbatim'], f['reviewed']):>9}"
             f"{_pct(f['verbatim'] + f['corrected'], f['reviewed']):>8}"
-            f"{_pct(f['reviewed'], f['total']):>9}"
+            f"{_pct(f['reviewed'], f['total']):>9}  {state}"
         )
     lines.append(
         f"  {'合计':<10}{tot['total']:>5}{tot['reviewed']:>5}{tot['verbatim']:>5}"

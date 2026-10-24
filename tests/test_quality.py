@@ -103,7 +103,7 @@ class TestSummarize:
             assert f['precision'] is None
             assert f['usable'] is None
             assert f['recall'] is None
-            assert f['coverage'] == 0.0  # 有陈述、没审 → 确实是 0%
+            assert f['coverage'] == (0.0 if f['total'] else None)
 
     def test_recall_needs_both_sides(self):
         s = summarize(REPORT, [], [{'field': 'limitations'}])
@@ -142,8 +142,45 @@ class TestSummarize:
         s = summarize(REPORT, [])
         assert set(s['definitions']) == {'precision', 'usable', 'coverage', 'recall'}
 
+    def test_all_six_dimensions_remain_visible_without_inventing_data(self):
+        from litprism.manual_claims import FIELD_KEYS
+        s = summarize(REPORT, [])
+        assert {f['field'] for f in s['fields']} == FIELD_KEYS
+        assert not s['has_data'] and s['totals']['total'] == 5
+        missing = [f for f in s['fields'] if not f['total']]
+        assert len(missing) == 3
+        assert all(f['status'] == 'not_extracted' and f['coverage'] is None for f in missing)
+        assert all(f['status'] == 'unreviewed' for f in s['fields'] if f['total'])
+
+    def test_not_analyzed_differs_from_analyzed_empty_and_manual_only(self):
+        missing = empty_summary()
+        empty = summarize({'items': []}, [])
+        manual = summarize({'items': []}, [], [{'field': 'methodology'}])
+        assert len(missing['fields']) == len(empty['fields']) == 6
+        assert all(f['status'] == 'not_analyzed' for f in missing['fields'])
+        assert all(f['status'] == 'not_extracted' for f in empty['fields'])
+        row = next(f for f in manual['fields'] if f['field'] == 'methodology')
+        assert row['status'] == 'manually_supplemented' and row['manual'] == 1
+        assert row['coverage'] is None and row['recall'] is None
+        assert missing['totals']['total'] == empty['totals']['total'] == manual['totals']['total'] == 0
+
+    def test_manual_entry_before_analysis_stays_visible_without_inventing_machine_output(self):
+        s = summarize({}, [], [{'field': 'methodology'}], analysis_present=False)
+        row = next(f for f in s['fields'] if f['field'] == 'methodology')
+        assert row['status'] == 'manually_supplemented' and row['manual'] == 1
+        assert not s['analysis_present'] and s['has_data'] and '尚未解读' in s['note']
+        assert s['totals']['total'] == 0 and row['recall'] is None
+
 
 class TestApi:
+    def test_no_analysis_exposes_six_unknown_rows_not_fake_zero_quality(self, env):
+        _, kb, _, client = env
+        pid = paper(kb)
+        d = client.get(f'/api/paper/{pid}/quality').json()
+        assert not d['analysis_present'] and not d['has_data']
+        assert len(d['fields']) == 6
+        assert all(f['status'] == 'not_analyzed' and f['precision'] is None for f in d['fields'])
+
     def test_endpoint_matches_module(self, env):
         """⭐ 接口与模块必须给出同一组数字。"""
         from litprism.semantics import payload_hash

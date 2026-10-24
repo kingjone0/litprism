@@ -86,6 +86,9 @@ def aggregate(report: dict, reviews: list[dict], manual: list[dict] | None = Non
     for claim in manual or []:
         slot(claim.get('field'))['manual'] += 1
 
+    # A missing dimension is useful information, not a reason to omit the row.
+    for field, _label in FIELDS:
+        slot(field)
     return per_field
 
 
@@ -107,10 +110,19 @@ def _decorate(field: str, c: dict) -> dict:
     }
 
 
-def summarize(report: dict, reviews: list[dict], manual: list[dict] | None = None) -> dict:
+def summarize(report: dict, reviews: list[dict], manual: list[dict] | None = None, *,
+              analysis_present: bool | None = None) -> dict:
     """给接口/界面用的完整摘要：分字段 + 合计 + 口径说明。"""
     per_field = aggregate(report, reviews, manual)
     fields = [_decorate(f, c) for f, c in per_field.items()]
+    if analysis_present is None:
+        analysis_present = bool(report or manual)
+    for row in fields:
+        row['status'] = ('manually_supplemented' if not row['total'] and row['manual'] else
+                         'not_analyzed' if not analysis_present else
+                         'not_extracted' if not row['total'] else
+                         'unreviewed' if not row['reviewed'] else
+                         'partly_reviewed' if row['reviewed'] < row['total'] else 'reviewed')
     # 陈述多的字段排前面，和评测脚本的排序一致
     fields.sort(key=lambda f: (-f['total'], f['label']))
 
@@ -136,11 +148,14 @@ def summarize(report: dict, reviews: list[dict], manual: list[dict] | None = Non
             note = f'已补录 {manual_count} 条；机器陈述尚未人工审核'
     else:
         note = '尚无人工审核与补录：指标不可用，不能按 0 解读'
+    if not analysis_present:
+        note = '尚未解读；'+note
 
     return {
         'fields': fields,
         'totals': total_row,
         'has_data': bool(reviewed or manual_count),
+        'analysis_present': analysis_present,
         'note': note,
         'definitions': {
             'precision': '确认且未改动 / 已审',
@@ -153,4 +168,4 @@ def summarize(report: dict, reviews: list[dict], manual: list[dict] | None = Non
 
 def empty_summary() -> dict:
     """没有任何解读时的空摘要。"""
-    return summarize({}, [], [])
+    return summarize({}, [], [], analysis_present=False)

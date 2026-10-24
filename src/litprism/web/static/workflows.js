@@ -326,13 +326,13 @@ function showConversationDialog() {
   const options = S.papers.map(p => `<option value="p:${esc(p.id)}">${esc(short(p.display_title || p.title, 42))}</option>`).join('') +
     S.collections.map(c => `<option value="g:${esc(c.id)}">分组：${esc(c.name)}</option>`).join('');
   workflowDialog('新建研究对话', `<label>对话名称<input class="input" name="title" value="新研究对话" required></label>
-    <label>文献范围<select class="select" name="scope"><option value="">全部可引用文献与已审核知识</option>${S.selectedPapers.size ? '<option value="selected">知识库中勾选的文献</option>' : ''}${options}</select></label>
-    <label>来源使用<select class="select" name="mode"><option value="focus">以所选文献为重点，补充相关可信知识与联网证据</option><option value="strict">仅限所选文献（全库时仅限本地）</option></select></label>`, async values => {
+    <label>回答范围<select class="select" name="scope"><option value="">全库知识与联网（默认）</option>${S.selectedPapers.size ? '<option value="selected">知识库中勾选的文献</option>' : ''}${options}</select></label>
+    <p class="source-intro">通常直接开始即可。主动选择文献或分组时，仅使用该范围，不额外联网。</p>`, async values => {
     let scope = {};
     if (values.scope === 'selected') scope = { paper_ids: [...S.selectedPapers] };
     else if (values.scope.startsWith('p:')) scope = { paper_ids: [values.scope.slice(2)] };
     else if (values.scope.startsWith('g:')) scope = { collection_id: values.scope.slice(2) };
-    scope.mode = values.mode;
+    if (values.scope) scope.mode = 'strict';
     const r = await api('/api/conversations', { method: 'POST', body: { title: values.title, scope } });
     await loadSidebar();
     openView('chat', { convId: r.id });
@@ -603,7 +603,7 @@ function showSemantic(ref) {
 }
 
 async function loadSemanticDetail(ref) {
-  if (ref.kind === 'chat') return loadChatReview(ref);
+  if (ref.kind === 'chat') return loadChatReview(ref, ref.unitId);
   const box = $('#inspSources');
   const seq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
   box.innerHTML = '<p role="status">正在读取陈述、差异与来源…</p>';
@@ -649,7 +649,8 @@ async function loadSemanticDetail(ref) {
   } catch (error) { if (S.semanticRef === ref && seq === S.evidenceLoadSeq) box.textContent = error.message; }
 }
 
-async function loadChatReview(ref) {
+async function loadChatReview(ref, openUnitId = null) {
+  delete ref.unitId;
   const box = $('#inspSources');
   const seq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
   box.innerHTML = '<p role="status">正在读取回复与原文…</p>';
@@ -660,29 +661,37 @@ async function loadChatReview(ref) {
     const last = d.reviews.at(-1);
     const confirmed = last?.action === 'confirm';
     const sources = [...d.sources].sort((a,b) => Number(b.cited)-Number(a.cited));
+    const unitList = d.units?.length ? `<section class="qa-unit-list" aria-label="逐条核对与入库"><h4>逐条整理（${d.units.length} 条）</h4>
+      <p class="source-intro">展开条目核对证据，按需保存为可信知识。</p>
+      <p class="source-intro qa-review-progress" role="status" data-review-summary-state="${esc(d.review_summary.state)}">${esc(d.review_summary.label || `尚未整理 · ${d.units.length} 条可选入库`)}</p>
+      ${d.units.map(u => `<details class="qa-unit-row" data-unit-id="${esc(u.id)}"><summary data-qa-unit="${esc(u.id)}"><span class="reading-text">${esc(u.text)}</span><span class="source-intro qa-unit-row-state">${esc(unitDecisionLabel(u))}</span></summary><div data-unit-slot></div></details>`).join('')}
+      ${d.review_mode === 'reply' ? '<p class="source-intro">此回复已有整答裁决，请继续使用下方整答入口。</p>' : ''}</section>` : '';
     const audit = d.evidence_audit || {state:'missing', items:[], issues:[]};
-    const mapping = `<details class="qa-claim-map" ${audit.state === 'invalid' ? 'open' : ''}><summary>陈述与原句对应 · 待人工核对</summary>
+    const mapping = `<details class="qa-claim-map"><summary>来源定位记录（辅助）</summary>
       <p class="source-intro">对象和依据类型由模型提出。原句可定位不等于支持结论，请核对是否谈论同一对象。</p>
       ${audit.state === 'missing' ? '<p>此回复没有保存陈述对应记录，请直接对照草稿与原文。</p>' : ''}
-      ${(audit.items || []).map(item => `<section><h4>${esc(item.claim || '未对应到正文的记录')}</h4>
-        <p>${esc(item.subject || '未标明对象')} · ${esc(({direct:'原文描述（模型标注）', inference:'推断（模型标注）', not_located:'尚未定位（模型标注）'})[item.basis] || '旧格式，未提供原句')}</p>
+      ${(audit.items || []).map(item => `<section><h4>${esc(item.answer_binding?.state === 'bound' ? item.answer_binding.span.text : item.claim || '未对应到正文的记录')}</h4>
+        <p class="source-intro qa-answer-binding">${item.answer_binding?.state === 'bound' ? '已对应回答原文' : item.answer_binding?.state === 'ambiguous' ? '回答中有多处相同文字，尚未确定对应位置。' : item.answer_binding ? '模型辅助记录尚未对应回答原文，请对照回复核对。' : '旧记录未保存回答位置，请对照回复核对。'}</p>
+        <p>${esc(item.subject || '未标明对象')} · ${esc(({direct:'原文描述（模型标注）', inference:'推断（模型标注）', metadata:'程序记录（模型标注）', not_located:'尚未定位（模型标注）'})[item.basis] || '旧格式，未提供原句')}</p>
         ${(item.quotes || []).map(q => { const s = sources.find(s => s.tag === q.source);
-          return `<blockquote class="reading-text">${esc(q.quote)}</blockquote>${s ? `<button type="button" class="btn sm" data-qa-map-source="${esc(s.tag)}">查看 [${esc(s.tag)}] ${esc(s.title || '来源已不可用')}${s.page == null ? '' : ' · p.'+esc(s.page)}</button>${s.citable ? '' : `<p class="task-error">${esc(s.issue || '当前来源不可引用')}</p>`}` : ''}`;
+          return `${q.kind === 'program_metadata' ? '<p class="source-intro">程序记录 · 非论文原句</p>' : q.kind === 'source_anchor' ? `<p class="source-intro">${q.granularity === 'legacy_paragraph' ? '旧段落锚点' : '试验锚点'} · 程序回填原文</p>` : ''}<blockquote class="reading-text">${esc(q.quote)}</blockquote>${q.continues_before || q.continues_after ? '<p class="source-intro">这是较长原文的一部分，请查看来源前后文。</p>' : ''}${s ? `<button type="button" class="btn sm" data-qa-map-source="${esc(s.tag)}">查看 [${esc(s.tag)}] ${esc(s.title || '来源已不可用')}${s.page == null ? '' : ' · p.'+esc(s.page)}</button>${s.citable ? '' : `<p class="task-error">${esc(s.issue || '当前来源不可引用')}</p>`}` : ''}`;
         }).join('')}
         ${(item.blocking_issues || item.issues || []).length ? `<p class="task-error">${(item.blocking_issues || item.issues).map(esc).join('；')}</p>` : ''}
         ${(item.warnings || []).length ? `<p class="source-intro">辅助核对提示：${item.warnings.map(esc).join('；')}</p>` : ''}
       </section>`).join('')}
-      <p class="source-intro">记录可能未覆盖全部陈述；确认入库仍需选择实际来源并修订正文。</p></details>`;
+      <p class="source-intro">记录可能未覆盖全部陈述。入库时核对实际来源，正文正确即可保留。</p></details>`;
     const renderSource = s => `<details class="ev-source" ${s.cited ? 'open' : ''}><summary>[${esc(s.tag)}] ${esc(s.title || '来源已不可用')}${s.page == null ? '' : ' · p.'+esc(s.page)} · ${s.cited ? '草稿引用' : '本轮其他来源'}</summary>
       <p class="source-intro">${esc(({paper:'论文原文', knowledge:'知识快照', web:'网页快照'})[s.source_kind] || '来源')} · ${esc(trustLabel(s.trust_level))}${s.issue ? ' · '+esc(s.issue) : ''}</p>
       <blockquote class="reading-text">${esc(s.text || '原文不可读取')}</blockquote>
       <label><input type="checkbox" name="source_tags" value="${esc(s.tag)}" ${!s.citable || confirmed ? 'disabled' : ''}> 以 [${esc(s.tag)}] 支持修订正文</label></details>`;
-    box.innerHTML = `<button class="btn sm" id="btnChatReviewBack">返回来源列表</button><h3>回复人工审核</h3>
-      <p class="source-intro">定位到原文不代表原文支持结论。核对对象、条件与数字后，可修订正文并单独存为知识。</p>
-      <h4>当时的问题</h4><p>${esc(d.question)}</p>
-      <details ${['needs_review','invalid_citation'].includes(d.status) ? 'open' : ''}><summary>原始生成草稿 · 未经人工确认</summary><div class="reading-text qa-review-draft">${esc(d.draft)}</div></details>
+    box.innerHTML = `<button class="btn sm" id="btnChatReviewBack">返回来源列表</button><h3>核对回复与知识入库</h3>
+      <p class="source-intro">人工整理是可选操作，用于修订或保存可信知识；定位原文不等于语义认证。</p>
+      <details><summary>查看本轮问题</summary><p>${esc(d.question)}</p></details>
+      ${unitList}
+      <details ${['needs_review','invalid_citation'].includes(d.status) ? 'open' : ''}><summary>原始模型回复（留档）</summary><div class="reading-text qa-review-draft">${esc(d.draft)}</div></details>
       ${mapping}
       ${d.issues.length ? `<p class="task-error">${d.issues.map(esc).join('；')}</p>` : ''}
+      <details id="qaWholeReplyReview" ${!d.units?.length || d.review_mode === 'reply' ? 'open' : ''}><summary>整答审核（兼容入口）</summary>
       <form id="chatReviewForm"><fieldset><legend>选择支持修订正文的原文</legend>
         <p class="source-intro">请选择至少一处；正文使用对应 [P#]。页码来自原文，显式错页必须修正。</p>
         ${sources.filter(s => s.cited).map(renderSource).join('')}
@@ -692,10 +701,27 @@ async function loadChatReview(ref) {
       <p class="source-intro">入库只保存修订正文与所选原文。人工裁决后，原回复仅供审计，后续回答需重新检索证据。</p>
       <div class="row wrap"><button class="btn primary" name="action" value="confirm" ${confirmed || !sources.some(s => s.citable) ? 'disabled' : ''}>${confirmed ? '已确认入库' : '确认正文并入库'}</button>
       <button class="btn" name="action" value="reject" ${last?.action === 'reject' ? 'disabled' : ''}>拒绝回复</button>
-      <button class="btn" name="action" value="revoke" ${!last?.knowledge_id || last?.action === 'revoke' ? 'disabled' : ''}>撤销入库</button></div><p class="task-error" role="alert"></p></form>
+      <button class="btn" name="action" value="revoke" ${!last?.knowledge_id || last?.action === 'revoke' ? 'disabled' : ''}>撤销入库</button></div><p class="task-error" role="alert"></p></form></details>
       ${last?.knowledge_id ? `<p><a href="#evidence-${esc(last.knowledge_id)}" data-evidence-ref="${esc(last.knowledge_id)}">查看知识快照</a> · ${esc(trustLabel(d.knowledge_status))}</p>` : ''}
       ${d.reviews.length ? `<details open><summary>人工审核历史</summary>${d.reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm:'确认入库', reject:'拒绝', revoke:'撤销'})[r.action])}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
     $('#btnChatReviewBack').onclick = () => { S.semanticRef = null; refreshInspector(); };
+    const rows = $$('.qa-unit-row', box);
+    rows.forEach(row => row.addEventListener('toggle', () => {
+      const slot = $('[data-unit-slot]', row);
+      if (!row.open) {
+        slot.replaceChildren(); delete slot.dataset.loaded;
+        if (ref.unitId === row.dataset.unitId) delete ref.unitId;
+        return;
+      }
+      if (slot.dataset.loaded) return;
+      rows.filter(other => other !== row).forEach(other => {other.open=false;});
+      slot.dataset.loaded='true';
+      loadChatUnitReview(ref, row.dataset.unitId, slot);
+    }));
+    if (d.review_mode === 'units') {
+      $('#chatReviewForm').insertAdjacentHTML('beforebegin', '<p class="source-intro">此回复按条目整理，完成情况见上方。整答兼容入口已停用。</p>');
+      $$('input, textarea, button', $('#chatReviewForm')).forEach(el => { el.disabled = true; });
+    }
     $$('[data-qa-map-source]', box).forEach(button => button.onclick = () => {
       const input = $$('input[name=source_tags]', box).find(el => el.value === button.dataset.qaMapSource);
       if (!input) return;
@@ -716,21 +742,7 @@ async function loadChatReview(ref) {
           reviewed_text:values.get('reviewed_text'), note:values.get('note'), source_tags:values.getAll('source_tags'),
           snapshot_hash:d.snapshot_hash, review_token:d.review_token}});
         toast('回复审核已留档');
-        // Refresh only the reviewed turn, preserving any unsent user question.
-        if (S.semanticRef === ref && S.activeView === 'chat') {
-          try {
-            const conv = S.activeConv;
-            const history = await api('/api/conversations/'+encodeURIComponent(conv)+'/messages');
-            if (S.activeConv === conv && S.activeView === 'chat') {
-              const message = history.items.find(m => m.qa_review_id === ref.id);
-              const link = $$('[data-chat-review]').find(a => a.dataset.chatReview === ref.id);
-              if (message && link) {
-                link.closest('.chat-turn').outerHTML = renderMessage(message);
-                LitUI.bind($('#chatStream'));
-              }
-            }
-          } catch (_) { /* Decision is already durable; reopening refreshes the turn. */ }
-        }
+        await refreshReviewedTurn(ref);
         if (S.semanticRef === ref) await loadChatReview(ref);
       } catch (error) {
         if (form.isConnected) {
@@ -739,6 +751,14 @@ async function loadChatReview(ref) {
         }
       }
     });
+    if (openUnitId) {
+      const row = rows.find(row => row.dataset.unitId === openUnitId);
+      if (row) {
+        const slot = $('[data-unit-slot]', row);
+        slot.dataset.loaded='true'; row.open=true;
+        await loadChatUnitReview(ref, openUnitId, slot);
+      }
+    }
   } catch (error) {
     if (S.semanticRef === ref && seq === S.evidenceLoadSeq) {
       box.innerHTML = `<p role="alert">${esc(error.message)}</p><button class="btn" id="btnRetryChatReview">重新读取</button>`;
@@ -747,7 +767,133 @@ async function loadChatReview(ref) {
   }
 }
 
+async function refreshReviewedTurn(ref) {
+  if (S.semanticRef !== ref || S.activeView !== 'chat') return;
+  try {
+    const conv = S.activeConv;
+    const history = await api('/api/conversations/'+encodeURIComponent(conv)+'/messages');
+    if (S.activeConv !== conv || S.activeView !== 'chat') return;
+    for (const message of history.items.filter(m => m.role === 'assistant')) {
+      const turn = $$('.chat-turn', $('#chatStream')).find(el => el.dataset.messageRef === message.ref);
+      if (turn && (message.qa_review_id === ref.id || turn.dataset.messageStatus !== (message.status || 'answered'))) {
+        turn.outerHTML = renderMessage(message);
+      }
+    }
+    LitUI.bind($('#chatStream'));
+  } catch (_) { /* Decision is durable; reopening refreshes the turn. */ }
+}
+
+async function loadChatUnitReview(ref, uid, target = null) {
+  ref.unitId = uid;
+  const box = target || $('#inspSources');
+  const seq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
+  const endpoint = '/api/chat-reviews/'+encodeURIComponent(ref.id)+'/units/'+encodeURIComponent(uid);
+  box.innerHTML = '<p role="status">正在读取回答单元…</p>';
+  try {
+    const d = await api(endpoint);
+    if (S.semanticRef !== ref || seq !== S.evidenceLoadSeq || target && !target.closest('.qa-unit-row')?.open) return;
+    const active = ['confirm','revise'].includes(d.decision);
+    const actionName = {confirm:'确认入库',revise:'修订入库',reject:'拒绝',revoke:'撤销'};
+    const preferredTags = [...new Set([...d.suggested_evidence.map(q => q.source), ...d.original_evidence.map(q => q.source), ...d.sources])];
+    const priority = s => preferredTags.includes(s.tag) ? preferredTags.indexOf(s.tag) : preferredTags.length;
+    const available = [...d.sources_available].sort((a,b) => priority(a)-priority(b));
+    box.innerHTML = `<button class="btn sm" id="btnUnitReviewBack">${target ? '收起此条' : '返回回复审核'}</button>
+      ${target ? '' : `<h3>单元人工核对</h3><h4>原回答单元 · 只读</h4><blockquote class="reading-text qa-unit-original">${esc(d.text)}</blockquote>`}
+      <p class="source-intro">状态：${esc(actionName[d.decision] || '未审核')}${d.knowledge_status ? ' · '+esc(trustLabel(d.knowledge_status)) : ''}</p>
+      <form id="chatUnitReviewForm"><fieldset><legend>本次采用的证据</legend>
+        <p class="source-intro">原回答或上次人工选择中仍能精确定位的原文已预选。核对正确即可保留，无需重新寻找；需要前后句时再展开补选。</p>
+        <p id="unitEvidenceCount" class="source-intro" role="status">正在读取已选原文…</p>
+        <div id="unitEvidenceChoices"></div>
+        <details class="qa-unit-other-sources"><summary>查找其他来源与原文</summary>
+          <label>按编号、标题或页码筛选<input class="input" type="search" id="qaUnitSourceFilter" placeholder="例如 P19 或论文标题"></label>
+          <label>本轮实际来源<select class="input" id="qaUnitSource">${available.map(s => `<option value="${esc(s.tag)}" ${s.citable ? '' : 'disabled'}>[${esc(s.tag)}] ${esc(s.title)}${s.page == null ? '' : ' · p.'+esc(s.page)}${preferredTags.includes(s.tag) ? ' · 本条相关' : ''}${s.citable ? '' : ' · 来源失效'}</option>`).join('')}</select></label>
+          <button type="button" class="btn sm" id="btnUnitContext">打开来源与前后文</button>
+        </details></fieldset>
+        <label>核对后的单元知识<textarea class="textarea" name="reviewed_text" rows="5" maxlength="20000">${esc(d.suggested_text)}</textarea></label>
+        <label>人工核对依据<textarea class="textarea" name="note" rows="3" maxlength="5000" required placeholder="说明如何核对原文，或说明拒绝、撤销原因"></textarea></label>
+        <p class="source-intro">入库只索引本次修订正文。修订会生成新知识并撤销旧版本，不连带确认整答。</p>
+        <div class="row wrap qa-unit-actions"><button class="btn primary" name="action" value="confirm" ${active ? 'disabled' : ''}>确认此单元并入库</button>
+          <button class="btn" name="action" value="revise" ${active ? '' : 'disabled'}>修订并重新入库</button>
+          <button class="btn" name="action" value="reject" ${d.decision === 'reject' ? 'disabled' : ''}>拒绝此单元</button>
+          <button class="btn" name="action" value="revoke" ${active ? '' : 'disabled'}>撤销此单元入库</button></div>
+        <p class="task-error" role="alert"></p></form>
+      ${d.knowledge_id ? `<p><a href="#evidence-${esc(d.knowledge_id)}" data-evidence-ref="${esc(d.knowledge_id)}">查看单元知识快照</a></p>` : ''}
+      <details><summary>原回答所选证据 · 只读</summary>${d.original_evidence.map(q => `<p>[${esc(q.source)}]</p><blockquote class="reading-text">${esc(q.quote)}</blockquote>`).join('') || '<p>原回答没有保存可定位证据，请人工选择。</p>'}</details>
+      ${d.reviews.length ? `<details><summary>这个单元的审核历史</summary>${d.reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(actionName[r.action] || r.action)}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
+    $('#btnUnitReviewBack').onclick = () => {if (target) target.closest('.qa-unit-row').open=false; else loadChatReview(ref);};
+    const form = $('#chatUnitReviewForm'), loaded = new Set();
+    const preselected = new Set(d.suggested_evidence.map(q => q.source+':'+q.anchor_id));
+    const modelSelected = new Set(d.original_evidence.map(q => q.source+':'+q.anchor_id));
+    const updateCount = () => { $('#unitEvidenceCount').textContent = `本次已选择 ${$$('[data-unit-anchor]:checked', form).length} 段原文。仅保存明确勾选的证据。`; };
+    form.addEventListener('change', updateCount);
+    async function addContext(tag) {
+      if (!tag || loaded.has(tag)) return;
+      loaded.add(tag);
+      const container = document.createElement('section');
+      container.className = 'qa-unit-context';
+      container.innerHTML = `<p role="status">正在读取 [${esc(tag)}] 原文…</p>`;
+      $('#unitEvidenceChoices').appendChild(container);
+      try {
+        const c = await api(endpoint+'/sources/'+encodeURIComponent(tag));
+        if (!form.isConnected || S.semanticRef !== ref || seq !== S.evidenceLoadSeq) return;
+        const chosen = c.anchors.filter(a => preselected.has(tag+':'+a.id));
+        const others = c.anchors.filter(a => !preselected.has(tag+':'+a.id));
+        const renderAnchor = a => `<label class="qa-unit-evidence"><input type="checkbox" data-unit-anchor="${esc(a.id)}" data-unit-source="${esc(tag)}" ${preselected.has(tag+':'+a.id) ? 'checked' : ''}> ${modelSelected.has(tag+':'+a.id) ? '原回答已选 · 核对后保留' : preselected.has(tag+':'+a.id) ? '上次人工已选 · 核对后保留' : '补充可选原文'}<span class="reading-text">${esc(a.quote)}</span>${a.continues_before || a.continues_after ? '<span class="source-intro">此段有前后延续，请一并核对。</span>' : ''}</label>`;
+        container.innerHTML = `<h4>[${esc(c.tag)}] ${esc(c.title)}${c.page == null ? '' : ' · p.'+esc(c.page)}</h4>
+          ${chosen.map(renderAnchor).join('')}
+          ${!chosen.length ? '<p class="source-intro">此来源尚无可沿用的细原文选择，请展开下方内容明确勾选。</p>' : ''}
+          ${others.length ? `<details class="qa-unit-supplement" ${!chosen.length ? 'open' : ''}><summary>补选同一来源的前后句（${others.length} 段）</summary>${others.map(renderAnchor).join('')}</details>` : ''}
+          <details><summary>查看完整来源前后文</summary><p class="source-intro">${esc(c.notice)}</p><blockquote class="reading-text">${esc(c.text)}</blockquote></details>`;
+        updateCount();
+      } catch (error) {
+        if (!form.isConnected) return;
+        loaded.delete(tag);
+        container.innerHTML = `<p class="task-error">${esc(error.message)}</p><button type="button" class="btn sm">重新读取 [${esc(tag)}]</button>`;
+        $('button', container).onclick = () => { container.remove(); addContext(tag); };
+      }
+    }
+    $('#btnUnitContext').onclick = () => addContext($('#qaUnitSource').value);
+    $('#qaUnitSourceFilter').oninput = event => {
+      const query = event.target.value.trim().toLocaleLowerCase();
+      const select = $('#qaUnitSource');
+      [...select.options].forEach(option => {option.hidden = !option.textContent.toLocaleLowerCase().includes(query);});
+      if (select.selectedOptions[0]?.hidden) select.value = [...select.options].find(o => !o.hidden && !o.disabled)?.value || '';
+    };
+    if (d.review_mode === 'reply') $$('input, textarea, select, button', form).forEach(el => {el.disabled=true;});
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const values = new FormData(form), controls = $$('fieldset, button, input, textarea, select', form), disabled = controls.map(el => el.disabled);
+      form.setAttribute('aria-busy', 'true');
+      controls.forEach(el => {el.disabled=true;});
+      try {
+        const evidence = $$('[data-unit-anchor]:checked', form).map(el => ({source:el.dataset.unitSource,anchor_id:el.dataset.unitAnchor}));
+        await api(endpoint+'/review', {method:'POST',body:{action:event.submitter?.value,reviewed_text:values.get('reviewed_text'),
+          note:values.get('note'),evidence,snapshot_hash:d.snapshot_hash,review_token:d.review_token}});
+        toast('单元裁决已留档');
+        await refreshReviewedTurn(ref);
+        if (S.semanticRef === ref && seq === S.evidenceLoadSeq && form.isConnected) {
+          const scrollTop = $('#inspSources').scrollTop;
+          await loadChatReview(ref, uid);
+          if (S.semanticRef === ref) $('#inspSources').scrollTop=scrollTop;
+        }
+      } catch (error) {
+        if (form.isConnected) { $('[role=alert]', form).textContent=error.message; controls.forEach((el,i) => {el.disabled=disabled[i];}); form.removeAttribute('aria-busy'); }
+      }
+    });
+    for (const tag of new Set(d.suggested_evidence.length ? d.suggested_evidence.map(q => q.source) : preferredTags.slice(0,1))) await addContext(tag);
+    if (form.isConnected && S.semanticRef === ref && seq === S.evidenceLoadSeq) updateCount();
+    if (d.review_mode === 'reply') $$('input, textarea, select, button', form).forEach(el => {el.disabled=true;});
+  } catch (error) {
+    if (S.semanticRef === ref && seq === S.evidenceLoadSeq) {
+      box.innerHTML = `<p role="alert">${esc(error.message)}</p><button class="btn" id="btnUnitRetry">重新读取单元</button>`;
+      $('#btnUnitRetry').onclick = () => loadChatUnitReview(ref, uid, target);
+    }
+  }
+}
+
 document.addEventListener('click', event => {
+  const unit = event.target.closest('[data-chat-unit-review]');
+  if (unit) { event.preventDefault(); showSemantic({kind:'chat', id:unit.dataset.chatUnitReview, unitId:unit.dataset.chatUnit}); return; }
   const chat = event.target.closest('[data-chat-review]');
   if (chat) { event.preventDefault(); showSemantic({kind:'chat', id:chat.dataset.chatReview}); return; }
   const link = event.target.closest('[data-semantic-claim]');

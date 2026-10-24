@@ -28,6 +28,26 @@ class AcceptanceModel:
 
     def chat_json(self, messages, *, task=None):
         question = messages[-1]['content'].split('【问题】', 1)[-1] if task == 'qa' else ''
+        if task == 'qa' and ('anchortrialmarker' in question or 'unboundmappingmarker' in question or 'unitreviewmarker' in question or 'unitknowledgefollowmarker' in question):
+            anchors = json.loads(messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n')[1])
+            a = next((a for a in anchors if 'unitknowledgefollowmarker' in a['preview']), anchors[0]) if 'unitknowledgefollowmarker' in question else anchors[0]
+            text = f'隔离试验中选定原文的转述。[{a["source"]}]'
+            mapped = {'subject': '离线流程试验', 'basis': 'direct', 'sources': [a['source']],
+                      'quotes': [{'source': a['source'], 'anchor_id': a['anchor_id']}]}
+            if 'unboundmappingmarker' in question:
+                return {'answer': text, 'evidence_map': [dict(mapped, claim='模型另外概括的句子。['+a['source']+']')]}
+            if 'unitknowledgefollowmarker' in question:
+                return {'answer_units': [dict(mapped, text='已重新检索单元人工知识。['+a['source']+']')]}
+            if 'unitreviewmarker' in question:
+                return {'answer_units': [dict(mapped, text='originalmarker，并使用八块GPU。['+a['source']+']'),
+                    dict(mapped, text='UNREVIEWED_UI_UNIT_MARKER ['+a['source']+']')]}
+            return {'answer_units': [dict(mapped, text=text)]}
+        if task == 'qa' and 'metadatamarker' in question:
+            import re
+            tag, stamp = re.search(r'\[(P\d+)\] 本轮搜索摘要[^\n]*获取时间：([^\s]+)', messages[-1]['content']).groups()
+            text = f'本轮网页摘要的获取时间为 {stamp}。[{tag}]'
+            return {'answer': text, 'evidence_map': [{'claim': text, 'subject': '来源获取记录',
+                'basis': 'metadata', 'sources': [tag], 'quotes': [{'source': tag, 'quote': '获取时间：'+stamp}]}]}
         if task == 'qa' and ('mixedwebmarker' in question or 'mixedcorrectedmarker' in question):
             import re
             content = messages[-1]['content'].split('【片段】',1)[-1].split('【程序送达记录】')[0]
@@ -117,6 +137,8 @@ def main():
         from litprism.web import evidence_routes
         from litprism.knowledge import create_source
         def offline_search(_kb, _cfg, query):
+            if not any(marker in query for marker in ('mixedwebmarker', 'metadatamarker')):
+                return {'items': []}
             return {'items':[create_source(kb,kind='web',title='混合取证外部快照',
                 content='alphatopic mixedwebfixture 本轮实际取得的搜索摘要。',url='https://example.org/mixed-evidence')]}
         evidence_routes.discover_web = offline_search
@@ -126,17 +148,23 @@ def main():
         def material_fixture(req: dict):
             pid = req.get('paper_id')
             if not pid:
-                pid = kb.add_paper(title='材料版本验收', verify_level='verified', material_level='fulltext')
+                pid = kb.add_paper(title='未解读质量验收' if req.get('unanalysed') else '材料版本验收',
+                                   verify_level='verified', material_level='fulltext')
                 kb.add_chunks(pid, [{'text': '旧版原文：originalmarker。训练使用八块 GPU。', 'page': 1}], level='fulltext')
             elif req.get('replace'):
                 kb.add_chunks(pid, [{'text': '新版原文：replacementmarker。训练使用十六块 GPU。', 'page': 2}], level='fulltext')
-            if not req.get('replace'):
+            if not req.get('replace') and not req.get('unanalysed'):
                 chunk = kb.get_chunks(pid)[0]
                 kb.save_analysis(pid, {'research_question': chunk['text'] + ' [P1]', '_model': 'offline:material-fixture',
                     '_citations': [{'tag': 'P1', 'chunk_id': chunk['id'], 'paper_id': pid, 'page': chunk['page']}],
                     '_semantic_review': {'items': [{'id': 'materialclaim', 'field': 'research_question',
                         'text': chunk['text'], 'candidate_tags': ['P1'], 'status': 'needs_review'}]}})
             return {'paper_id': pid, 'chunks': kb.get_chunks(pid), 'materials': kb.list_materials(pid)}
+
+        @app.post('/api/acceptance/anchor-trial')
+        def anchor_trial_fixture():
+            cfg.qa.evidence_anchor_trial = True
+            return {'trial': True}
 
         harden(app, 'acceptance-only')
         sock = socket.socket()

@@ -20,12 +20,12 @@ def material_text(excerpts):
     for e in excerpts:
         head = f"[{e['tag']}] 论文：《{e['title']}》"
         if e.get('source_kind') != 'paper':
+            from .qa_evidence import source_metadata
+            metadata = source_metadata(e)
             label = '本轮搜索摘要 · 未人工审核' if e.get('web_grant_id') and e.get('trust_level') == 'pending' else '人工确认的'+('网页快照' if e['source_kind'] == 'web' else '知识条目')
-            head = f"[{e['tag']}] {label}：《{e['title']}》 地址：{e.get('url') or '用户知识条目'}（不是自动核验的论文）"
-            if e.get('acquired_at'):
-                head += ' 获取时间：'+e['acquired_at']
-            if (e.get('dependency_status') or {}).get('state') == 'historical':
-                head += '【历史版本依据，不代表当前材料结论】'
+            head = f"[{e['tag']}] {label}：《{e['title']}》 "+metadata['source_context']
+            if metadata.get('acquired_at'):
+                head += ' '+metadata['acquired_at']
         if e.get('year'):
             head += f"（{e['year']}）"
         loc = []

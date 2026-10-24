@@ -153,10 +153,12 @@ def test_old_snapshot_without_map_is_readable_without_inventing_one(env):
     assert d['evidence_audit']['state'] == 'missing' and not d['evidence_audit']['items']
 
 
-def test_durable_response_replay_retains_exact_mapping_after_publication_interruption(env, monkeypatch):
+@pytest.mark.parametrize('units', [False, True])
+def test_durable_response_replay_retains_exact_mapping_after_publication_interruption(env, monkeypatch, units):
     from test_chat_runs import wait
     from litprism import qa_reviews
-    pid, client, model = configure(env, {'answer':ANSWER,'evidence_map':proposal()})
+    value = {'answer_units': [dict(proposal()[0], text=ANSWER)]} if units else {'answer':ANSWER,'evidence_map':proposal()}
+    pid, client, model = configure(env, value)
     _, kb, _, _ = env
     cid = kb.add_conversation('Durable claim audit',scope={'paper_ids':[pid]})
     save = qa_reviews.save
@@ -172,7 +174,10 @@ def test_durable_response_replay_retains_exact_mapping_after_publication_interru
     assert wait(client,rid)['status'] == 'completed'
     result = client.get('/api/chat-runs/'+rid+'/result').json()
     review = client.get('/api/chat-reviews/'+result['assistant']['qa_review_id']).json()
-    assert review['evidence_audit'] == audit(proposal())
+    from litprism.qa_answer import compile_answer
+    answer, records, bindings, protocol = compile_answer(value)
+    assert review['evidence_audit'] == audit_map(answer, records, [{'tag': 'P1', 'text': TEXT}],
+                                               answer_bindings=bindings, answer_protocol=protocol)
     assert len(model.calls) == calls == 1
 
 
@@ -209,3 +214,14 @@ def test_bounded_typography_keeps_original_offsets_and_does_not_assert_semantics
 def test_typography_does_not_normalize_negation_numbers_or_objects(original,quote):
     result=audit_map(ANSWER,proposal(quotes=[{'source':'P1','quote':quote}]),[{'tag':'P1','text':original}])
     assert result['blocking_issues']
+
+
+def test_presentation_notices_do_not_turn_valid_source_locations_into_review_defects():
+    from litprism.qa_claims import presentation_warnings
+    note = 'claim-1：试验锚点原文由程序回填；位置有效不代表对象归属或语义支持已通过。'
+    defect = 'claim-2：[P2] 中无法定位所给原句（仅允许空白及明确排版等价）。'
+    unknown = 'claim-3：试验锚点原文存在未知风险。'
+    messages = [note, defect, unknown]
+    warnings, notices = presentation_warnings(messages)
+    assert notices == [note] and warnings == [defect, unknown]
+    assert messages == [note, defect, unknown]

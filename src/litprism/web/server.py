@@ -422,13 +422,13 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.post("/api/conversations")
     def create_conversation(req: dict):
-        from ..scope import paper_scope, chat_strict
+        from ..scope import chat_paper_scope, chat_strict
         scope = req.get('scope')
         if scope is not None:
             if not isinstance(scope, dict):
                 raise HTTPException(400, '范围格式不正确。')
             try:
-                paper_scope(kb, scope)
+                chat_paper_scope(kb, scope)
                 chat_strict(scope, '')
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
@@ -503,14 +503,19 @@ def create_app(cfg: Config) -> FastAPI:
             m['usage'] = meta.get('usage') or {}
             m['retrieval'] = meta.get('retrieval') or {}
             m['guard_issues'] = meta.get('guard_issues') or []
-            m['audit_warnings'] = meta.get('audit_warnings') or []
+            from ..qa_claims import presentation_warnings
+            m['audit_warnings'], m['audit_notices'] = presentation_warnings(meta.get('audit_warnings') or [])
             m['scope_snapshot'] = meta.get('scope_snapshot')
             m['qa_review_id'] = meta.get('qa_review_id')
             from ..qa_reviews import latest_decision
             m['human_review'] = latest_decision(kb, m['qa_review_id'])
             if m['role'] == 'assistant' and m['human_review'] and m['status'] == 'answered':
                 m['status'] = 'human_'+m['human_review']['action']
-                m['content'] = '此回复已完成人工裁决，原始草稿留在审核记录中。请查看修订正文与知识快照。'
+                if m['human_review']['action'] != 'partial':
+                    m['content'] = '此回复已完成人工裁决，原始草稿留在审核记录中。请查看修订正文与知识快照。'
+            if m['qa_review_id'] and m['role'] == 'assistant' and m['status'] in ('answered', 'human_partial'):
+                from ..qa_unit_reviews import display_units
+                m['unit_review'] = display_units(kb, m['qa_review_id'])
             audit_links = evidence_links(saved_cites, m.get('content') or '')
             if m['role'] == 'assistant' and m['status'] == 'invalid_citation':
                 m['content'] = '回答的来源校验未通过，已阻止展示结论。请核对原文后重新提问。'
@@ -550,10 +555,10 @@ def create_app(cfg: Config) -> FastAPI:
         scope = conv.get('scope') or {}
         if isinstance(scope, str):
             scope = json.loads(scope)
-        from ..scope import paper_scope, chat_strict
+        from ..scope import chat_paper_scope, chat_strict
         try:
-            paper_ids = paper_scope(kb, scope)
-            strict_scope = chat_strict(scope, question) or paper_ids == []
+            paper_ids = chat_paper_scope(kb, scope)
+            strict_scope = chat_strict(scope, question)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         scope_snapshot = {'scope': scope, 'paper_ids': paper_ids, 'strict': strict_scope}
@@ -646,14 +651,18 @@ def create_app(cfg: Config) -> FastAPI:
         proc = genui_process(content, kb)
         auto_compact = None
         def result_payload():
+            from ..qa_unit_reviews import display_units
+            from ..qa_claims import presentation_warnings
+            audit_warnings, audit_notices = presentation_warnings(ans.evidence_audit.get('warnings', []))
             return {
                 "user": user_msg,
                 "assistant": {**asst, "segments": proc.segments, "citation_check": check_dict, 'model': ans.model,
                               'source_links': evidence_links(cites, ans.answer), 'candidate_links': candidates,
                               'source_warning': source_warning, 'reasoning': ans.reasoning,
                               'request_settings': ans.request_settings, 'status': ans.status,
-                              'guard_issues': ans.guard_issues, 'audit_warnings': ans.evidence_audit.get('warnings', []),
+                              'guard_issues': ans.guard_issues, 'audit_warnings': audit_warnings, 'audit_notices': audit_notices,
                               'qa_review_id': qa_review_id,
+                              'unit_review': display_units(kb, qa_review_id) if qa_review_id and ans.status == 'answered' else None,
                               'usage': ans.usage, 'retrieval': ans.retrieval, 'scope_snapshot': scope_snapshot},
                 "confidence": getattr(ans, "confidence", None),
                 "insufficient_evidence": bool(getattr(ans, "insufficient_evidence", False)),

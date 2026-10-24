@@ -3,7 +3,7 @@
 三条底线：
 1. 严格限定时，改范围后证据只来自新范围；默认重点模式允许补充；
 2. 范围含不存在/已删除文献时明确报错，**不得静默扩为全库**；
-3. ``paper_ids: []`` 表示"一篇都不选"，不是"全部"。
+3. 聊天 ``paper_ids: []`` 表示不限定；批量操作的空列表仍不操作任何文献。
 """
 
 from __future__ import annotations
@@ -85,17 +85,18 @@ class TestPatch:
         r = client.patch(f'/api/conversations/{conv}', json={'scope': {'paper_ids': [pid]}})
         assert r.status_code == 409
 
-    def test_empty_list_is_not_all(self, env):
-        """⭐ 空列表 = 一篇都不选，不是"全部"。"""
+    def test_empty_list_means_unrestricted_chat(self, env):
         _, kb, _, client = env
         paper(kb, title='A', text='aaa evidence')
         conv = make(kb, client)
         r = client.patch(f'/api/conversations/{conv}', json={'scope': {'paper_ids': []}})
         assert r.status_code == 200
         assert r.json()['scope'] == {'paper_ids': []}
-        assert r.json()['paper_count'] == 0
+        assert r.json()['paper_count'] is None
         result = client.post(f'/api/chat/{conv}', json={'question': 'aaa'}).json()
-        assert result['insufficient_evidence'] and result['sources'] == []
+        assert not result['insufficient_evidence'] and result['sources']
+        assert result['assistant']['scope_snapshot']['paper_ids'] is None
+        assert not result['assistant']['scope_snapshot']['strict']
 
     def test_collection_scope(self, env):
         _, kb, _, client = env

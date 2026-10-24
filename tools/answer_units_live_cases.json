@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "purpose": "Three first-attempt QA probes of answer_units and fine anchors; no query expansion, no resends",
+  "groups": [
+    {"id": "simple", "available": ["transformer"], "focus": ["transformer"], "cases": [
+      {"id": "simple", "web": [], "question": "Transformer 原论文提出的基本架构是否依赖循环网络或卷积？请给出直接来源。", "expect": "answer_units遵循；短锚点支持Transformer架构描述，不以定位有效替代语义核对。"}
+    ]},
+    {"id": "cross_sentence", "available": ["transformer"], "focus": ["transformer"], "cases": [
+      {"id": "cross_sentence", "web": [], "question": "Transformer 编码器层和解码器层在子层组成与注意力方向上有什么区别？请结合相关原文说明。", "expect": "编码器双子层与解码器第三子层、编码器自注意力和解码器未来掩码对应；必要时多处分别取证，不拼接来源。"}
+    ]},
+    {"id": "x1", "available": ["transformer", "bert"], "focus": ["transformer", "bert"], "cases": [
+      {"id": "x1", "web": [], "question": "比较 Transformer 与 BERT 的架构、训练目标与主要任务，分别引用两篇原文。", "expect": "保留原x1问题；直接来源与对象/条件/任务集合匹配，不能把BERT第4节11任务和另节CoNLL实验混为一个集合。"}
+    ]}
+  ]
+}

@@ -247,15 +247,15 @@ function parseScope(raw) {
   if (typeof scope === 'string') {
     try { scope = JSON.parse(scope); } catch { scope = null; }
   }
-  if (!scope || typeof scope !== 'object') return { kind: 'all', label: '全部可引用' };
-  if (!('paper_ids' in scope) && !scope.collection_id) return {kind:'all', label:scope.mode === 'strict' ? '仅限本地可引用' : '全库 · 可联网补充', raw:scope};
-  const prefix = scope.mode === 'strict' ? '仅限：' : '重点：';
+  if (!scope || typeof scope !== 'object') return { kind: 'all', label: '全库知识与联网' };
+  if (!('paper_ids' in scope) && !scope.collection_id) return {kind:'all', label:scope.mode === 'strict' ? '原设置：仅本地' : '全库知识与联网', raw:scope};
+  const prefix = scope.mode === 'strict' ? '仅限：' : '原重点：';
   if (scope.collection_id) {
     const group = (S.collections || []).find(c => c.id === scope.collection_id);
     return { kind: 'group', label: `${prefix}${group?.name || '已删除分组'}`, raw: scope };
   }
   const ids = Array.isArray(scope.paper_ids) ? scope.paper_ids : [];
-  if (!ids.length) return { kind: 'empty', label: '未选文献', raw: scope };
+  if (!ids.length) return {kind:'all', label:scope.mode === 'strict' ? '原设置：仅本地' : '全库知识与联网', raw:scope};
   if (ids.length === 1) {
     const p = (S.papers || []).find(x => x.id === ids[0]);
     return { kind: 'papers', label: prefix+short(p?.display_title || p?.title || '1 篇文献', 24), raw: scope };
@@ -274,7 +274,7 @@ function editConversationScope() {
   if (!S.activeConv) return;
   const current = S.convScope?.raw || {};
   const options = [
-    `<option value=""${!current.paper_ids && !current.collection_id ? ' selected' : ''}>全部可引用文献与已审核知识</option>`,
+    `<option value=""${!current.paper_ids?.length && !current.collection_id ? ' selected' : ''}>全库知识与联网（默认）</option>`,
     ...(S.selectedPapers?.size
       ? [`<option value="selected"${current.paper_ids && current.paper_ids.length === S.selectedPapers.size ? ' selected' : ''}>知识库中勾选的文献（${S.selectedPapers.size} 篇）</option>`] : []),
     ...(S.papers || []).map(p => {
@@ -285,13 +285,12 @@ function editConversationScope() {
       `<option value="g:${esc(c.id)}"${current.collection_id === c.id ? ' selected' : ''}>分组：${esc(c.name)}</option>`),
   ].join('');
   workflowDialog('修改文献范围', `<label>文献范围<select class="select" name="scope">${options}</select></label>
-    <label>来源使用<select class="select" name="mode"><option value="focus">以所选文献为重点，补充相关可信知识与联网证据</option><option value="strict" ${current.mode === 'strict' ? 'selected' : ''}>仅限所选文献（全库时仅限本地）</option></select></label>
-    <p class="source-intro">只影响之后的问题；已产生的回答与引用不会改写。</p>`, async values => {
+    <p class="source-intro">默认综合全库可信知识与联网来源。选择文献或分组后，仅使用该范围，不额外联网。只影响之后的问题；历史保留。</p>`, async values => {
     let scope = {};
     if (values.scope === 'selected') scope = { paper_ids: [...S.selectedPapers] };
     else if (values.scope.startsWith('p:')) scope = { paper_ids: [values.scope.slice(2)] };
     else if (values.scope.startsWith('g:')) scope = { collection_id: values.scope.slice(2) };
-    scope.mode = values.mode;
+    if (values.scope) scope.mode = 'strict';
     await api(`/api/conversations/${encodeURIComponent(S.activeConv)}`, { method: 'PATCH', body: { scope } });
     toast('范围已更新');
     await loadChat();
@@ -594,7 +593,7 @@ async function loadPaperDetail(versionId = null) {
       try {
         const r = await api('/api/conversations', {
           method: 'POST',
-          body: { title: short(p.display_title || p.title || '研究对话', 28), scope: { paper_ids: [p.id] } },
+          body: { title: short(p.display_title || p.title || '研究对话', 28), scope: { paper_ids: [p.id], mode: 'strict' } },
         });
         await loadSidebar();
         openView('chat', { convId: r.id });
@@ -687,14 +686,16 @@ async function loadQuality(pid) {
     if (summary) {
       summary.textContent = d.has_data
         ? `已审 ${fmtNum(d.totals.reviewed)} / ${fmtNum(d.totals.total)} · 补录 ${fmtNum(d.totals.manual)}`
-        : '尚无数据';
+        : !d.analysis_present ? '尚未解读' : d.totals.total ? `已提取 ${fmtNum(d.totals.total)} 条 · 尚未人工审核` : '当前解读未提取陈述';
     }
-    if (!d.has_data) { table.hidden = true; }
-    else {
+    // Field visibility is independent of whether human quality samples exist.
+    {
       table.hidden = false;
+      const stateLabels = {not_analyzed:'未解读', not_extracted:'未提取', manually_supplemented:'机器未提取，已有人工补录',
+        unreviewed:'未审核', partly_reviewed:'部分已审核', reviewed:'已审核'};
       table.querySelector('tbody').innerHTML = [...(d.fields || []), d.totals].map(f => `
         <tr class="${f.field === '__all__' ? 'quality-total' : ''}">
-          <th scope="row">${esc(f.label)}</th>
+          <th scope="row">${esc(f.label)}${f.status ? `<div class="source-intro">${esc(stateLabels[f.status] || '')}</div>` : ''}</th>
           <td>${fmtNum(f.total)}</td>
           <td>${fmtNum(f.reviewed)}</td>
           <td>${fmtNum(f.verbatim)}</td>
@@ -703,7 +704,7 @@ async function loadQuality(pid) {
           <td>${fmtNum(f.manual)}</td>
           <td>${pctOr(f.precision)}</td>
           <td>${pctOr(f.usable)}</td>
-          <td>${pctOr(f.coverage)}</td>
+          <td>${!f.total && f.status ? esc(f.status === 'not_analyzed' ? '未解读' : '未提取') : pctOr(f.coverage)}</td>
           <td>${pctOr(f.recall)}</td>
         </tr>`).join('');
     }
@@ -997,18 +998,14 @@ async function loadChat() {
                   <span class="composer-label">模型</span>
                   <select class="select" id="chatModel" aria-label="选择模型"></select>
                 </label>
-                <label class="composer-check">
-                  <input type="checkbox" id="chatWebSearch">
-                  <span>联网补充</span>
-                  <span class="composer-note">标明来源 · 入库需审核</span>
-                </label>
+                <span class="composer-note" id="chatEvidencePolicy">${S.convScope.raw?.mode === 'strict' ? '仅使用限定范围' : '综合全库知识与联网 · 标明来源'}</span>
               </div>
               <button class="composer-send" id="btnSend" title="发送（Ctrl + Enter）"
                 aria-label="发送" ${S.sending ? 'disabled' : ''}>${icon('send')}</button>
             </div>
           </div>
           <div class="composer-hint">
-            <span>回答依据原文片段，证据不足时拒答。</span>
+            <span>点击回答来源查看原文；需要整理知识时再核对入库。</span>
             <kbd>Ctrl + Enter</kbd>
           </div>
         </div>
@@ -1060,7 +1057,7 @@ async function askQuestion() {
   stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
 
   try {
-    const r = await startDurableChat(convId, { question: q, web_search: !!$('#chatWebSearch')?.checked });
+    const r = await startDurableChat(convId, { question: q, web_search: S.convScope?.raw?.mode !== 'strict' });
     if (S.activeConv !== convId || S.activeView !== 'chat' || !stream.isConnected) return;
     S.messages.push(r.user, r.assistant);
     S.sources = r.sources || [];
@@ -1132,6 +1129,12 @@ async function doCompact() {
   }
 }
 
+function unitDecisionLabel(unit) {
+  const label = ({unreviewed:'未审核', confirm:'已确认入库', revise:'已修订入库', reject:'已拒绝', revoke:'已撤销'})[unit.decision] || '待核对';
+  return unit.knowledge_id && ['confirm','revise'].includes(unit.decision) && !unit.knowledge_citable
+    ? label+' · '+trustLabel(unit.knowledge_status) : label;
+}
+
 function renderMessage(m, fresh = false) {
   const isUser = m.role === 'user';
   const isCheckpoint = m.kind === 'compact-checkpoint';
@@ -1154,16 +1157,17 @@ function renderMessage(m, fresh = false) {
        </div>` : '';
   const stateLabel = ({refused: '证据不足', invalid_citation: '来源校验未通过', needs_review: '证据归属待核对',
     human_confirm:'已人工整理为知识', human_reject:'已人工拒绝', human_revoke:'知识入库已撤销',
+    human_partial:m.unit_review?.summary?.label || '知识整理记录可在右栏查看',
     error: '调用失败', budget_exceeded: '请求超出窗口'})[m.status];
 
   return `
-    <div class="chat-turn ${isUser ? 'from-user' : 'from-assistant'}" ${m.ref ? `data-message-ref="${esc(m.ref)}"` : ''}>
+    <div class="chat-turn ${isUser ? 'from-user' : 'from-assistant'}" data-message-status="${esc(m.status || 'answered')}" ${m.ref ? `data-message-ref="${esc(m.ref)}"` : ''}>
       <div class="chat-avatar">${isUser ? '我' : icon('prism')}</div>
       <div class="chat-message">
         ${isCheckpoint ? `<div class="badge accent" style="margin-bottom:6px">压缩检查点</div>` : ''}
         ${!isUser && stateLabel ? `<p class="source-intro" role="status">${esc(stateLabel)}</p>` : ''}
         ${!isUser && (m.guard_issues || []).length ? `<p class="source-intro">${m.guard_issues.map(esc).join('；')}</p>` : ''}
-        ${!isUser && (m.audit_warnings || []).length ? '<p class="source-intro">部分辅助对应记录需核对，可在右栏查看；未据此判定正文错误。</p>' : ''}
+        ${!isUser && (m.audit_warnings || []).length ? `<details class="source-intro"><summary>辅助来源记录提示（${m.audit_warnings.length}）</summary><p>不影响正常阅读；整理知识时可在右栏核对。</p></details>` : ''}
         ${!isUser && m.retrieval?.delivered_chunks != null ? `<p class="source-intro">${m.retrieval.mode === 'full_material' && !m.retrieval.window_limited ? '本轮提供指定论文的完整当前材料' : '本轮提供原文片段'} · ${fmtNum(m.retrieval.delivered_chunks)} 块${m.retrieval.window_limited ? ' · 窗口限制，材料未全部送达' : ''}。材料送达不代表内容完整或结论已人工确认。</p>` : ''}
         ${!isUser && m.reasoning ? `<details class="chat-reasoning"><summary>模型思考 · 服务返回内容</summary><p>未经核验，不作为答案或引用依据。</p><pre>${esc(m.reasoning)}</pre></details>` : ''}
         <div class="chat-bubble ${isUser ? 'user' : ''}">${body}</div>

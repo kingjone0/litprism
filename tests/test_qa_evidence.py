@@ -42,6 +42,42 @@ def test_real_table_warning_and_partial_or_abstract_input_are_not_overridden():
         'papers': [{'material_level': 'fulltext', 'complete_current_material': False}]})
 
 
+def mixed_delivery(full_bert=False):
+    sources = [
+        {'tag': 'P1', 'paper_id': 'transformer', 'title': 'Attention Is All You Need', 'source_kind': 'paper'},
+        {'tag': 'P2', 'paper_id': None, 'title': 'BERT: Pre-training of Deep Bidirectional Transformers', 'source_kind': 'web'},
+    ]
+    papers = [{'paper_id': 'transformer', 'material_level': 'fulltext', 'complete_current_material': True}]
+    if full_bert:
+        sources.append(dict(sources[1], tag='P3', paper_id='bert', source_kind='paper'))
+        papers.append({'paper_id': 'bert', 'material_level': 'fulltext', 'complete_current_material': True})
+    return sources, {'sources': sources, 'papers': papers}
+
+
+@pytest.mark.parametrize('answer',[
+    '本轮与 BERT 相关的材料只有一条未人工审核的网页摘要记录 [P2]。',
+    '本轮BERT只有摘要，不能确定训练参数。[P2]',
+    '本轮Attention Is All You Need提供了全文，而BERT只包含摘要。[P2]',
+])
+def test_full_paper_does_not_imply_other_subjects_have_fulltext(answer):
+    sources, delivery = mixed_delivery()
+    assert not material_risks(answer, sources, delivery)
+
+
+def test_same_subject_fulltext_and_global_false_coverage_still_block():
+    sources, delivery = mixed_delivery(full_bert=True)
+    assert material_risks('本轮BERT只有摘要。[P2]', sources, delivery)
+    sources, delivery = mixed_delivery()
+    assert material_risks('本轮只包含摘要。[P2]', sources, delivery)
+    assert not material_risks('不能说本轮只包含摘要。[P2]', sources, delivery)
+
+
+def test_unresolved_subject_is_not_assigned_another_papers_coverage():
+    sources, delivery = mixed_delivery()
+    assert not material_risks('本轮UnresolvedModel只有摘要。', sources, delivery)
+    assert material_risks('本轮所有论文只有摘要。', sources, delivery)
+
+
 def test_manifest_and_focus_instructions_share_actual_request_budget(env):
     cfg, kb, model, _ = env
     pid = paper(kb)

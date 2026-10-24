@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "purpose": "Paired first-attempt real-model acceptance: unchanged strict quotes versus opt-in server backfilled anchors",
+  "groups": [
+    {"id": "hyphen", "available": ["transformer"], "focus": ["transformer"], "cases": [
+      {"id": "v1", "web": [], "question": "Transformer 原论文提出的基本架构是否依赖循环网络或卷积？请给出直接来源。", "expect": "基本架构基于注意力且不依赖循环/卷积；支持原文属于Transformer本身，不用相关工作替代。"}
+    ]},
+    {"id": "mixed", "available": ["transformer"], "focus": ["transformer"], "cases": [
+      {"id": "p1", "web": ["1706.03762"], "question": "Transformer 原论文是否以注意力替代了循环与卷积？结合论文与本轮摘要说明，并分别引用来源。", "expect": "论文和未审核网页摘要分别取证；原文支持架构描述；搜索摘要不当成已审核全文。"}
+    ]},
+    {"id": "abstract", "available": ["transformer"], "focus": ["transformer"], "cases": [
+      {"id": "a1", "web": ["1810.04805"], "question": "请根据本轮取得的 BERT 网页摘要，给出 BERT 预训练的学习率峰值、warmup 比例、batch size 与 Adam 参数。库中重点论文是 Transformer，不能把它的训练参数套到 BERT。若本轮 BERT 摘要未给这些参数，请逐项说明无法据此确定。", "expect": "四项均不能由本轮BERT摘要确定；不套用Transformer参数，不把本轮所有材料说成只有摘要。"}
+    ]},
+    {"id": "cross_model", "available": ["transformer", "bert"], "focus": ["transformer", "bert"], "cases": [
+      {"id": "x1", "web": [], "question": "比较 Transformer 与 BERT 的架构、训练目标与主要任务，分别引用两篇原文。", "expect": "对象归属和直接来源匹配；Transformer翻译序列建模与BERT掩码语言模型/下一句预测分开；不以GPT相关工作充当BERT自身训练目标。"}
+    ]},
+    {"id": "knowledge", "available": ["bert", "rag"], "focus": ["bert", "rag"], "cases": [
+      {"id": "x2", "web": [], "question": "比较 BERT 与 RAG 对知识的利用方式，区分参数化表示和外部检索记忆。", "expect": "BERT参数化表示与RAG外部检索记忆对应各自原文；不能将ELMo/GPT固定特征的相关工作描述套给BERT，不将推断写成直接实验证明。"}
+    ]},
+    {"id": "empty", "available": ["transformer", "bert"], "focus": [], "cases": [
+      {"id": "s2", "web": ["1810.04805"], "question": "BERT 预训练是双向的吗？", "expect": "空选择不限定论文，实际检索相关本地项并取得开启的外部摘要；回答双向性且依据正确，未审网页不自动入库。"}
+    ]}
+  ]
+}

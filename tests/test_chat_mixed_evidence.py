@@ -320,12 +320,59 @@ def test_backup_roundtrip_preserves_web_grants_and_transitive_dependencies(env,m
     finally:other.close()
 
 
-def test_empty_selection_does_not_silently_expand_to_library_or_web(env,monkeypatch):
-    _,kb,_,_=env
-    paper(kb);confirmed(kb)
+@pytest.mark.parametrize('durable',[False,True])
+def test_empty_selection_retrieves_library_knowledge_and_enabled_web(env,monkeypatch,durable):
+    _,kb,model,client=env
+    paper(kb,text='alphatopic selectedmaterial');confirmed(kb)
     calls,_=web_fixture(kb,monkeypatch)
-    _,r=ask(env,scope={'paper_ids':[]},web_search=True)
-    assert r['status']=='refused' and not calls
+    model_reply(model,['selectedmaterial','correctedknowledge','externalactualsummary'])
+    cid=kb.add_conversation('空选择不限定',scope={'paper_ids':[]})
+    if durable:
+        from test_chat_runs import wait
+        request=client.post('/api/conversations/'+cid+'/chat-runs',json={
+            'request_id':'unrestricted-empty','question':'alphatopic','web_search':True})
+        rid=request.json()['run_id'];assert wait(client,rid)['status']=='completed'
+        r=client.get('/api/chat-runs/'+rid+'/result').json()
+    else:r=client.post('/api/chat/'+cid,json={'question':'alphatopic','web_search':True}).json()
+    assert r['status']=='answered' and len(calls)==1
+    assert {s['kind'] for s in r['assistant']['source_links']}=={'paper','knowledge','web'}
+    assert r['assistant']['scope_snapshot']['paper_ids'] is None
+    assert not r['assistant']['scope_snapshot']['strict']
+
+
+def test_unrestricted_selection_still_honors_network_switch_and_explicit_local_mode(env,monkeypatch):
+    _,kb,model,_=env
+    paper(kb,text='alphatopic selectedmaterial');calls,_=web_fixture(kb,monkeypatch)
+    model_reply(model,['selectedmaterial'])
+    _,local=ask(env,scope={'paper_ids':[]},web_search=False)
+    _,strict=ask(env,scope={'paper_ids':[],'mode':'strict'},web_search=True)
+    assert local['status']==strict['status']=='answered' and not calls
+    assert strict['assistant']['scope_snapshot']['paper_ids'] is None
+    assert strict['assistant']['scope_snapshot']['strict']
+
+
+@pytest.mark.parametrize('question,strict',[
+    ('BERT 是只用左侧上下文还是同时使用左右上下文？',False),
+    ('模型 only uses attention 吗？',False),
+    ('only use attention mechanisms?',False),
+    ('请仅依据指定论文回答。',True),
+    ('only use the selected papers',True),
+    ('不要只依据这篇论文，请补充网页。',False),
+])
+def test_content_direction_and_source_instructions_are_distinct(question,strict):
+    from litprism.scope import chat_strict
+    assert chat_strict({'mode':'focus'},question)==strict
+
+
+def test_empty_chat_selection_does_not_expand_batch_operations_or_missing_group(env):
+    from litprism.scope import chat_paper_scope,paper_scope
+    _,kb,_,client=env
+    pid=paper(kb)
+    assert chat_paper_scope(kb,{'paper_ids':[]}) is None
+    assert paper_scope(kb,{'paper_ids':[]})==[]
+    assert client.post('/api/library/batch',json={'paper_ids':[],'operation':'delete'}).status_code==400
+    assert kb.get_paper(pid)
+    with pytest.raises(ValueError):chat_paper_scope(kb,{'paper_ids':[],'collection_id':'missing'})
 
 
 def test_scope_mode_is_persisted_and_invalid_update_is_atomic(env):

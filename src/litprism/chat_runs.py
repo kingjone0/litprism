@@ -36,9 +36,9 @@ def request_input(req, cfg):
 
 def binding(kb, cfg, client, conv_id, scope, user_seq):
     from .config import config_to_dict
-    from .scope import paper_scope
+    from .scope import chat_paper_scope
     conv = kb.resolve_conversation(conv_id)
-    ids = paper_scope(kb, scope) if scope.get('mode') == 'strict' else None
+    ids = chat_paper_scope(kb, scope) if scope.get('mode') == 'strict' else None
     papers = [dict(r) for r in kb._con.execute('SELECT * FROM papers ORDER BY id')
               if ids is None or r['id'] in ids]
     sources = [{k: p.get(k) for k in ('id', 'title', 'year', 'verify_level', 'deleted_at', 'current_material_id', 'material_level')}
@@ -58,6 +58,7 @@ def binding(kb, cfg, client, conv_id, scope, user_seq):
     params = {k: getattr(settings, k, None) for k in ('provider', 'model', 'base_url', 'temperature', 'max_tokens',
               'timeout', 'json_mode', 'model_window_tokens', 'model_max_output_tokens', 'automatic_output')}
     params.update(context=config_to_dict(cfg)['context'], retrieval=config_to_dict(cfg)['retrieval'],
+                  qa=config_to_dict(cfg)['qa'],
                   client=type(client).__module__+'.'+type(client).__qualname__, name=client.name)
     root = Path(__file__).parent
     code = [(p.relative_to(root).as_posix(), p.read_bytes().hex()) for p in sorted(root.rglob('*.py'))]
@@ -91,7 +92,7 @@ class ChatRuns:
         return usage.to_dict()
 
     def create(self, conv_id, req, cfg, client):
-        from .scope import paper_scope, chat_strict
+        from .scope import chat_paper_scope, chat_strict
         key = req.get('request_id')
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', key):
             raise ValueError('请求标识无效，请重新打开会话后发送。')
@@ -108,8 +109,8 @@ class ChatRuns:
             if con.execute("SELECT 1 FROM chat_runs WHERE conversation_id=? AND status IN ('queued','running')", (conv_id,)).fetchone():
                 raise RunConflict('该会话已有未完成请求，请先查看运行记录。')
             scope = json.loads(conv['scope'] or '{}') if isinstance(conv['scope'], str) else conv['scope'] or {}
-            ids = paper_scope(self.kb, scope)
-            strict = chat_strict(scope, request['question']) or ids == []
+            ids = chat_paper_scope(self.kb, scope)
+            strict = chat_strict(scope, request['question'])
             rid = 'cr_'+uuid.uuid4().hex
             user = self.kb.append_message(conv_id, 'user', request['question'], meta={
                 'scope_snapshot': {'scope': scope, 'paper_ids': ids, 'strict': strict}, 'chat_run_id': rid})
@@ -234,10 +235,11 @@ class ChatJournal:
             self.client.last_request_settings = {}
             self.client.last_reasoning = ''
             response = fn()
-            if task == 'qa' and (not isinstance(response, dict) or not isinstance(response.get('answer'), str)
-                                or not response['answer'].strip()
-                                or ('insufficient_evidence' in response and type(response['insufficient_evidence']) is not bool)):
-                raise ValueError('响应格式不完整。')
+            if task == 'qa':
+                from .qa_answer import compile_answer
+                if not isinstance(response, dict) or ('insufficient_evidence' in response and type(response['insufficient_evidence']) is not bool):
+                    raise ValueError('响应格式不完整。')
+                compile_answer(response)  # Validate before persistence without rewriting the response.
             return response
         except Exception as exc:
             status, error = 'failed', type(exc).__name__

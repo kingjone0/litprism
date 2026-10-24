@@ -31,7 +31,7 @@ def snapshot(kb, pid, run=False, version_id=None):
             raise HTTPException(404, '核查记录不存在。')
         paper = {'id': pid, 'title': row['title'], 'url': ''}
         payload = json.loads(row['payload'])
-        if payload.get('_kind') == 'qa_review':
+        if str(payload.get('_kind', '')).startswith('qa_'):
             raise HTTPException(409, '对话回复须使用专用审核入口，重新核对所选来源。')
     else:
         paper = kb.resolve_paper(pid)
@@ -151,10 +151,10 @@ def register_semantics(app, kb):
         同一份数据不允许出现两个数字。
         """
         with kb._tx_lock:
-            paper, _payload, digest, report, records = snapshot(kb, pid)
+            paper, payload, digest, report, records = snapshot(kb, pid)
             manual = list_claims(kb, paper['id'], digest)
             return {'paper_id': paper['id'], 'analysis_hash': digest,
-                    **summarize(report, records, manual)}
+                    **summarize(report, records, manual, analysis_present=bool(payload))}
 
     @app.post('/api/paper/{pid}/semantic/claims')
     def add_claim(pid: str, req: dict):
