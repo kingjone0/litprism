@@ -141,7 +141,7 @@ def turn(home, case_id):
             r=client.patch('/api/conversations/'+cid,json={'scope':{'paper_ids':[pid],'mode':'strict'}}); r.raise_for_status()
         stamp=time.monotonic()
         response=client.post('/api/conversations/'+cid+'/chat-runs',json={
-            'question':case['question'],'request_id':'default-fixed-'+case_id,'web_search':case_id!='restricted'})
+            'question':case['question'],'request_id':manifest.get('request_namespace','default-fixed-')+case_id,'web_search':case_id!='restricted'})
         response.raise_for_status()
         rid=response.json()['run_id']
         write(folder/'run.json', {'run_id':rid})

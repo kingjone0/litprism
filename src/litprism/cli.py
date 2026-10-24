@@ -27,7 +27,7 @@ from .db import KnowledgeBase
 from .extract import analyze_all, analyze_paper, export_notes, format_analysis, _verify_badge
 from .ingest import SUPPORTED_EXT, chunk_document, load_document, summarize_document
 from .invariants import FAILURE_CODES
-from .llm import build_llm, llm_status
+from .llm import active_llm_status, build_active_llm
 from .relations import cluster, compute_relations
 from .search import import_record, search_external, search_local
 from .textutil import extract_doi, truncate
@@ -88,13 +88,16 @@ class Ctx:
         self.cfg = load_config(config_path)
         self.cfg.ensure_dirs()
         self.kb = KnowledgeBase(self.cfg)
+        from .providers import ProviderStore, apply_active_window
+        if ProviderStore(self.kb,self.cfg.data_path).get_active()[0] is not None:
+            apply_active_window(self.cfg,self.kb)
         self._llm = None
         self._verifier = None
 
     @property
     def llm(self):
         if self._llm is None:
-            self._llm = build_llm(self.cfg)
+            self._llm = build_active_llm(self.kb, self.cfg, allow_mock=True)
         return self._llm
 
     @property
@@ -115,7 +118,7 @@ def cmd_init(ctx: Ctx, args) -> int:
     kv("配置文件", cfg.config_path or "（使用内置默认值）")
     kv("数据目录", cfg.data_path)
     kv("数据库", cfg.db_path)
-    llm = llm_status(cfg)
+    llm = active_llm_status(ctx.kb,cfg)
     kv("大模型", f"{llm['provider']} / {llm.get('model', '-')}  [{llm['mode']}]")
     if llm.get("note"):
         warn(llm["note"])
@@ -309,8 +312,12 @@ def cmd_search(ctx: Ctx, args) -> int:
 
 
 def cmd_ask(ctx: Ctx, args) -> int:
+    selected = [ctx.kb.resolve_paper(ref) for ref in (args.paper or [])]
+    if any(p is None for p in selected):
+        err('未找到指定论文；请核对 --paper，未扩大到全库。')
+        return 1
     agent = QAAgent(ctx.kb, ctx.cfg, ctx.llm)
-    paper_ids = [p["id"] for p in (ctx.kb.resolve_paper(r) for r in (args.paper or [])) if p]
+    paper_ids = [p['id'] for p in selected]
     ans = agent.ask(args.question, paper_ids=paper_ids or None, top_k=args.top_k)
     title("问答")
     print(f"  ❓ {ans.question}\n")
@@ -601,10 +608,14 @@ def cmd_stats(ctx: Ctx, args) -> int:
 
 
 def cmd_config(ctx: Ctx, args) -> int:
-    title("当前生效配置")
-    print(json.dumps(config_to_dict(ctx.cfg), ensure_ascii=False, indent=2))
+    title("基础配置与当前模型状态")
+    shown = config_to_dict(ctx.cfg)
+    for source in shown.get('sources',{}).values():
+        if isinstance(source,dict) and source.get('api_key'):
+            source['api_key'] = '***'
+    print(json.dumps(shown, ensure_ascii=False, indent=2))
     print()
-    print(json.dumps(llm_status(ctx.cfg), ensure_ascii=False, indent=2))
+    print(json.dumps(active_llm_status(ctx.kb,ctx.cfg), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1095,24 +1106,10 @@ def cmd_mcp(ctx: Ctx, args) -> int:
     from .mcp.tools import describe_tools, dump_schema
 
     if args.action == "serve":
-        from .mcp.server import main as mcp_main
-
-        warn("即将启动 stdio 服务。此进程会阻塞，等待 MCP 客户端连接。")
-        print(f"  模式：{'只读' if ctx.cfg.mcp.readonly else '读写'}")
-        print("  客户端配置示例（Claude Desktop）：")
-        print(json.dumps(
-            {
-                "mcpServers": {
-                    "litprism": {
-                        "command": sys.executable,
-                        "args": ["-m", "litprism.mcp.server"],
-                    }
-                }
-            },
-            ensure_ascii=False, indent=2,
-        ))
-        print()
-        return mcp_main()
+        from .mcp.server import serve
+        # stdout belongs exclusively to the MCP transport. Ctx owns this DB.
+        serve(kb=ctx.kb,cfg=ctx.cfg)
+        return 0
 
     if args.action == "tools":
         title("MCP 工具与资源")
@@ -1436,7 +1433,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(ctx, args)
     except KeyboardInterrupt:
-        print("\n  已中断")
+        print("\n  已中断",file=sys.stderr)
         return 130
     except Exception as e:  # noqa: BLE001
         err(f"{type(e).__name__}: {e}")

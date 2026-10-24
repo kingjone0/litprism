@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from .config import Config
 from .db import KnowledgeBase
-from .prompts import QA_SYSTEM, RECOMMEND_SYSTEM
+from .prompts import QA_QUOTE_CHECK, QA_SYSTEM, RECOMMEND_SYSTEM
 from .search import citing_works, related_works, search_external, search_local
 from .textutil import truncate
 from .verify import PaperVerifier
@@ -149,6 +149,8 @@ class QAAgent:
                        +'请仅依据上述片段作答，并在每条结论后只标注片段编号（如 [P1]），不生成页码；来源链接由程序展示真实页码。'
                        +'未提供的论文或章节不能声称已读完，题录/摘要不等于全文。'
                        +'证据不足应明确拒答，不能依据历史回答补事实。')
+            if not self.cfg.qa.evidence_anchor_trial:
+                content += '\n'+QA_QUOTE_CHECK
             if self.cfg.qa.evidence_anchor_trial:
                 from .qa_anchors import catalog
                 content += '\n\n【试验定位锚点（程序生成，不是语义结论）】\n'+json.dumps(catalog(excerpts), ensure_ascii=False)

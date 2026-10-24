@@ -166,6 +166,27 @@ def main():
             cfg.qa.evidence_anchor_trial = True
             return {'trial': True}
 
+        @app.post('/api/acceptance/compact-history')
+        def compact_history_fixture():
+            from litprism.context.meter import Meter
+            from litprism.context.policy import SelectionResult
+            from litprism.context.seam import Seam
+            from litprism.context.summarizer import Summarizer, ExtractiveSummarizer
+            cid = kb.add_conversation('离线压缩显示验收')
+            kb.append_message(cid,'user','LONG_ORIGINAL_VISIBLE 用户研究问题。 '*250)
+            kb.append_message(cid,'assistant','LONG_REPLY_VISIBLE 原回答仍可阅读。')
+            messages = kb.get_messages(cid)
+            tokens = sum(Meter(cfg).estimate_message(m) for m in messages)
+            sel = SelectionResult(ok=True,start_seq=1,end_seq=2,
+                shadowed_refs=[m['ref'] for m in messages],shadowed_tokens=tokens)
+            seam = Seam(kb,cfg)
+            tx,_ = seam.begin(cid,'offline-ui-controlled',sel)
+            summary = Summarizer(cfg,backend=ExtractiveSummarizer()).summarize(messages,tokens)
+            assert tx and summary.ok
+            result = seam.commit(tx,summary)
+            assert result.ok
+            return {'conversation_id':cid,'block_id':result.block_id}
+
         harden(app, 'acceptance-only')
         sock = socket.socket()
         sock.bind(('127.0.0.1', 0))

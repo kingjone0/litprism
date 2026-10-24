@@ -686,6 +686,27 @@ def build_active_llm(kb, cfg: Config, *, allow_mock=False, mock_factory=None):
     return client
 
 
+def active_llm_status(kb, cfg: Config) -> dict:
+    """Read current selection/credentials without dispatching a model request."""
+    from .providers import ProviderStore
+    active, model = ProviderStore(kb, cfg.data_path).get_active()
+    try:
+        client = build_active_llm(kb, cfg, allow_mock=True)
+    except ValueError as exc:
+        return {'provider': active.name if active else None, 'model': model,
+                'protocol': active.protocol if active else None,
+                'ready': False, 'mode': 'needs_configuration', 'note': str(exc)}
+    if active is None:
+        return {'provider': 'mock', 'model': client.name, 'ready': True,
+                'mode': 'offline', 'note': '离线占位模型，不调用网络'}
+    runtime = client.runtime_config
+    return {'provider': active.name, 'provider_id': active.id, 'model': model,
+            'protocol': active.protocol, 'ready': True, 'mode': 'selected',
+            'model_window_tokens': runtime.llm.model_window_tokens,
+            'model_max_output_tokens': runtime.llm.model_max_output_tokens,
+            'capability_missing': client.capability_missing, 'note': ''}
+
+
 def llm_status(cfg: Config) -> dict:
     from .backup import BackupError, require_restored_credentials
     try:

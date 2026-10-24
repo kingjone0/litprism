@@ -34,7 +34,7 @@ from typing import Any
 
 from ..config import load_config
 from ..db import KnowledgeBase
-from ..llm import build_llm
+from ..llm import build_active_llm
 from .audit import AuditLog
 from .tools import RESOURCES, TOOLS, LitPrismTools, describe_tools, dump_schema
 
@@ -43,8 +43,9 @@ SERVER_VERSION = "1.0.0"
 
 SERVER_INSTRUCTIONS = (
     "文献棱镜 LitPrism —— 个人学术文献知识库。\n"
-    "所有论文都经过权威数据库核验；引用请使用 search_passages 返回的 chunk_id 与页码。\n"
-    "核验状态为「未核到」的文献不得作为引用来源。"
+    "库中可能含待核验或人工确认材料；仅以当前可引用材料作为事实来源。\n"
+    "引用请使用 search_passages 返回的 chunk_id、来源状态与页码。\n"
+    "ask 是本地知识问答，不自动联网，也不提供持久 Web 对话的续验与人工整理入口。"
 )
 
 # ---------------------------------------------------------------------------
@@ -131,13 +132,14 @@ def _mcp_import() -> Any:
 def build_server(kb: KnowledgeBase | None = None, cfg: Any = None, *, llm: Any = None) -> Any:
     """构造 MCP Server 实例。"""
     MCPServer = _mcp_import()
+    from mcp.types import CallToolResult, TextContent
 
     cfg = cfg or load_config()
-    kb = kb or KnowledgeBase(cfg)
+    owns_kb = kb is None
+    kb = kb if kb is not None else KnowledgeBase(cfg)
     readonly = bool(getattr(getattr(cfg, "mcp", None), "readonly", True))
-    llm = llm if llm is not None else _try_llm(cfg)
-
-    impl = LitPrismTools(kb, cfg, llm=llm, readonly=readonly)
+    impl = LitPrismTools(kb, cfg, llm=llm, readonly=readonly,
+                        llm_factory=lambda: build_active_llm(kb,cfg,allow_mock=True))
     audit = AuditLog(kb, getattr(getattr(cfg, "mcp", None), "server_id", "local"))
 
     server = MCPServer(
@@ -146,17 +148,20 @@ def build_server(kb: KnowledgeBase | None = None, cfg: Any = None, *, llm: Any =
         instructions=SERVER_INSTRUCTIONS,
     )
 
-    def _guarded(name: str, args: dict, fn: Any) -> dict:
+    def _guarded(name: str, args: dict, fn: Any) -> Any:
         """统一包一层：审计 + 异常转可读错误。"""
         try:
             result = fn()
         except TypeError as e:
-            audit.record(name, args, ok=False, error=f"参数错误：{e}")
-            return {"ok": False, "error": f"参数错误：{e}"}
+            result = {"ok": False, "error": f"参数错误：{e}"}
         except Exception as e:  # noqa: BLE001
-            audit.record(name, args, ok=False, error=f"{type(e).__name__}: {e}")
-            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-        audit.record(name, args, ok=bool(result.get("ok")))
+            result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        ok = bool(result.get('ok'))
+        audit.record(name,args,ok=ok,error=result.get('error') if not ok else None)
+        if not ok:
+            from .tools import to_json
+            return CallToolResult(content=[TextContent(type='text',text=to_json(result))],
+                                  structuredContent=result,isError=True)
         return result
 
     # ---------------- 只读工具 ----------------
@@ -240,28 +245,31 @@ def build_server(kb: KnowledgeBase | None = None, cfg: Any = None, *, llm: Any =
     server._litprism_impl = impl
     server._litprism_audit = audit
     server._litprism_readonly = readonly
+    server._litprism_owns_kb = owns_kb
     return server
-
-
-def _try_llm(cfg: Any) -> Any:
-    try:
-        return build_llm(cfg)
-    except Exception:  # noqa: BLE001 - 没有模型时 ask 会给出可读错误
-        return None
 
 
 def serve(kb: KnowledgeBase | None = None, cfg: Any = None) -> None:
     """阻塞运行 stdio 服务。"""
     server = build_server(kb, cfg)
-    server.run(transport="stdio")
+    try:
+        server.run(transport="stdio")
+    finally:
+        if server._litprism_owns_kb:
+            server._litprism_impl.kb.close()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """CLI 入口：``python -m litprism.mcp.server``"""
     import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description='LitPrism MCP stdio server')
+    parser.add_argument('--config',help='配置文件路径（未指定时按LITPRISM_CONFIG/数据根查找）')
+    args = parser.parse_args(argv)
 
     try:
-        cfg = load_config()
+        cfg = load_config(args.config)
     except Exception as e:  # noqa: BLE001
         print(f"配置载入失败：{e}", file=sys.stderr)
         return 2

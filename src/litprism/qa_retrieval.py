@@ -15,6 +15,11 @@ def as_excerpts(hits):
             for i, h in enumerate(hits, 1)]
 
 
+def source_block(head, tag, text):
+    """Frame one source without changing its header or original body bytes."""
+    return head+f'\n【来源正文 {tag} 开始】\n'+text+f'\n【来源正文 {tag} 结束】'
+
+
 def material_text(excerpts):
     blocks = []
     for e in excerpts:
@@ -35,7 +40,7 @@ def material_text(excerpts):
             loc.append(f"章节：{e['section']}")
         if loc:
             head += '  '+' · '.join(loc)
-        blocks.append(head+'\n'+e['text'])
+        blocks.append(source_block(head,e['tag'],e['text']))
     return '\n\n---\n\n'.join(blocks)
 
 
@@ -59,10 +64,17 @@ def retrieve(kb, question, query, *, paper_ids, top_k, llm, search,
         p = titles[chunk['paper_id']]
         return dict(chunk, paper_title=p['title'], paper_year=p['year'], score=score)
 
-    extra = []
+    extra, restored_knowledge = [], []
     if not strict_scope or paper_ids is None:
-        from .knowledge import search_knowledge
-        extra = [h for h in search_knowledge(kb, query, top_k) if h['score'] >= kb.cfg.retrieval.min_score]
+        from .knowledge import search_knowledge, source_chunk
+        for ref in prior_refs:
+            if ref.get('source_kind') not in ('knowledge', 'web') or not ref.get('source_id'):
+                continue
+            source = source_chunk(kb, ref.get('chunk_id'))
+            if (source and source['source_id'] == ref['source_id'] and source['citable']
+                    and source['source_kind'] == ref['source_kind']):
+                restored_knowledge.append(dict(source, score=1.0))
+        extra = restored_knowledge + [h for h in search_knowledge(kb, query, top_k) if h['score'] >= kb.cfg.retrieval.min_score]
         if paper_ids:
             extra += search(kb, query, top_k=top_k, paper_ids=None, llm=None, citable_only=True)
     supplemental = extra + list(external)
@@ -100,7 +112,7 @@ def retrieve(kb, question, query, *, paper_ids, top_k, llm, search,
         if selected:
             hits, mode = [hit(c) for c in selected], 'section'
 
-    restored = []
+    restored = list(restored_knowledge)
     if mode == 'passages':
         # Stable old source handles locate fresh current text, never old answer
         # prose or a stale P-number. Scope and material are checked again here.

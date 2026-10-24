@@ -967,6 +967,7 @@ async function loadChat() {
     const d = await api(`/api/conversations/${encodeURIComponent(convId)}/messages`);
     if (S.activeView !== 'chat' || S.activeConv !== convId) return;
     const msgs = d.items || [];
+    const visibleMsgs = msgs.filter(m => m.kind !== 'compact-checkpoint');
     S.messages = msgs;
     S.sources = d.sources || [];
     $('#tbTitle').textContent = d.conversation.title || '对话';
@@ -977,7 +978,7 @@ async function loadChat() {
     box.innerHTML = `
       <div class="chat-layout">
         <div id="chatStream" role="log" aria-label="研究对话">
-          ${msgs.length ? msgs.map(renderMessage).join('') : `
+          ${visibleMsgs.length ? visibleMsgs.map(renderMessage).join('') : `
             <div class="empty chat-welcome"><div class="empty-mark">${icon('prism')}</div>
               <div class="eyebrow">READ · QUESTION · CONNECT</div>
               <h2 class="title">把问题交给文献</h2>

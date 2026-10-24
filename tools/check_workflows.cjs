@@ -885,6 +885,19 @@ const path = require('node:path');
     await page.locator('#chatUnitReviewForm [value=reject]').click();
     await expect(page.locator('#inspSources')).toContainText('状态：拒绝');
     await expect(page.locator('.qa-review-progress')).toContainText('全部 2 条已处理');
+    // Checkpoint bookkeeping remains auditable but is never a user chat bubble.
+    const compactedUi = await page.evaluate(async () => {
+      const result = await api('/api/acceptance/compact-history',{method:'POST',body:{}});
+      S.activeConv = result.conversation_id;
+      await loadChat();
+      return api('/api/conversations/'+S.activeConv+'/messages');
+    });
+    assert.equal(compactedUi.items.filter(m=>m.kind==='compact-checkpoint').length,1);
+    await expect(page.locator('.from-user')).toHaveCount(1);
+    await expect(page.locator('.from-assistant')).toHaveCount(1);
+    await expect(page.locator('.from-user')).toContainText('LONG_ORIGINAL_VISIBLE');
+    await expect(page.locator('.from-assistant')).toContainText('LONG_REPLY_VISIBLE');
+    await expect(page.locator('#chatStream')).not.toContainText('<compacted-summary>');
     assert.deepEqual(errors, []);
     console.log('Real API workflow acceptance passed: research tasks, durable analysis budgets/resume, reply source links, sidebar review/revoke, persistent provenance, web snapshots, cancellation, themes and narrow layout.');
   } finally { await browser.close(); }

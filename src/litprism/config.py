@@ -473,8 +473,12 @@ def load_config(path: str | Path | None = None) -> Config:
     查找顺序：显式路径 → 环境变量 LITPRISM_CONFIG → ./config/config.yaml
     → ./config/config.example.yaml → 内置默认值。
     """
+    # An explicit path must never silently open another workspace's settings.
+    requested = path if path is not None else os.environ.get('LITPRISM_CONFIG')
+    if (path is not None or requested) and (not requested or not Path(requested).is_file()):
+        raise FileNotFoundError(f'指定配置文件不存在或不是文件：{requested}')
     # 首次运行：把 example 复制成 config.yaml，后续读写都以它为准
-    if not path:
+    if not requested:
         ensure_user_config()
 
     candidates: list[Path] = []

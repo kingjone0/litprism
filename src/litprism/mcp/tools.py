@@ -77,11 +77,13 @@ def _ok(**payload: Any) -> dict:
 class LitPrismTools:
     """工具的纯实现。"""
 
-    def __init__(self, kb: KnowledgeBase, cfg: Config, *, llm: Any = None, readonly: bool = True):
+    def __init__(self, kb: KnowledgeBase, cfg: Config, *, llm: Any = None, readonly: bool = True,
+                 llm_factory: Any = None):
         self.kb = kb
         self.cfg = cfg
         self.llm = llm
         self.readonly = readonly
+        self.llm_factory = llm_factory
 
     # ------------------------------------------------------------------
     # 只读工具
@@ -246,11 +248,12 @@ class LitPrismTools:
         try:
             if not (question or "").strip():
                 return _err("question 不能为空")
-            if self.llm is None:
+            llm = self.llm if self.llm is not None else (self.llm_factory() if self.llm_factory else None)
+            if llm is None:
                 return _err("未配置模型，无法回答。请先在配置里设置 llm。")
             from ..agents import QAAgent
 
-            ans = QAAgent(self.kb, self.cfg, self.llm).ask(question, top_k=max(1, int(top_k)))
+            ans = QAAgent(self.kb, self.cfg, llm).ask(question, top_k=max(1, int(top_k)))
             return _ok(**ans.to_dict(), citations=[{
                 'tag': e['tag'], 'chunk_id': e.get('chunk_id'), 'paper_id': e['paper_id'], 'page': e['page'],
             } for e in ans.excerpts], citation_check={'passed': ans.citation_check_passed, 'issues': ans.citation_issues})

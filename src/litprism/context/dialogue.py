@@ -20,6 +20,12 @@ HISTORY_GUARD = (
 )
 
 
+def checkpoint_text(content):
+    """Use only the stored summary body, including checkpoints from older releases."""
+    from .summarizer import parse_summary
+    return parse_summary(content)
+
+
 def is_followup(question):
     return bool(re.search(r'这(?:篇|些|个|种|里)|其中|它(?:们)?|上述|前面|刚才|继续|后者|前者|那(?:篇|些|个|它)|\b(it|they|those|these|above|latter|former)\b', question, re.I))
 
@@ -46,7 +52,7 @@ class DialogueContext:
             return '\n'.join(refs+[question])
         checkpoints = [m for m in self.history if m['kind'] == 'compact-checkpoint']
         if checkpoints:
-            return f"{checkpoints[-1]['content'][:600]}\n{question}"
+            return f"{checkpoint_text(checkpoints[-1]['content'])[:600]}\n{question}"
         return question
 
     def prompt(self, meter: Meter, budget: int) -> tuple[str, list[str]]:
@@ -57,7 +63,8 @@ class DialogueContext:
         ordered += [m for m in reversed(self.history) if m["kind"] != "compact-checkpoint"]
         for msg in ordered:
             label = "历史摘要" if msg["kind"] == "compact-checkpoint" else msg["role"]
-            text = re.sub(r"```lit-ui\s*\n[\s\S]*?```", "", msg["content"])
+            content = checkpoint_text(msg['content']) if msg['kind'] == 'compact-checkpoint' else msg['content']
+            text = re.sub(r"```lit-ui\s*\n[\s\S]*?```", "", content)
             # 旧轮次的 P 编号与本轮不共享含义。
             text = re.sub(r"\[P\d+[^\]]*\]", "[历史引用，本轮无效]", text, flags=re.I)
             block = f"{label}: {text}"
@@ -85,7 +92,12 @@ def build_dialogue(kb, cfg: Config, conversation_id: str, before_seq: int | None
     def live_sources(message):
         from ..evidence import stored_excerpts
         try:
-            stored_excerpts(kb, json.loads(message.get('citations') or '[]'), allow_session=True)
+            sources = stored_excerpts(kb, json.loads(message.get('citations') or '[]'), allow_session=True)
+            for source in sources:
+                if source.get('paper_id'):
+                    paper = kb.get_paper(source['paper_id']) or {}
+                    if source.get('material_id') != paper.get('current_material_id'):
+                        return False
             return True
         except ValueError:
             return False
@@ -103,13 +115,19 @@ def build_dialogue(kb, cfg: Config, conversation_id: str, before_seq: int | None
     )]
     # A checkpoint that covered a later-corrected/rejected reply cannot preserve it
     # as a fact. Keep the audit block in storage, omit it only from model context.
-    blocks = [b for b in blocks if not excluded.intersection(
+    checkpoints = {m['block_id'] for m in messages if m['kind'] == 'compact-checkpoint'}
+    blocks = [b for b in blocks if b['id'] in checkpoints and not excluded.intersection(
         json.loads(b['effective_refs'] or b['direct_refs'] or '[]'))]
     active_ids = {b["id"] for b in blocks}
     messages = [m for m in messages if m["kind"] != "compact-checkpoint" or m["block_id"] in active_ids]
     visible = {n.seq for n in Meter(cfg).measure_nodes(messages, blocks).nodes if n.seq >= 0}
     context = DialogueContext(history=[m for m in messages if m["seq"] in visible])
-    for message in reversed(context.history):
+    # Recover identities from valid covered messages, never replay their answer
+    # prose. Full original references retain material/grant provenance that the
+    # older compact block's abbreviated handles may not contain.
+    covered = {ref for b in blocks for ref in json.loads(b['effective_refs'] or b['direct_refs'] or '[]')}
+    reference_messages = [m for m in messages if m['seq'] in visible or m['ref'] in covered]
+    for message in reversed(reference_messages):
         if message['role'] != 'assistant':
             continue
         used = {tag for tag, _ in parse_citations(message['content'])}
@@ -120,9 +138,13 @@ def build_dialogue(kb, cfg: Config, conversation_id: str, before_seq: int | None
                 continue
             try:
                 source = stored_excerpts(kb, [ref], allow_session=True)[0]
-                paper = kb.get_paper(source.get('paper_id')) or {}
-                if source.get('material_id') == paper.get('current_material_id'):
+                pid = source.get('paper_id')
+                paper = (kb.get_paper(pid) or {}) if pid else {}
+                if pid and source.get('material_id') == paper.get('current_material_id'):
                     context.evidence_refs.append(dict(chunk_id=source['id'], paper_id=source['paper_id']))
+                elif source.get('source_id') and source.get('citable'):
+                    context.evidence_refs.append(dict(chunk_id=source['id'], source_id=source['source_id'],
+                                                      source_kind=source['source_kind']))
             except ValueError:
                 continue
         ids = {ref.get('paper_id') for ref in refs if ref.get('tag') in used}

@@ -254,3 +254,19 @@ def test_compound_recovery_does_not_guess_between_repeated_locations():
     from litprism.qa_claims import locate
     text = 'A long description using sequencealigned representations to compute inputs and outputs.'
     assert locate(text+'\n'+text, text.replace('sequencealigned','sequence-aligned')) is None
+
+
+def test_long_chat_counterexample_neighbor_quote_is_not_part_of_selected_chunk():
+    from litprism.qa_claims import locate
+    selected = 'output values. These are concatenated and once again projected, resulting in the final values, as depicted in Figure 2.'
+    neighbor = 'queries, keys and values we then perform the attention function in parallel, yielding dv-dimensional'
+    report = audit_map(ANSWER, proposal(quotes=[{'source':'P1','quote':neighbor}]), [{'tag':'P1','text':selected}])
+    assert report['blocking_issues'] and locate(selected,neighbor) is None
+
+
+def test_long_chat_counterexample_paraphrased_quote_keeps_review_guard():
+    from litprism.qa_claims import locate
+    original = 'an effect we counteract with Multi-Head Attention as\ndescribed in section 3.2.'
+    paraphrase = original.replace('described','stated')
+    assert locate(original,paraphrase) is None
+    assert locate(original,original)['quote'] == original
