@@ -499,7 +499,7 @@ async function loadPaperDetail(versionId = null) {
         <div id="analysisRuns" aria-live="polite"></div>
         ${materialNote(a._coverage)}
         ${coverageNote(a._coverage)}
-        ${versionId ? '<p class="source-intro">历史分析只读。查看原文时请选择对应的历史材料；审核与补录请返回最新分析。</p>' : semanticReviewPanel(candidateView._semantic_review, {kind: 'paper', id: p.id}, candidateView._candidates)}
+        ${versionId ? '<p class="source-intro">历史分析。修改或补录请返回最新版本。</p>' : semanticReviewPanel(candidateView._semantic_review, {kind: 'paper', id: p.id}, candidateView._candidates)}
         ${versionId ? '' : qualityPanel(p.id)}
         ${versionId ? '' : manualClaimsPanel(p.id)}
         ${a._concepts_error ? `<div class="lui-degraded">术语提取未完成：${esc(a._concepts_error)}</div>` : ''}
@@ -1168,14 +1168,13 @@ function renderMessage(m, fresh = false) {
         ${!isUser && stateLabel ? `<p class="source-intro" role="status">${esc(stateLabel)}</p>` : ''}
         ${!isUser && (m.guard_issues || []).length ? `<p class="source-intro">${m.guard_issues.map(esc).join('；')}</p>` : ''}
         ${!isUser && (m.audit_warnings || []).length ? `<details class="source-intro"><summary>辅助来源记录提示（${m.audit_warnings.length}）</summary><p>不影响正常阅读；整理知识时可在右栏核对。</p></details>` : ''}
-        ${!isUser && m.retrieval?.delivered_chunks != null ? `<p class="source-intro">${m.retrieval.mode === 'full_material' && !m.retrieval.window_limited ? '本轮提供指定论文的完整当前材料' : '本轮提供原文片段'} · ${fmtNum(m.retrieval.delivered_chunks)} 块${m.retrieval.window_limited ? ' · 窗口限制，材料未全部送达' : ''}。材料送达不代表内容完整或结论已人工确认。</p>` : ''}
-        ${!isUser && m.reasoning ? `<details class="chat-reasoning"><summary>模型思考 · 服务返回内容</summary><p>未经核验，不作为答案或引用依据。</p><pre>${esc(m.reasoning)}</pre></details>` : ''}
+        ${!isUser && m.retrieval?.window_limited ? '<p class="source-intro">本轮仅查阅了部分材料，可缩小问题范围后继续提问。</p>' : ''}
+        ${!isUser && m.reasoning ? `<details class="chat-reasoning"><summary>思考过程</summary><pre>${esc(m.reasoning)}</pre></details>` : ''}
         <div class="chat-bubble ${isUser ? 'user' : ''}">${body}</div>
-        ${!isUser && m.request_settings?.max_tokens ? `<div class="request-budget">本次${m.request_settings.output_mode === 'automatic' ? '自动分配' : '输出上限'} ${fmtNum(m.request_settings.max_tokens)} token（含推理） · 等待设置 ${esc(String(m.request_settings.timeout))} 秒${m.reasoning ? '' : ' · 服务未返回独立思考内容'}</div>` : ''}
         ${checkWarn}
         ${!isUser && m.qa_review_id ? `<p><a href="#chat-review-${esc(m.qa_review_id)}" data-chat-review="${esc(m.qa_review_id)}">${['needs_review', 'invalid_citation'].includes(m.status) ? '核对待审回复与原文' : '核对回复并整理为知识'}</a></p>` : ''}
         ${!isUser && (m.source_links || []).length ? `<div class="answer-sources" aria-label="回答来源">${m.status === 'invalid_citation' ? '待核对来源' : '来源'}：${m.source_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">[${esc(s.tag || '')}] ${esc(s.title || '原文来源')}${s.page == null ? '' : ' · p.'+esc(s.page)}${s.citable === false ? ' · 依据失效（仅回溯）' : s.session_only ? ' · 搜索摘要（未审核）' : s.trust_level === 'historical' ? ' · 历史依据' : s.kind === 'knowledge' ? ' · 人工知识' : ''}</a>`).join(' ')}</div>` : ''}
-        ${!isUser && (m.candidate_links || []).length ? `<div class="answer-sources">本轮搜索快照（入库需人工审核）：${m.candidate_links.map(s => `<a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">${esc(s.title)}</a>`).join(' ')}</div>` : ''}
+        ${!isUser && (m.candidate_links || []).length ? `<details class="answer-sources"><summary>更多搜索结果（${m.candidate_links.length}）</summary>${m.candidate_links.map(s => `<p><a href="#evidence-${esc(s.ref)}" data-evidence-ref="${esc(s.ref)}">${esc(s.title)}</a></p>`).join('')}</details>` : ''}
         ${!isUser && m.source_warning ? `<p class="lui-degraded">取证提示：${esc(m.source_warning)}</p>` : ''}
         <div style="margin-top:4px;font-size:10.5px;color:var(--muted);text-align:${isUser ? 'right' : 'left'}">
           ${isUser ? '你' : '文献棱镜'}${m.model ? ' · ' + esc(m.model) : ''}${m.created_at ? ' · ' + esc(m.created_at.slice(0, 16).replace('T', ' ')) : ''}

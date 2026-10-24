@@ -685,7 +685,6 @@ async function loadChatReview(ref, openUnitId = null) {
       <blockquote class="reading-text">${esc(s.text || '原文不可读取')}</blockquote>
       <label><input type="checkbox" name="source_tags" value="${esc(s.tag)}" ${!s.citable || confirmed ? 'disabled' : ''}> 以 [${esc(s.tag)}] 支持修订正文</label></details>`;
     box.innerHTML = `<button class="btn sm" id="btnChatReviewBack">返回来源列表</button><h3>核对回复与知识入库</h3>
-      <p class="source-intro">人工整理是可选操作，用于修订或保存可信知识；定位原文不等于语义认证。</p>
       <details><summary>查看本轮问题</summary><p>${esc(d.question)}</p></details>
       ${unitList}
       <details ${['needs_review','invalid_citation'].includes(d.status) ? 'open' : ''}><summary>原始模型回复（留档）</summary><div class="reading-text qa-review-draft">${esc(d.draft)}</div></details>
@@ -702,7 +701,7 @@ async function loadChatReview(ref, openUnitId = null) {
       <div class="row wrap"><button class="btn primary" name="action" value="confirm" ${confirmed || !sources.some(s => s.citable) ? 'disabled' : ''}>${confirmed ? '已确认入库' : '确认正文并入库'}</button>
       <button class="btn" name="action" value="reject" ${last?.action === 'reject' ? 'disabled' : ''}>拒绝回复</button>
       <button class="btn" name="action" value="revoke" ${!last?.knowledge_id || last?.action === 'revoke' ? 'disabled' : ''}>撤销入库</button></div><p class="task-error" role="alert"></p></form></details>
-      ${last?.knowledge_id ? `<p><a href="#evidence-${esc(last.knowledge_id)}" data-evidence-ref="${esc(last.knowledge_id)}">查看知识快照</a> · ${esc(trustLabel(d.knowledge_status))}</p>` : ''}
+      ${last?.knowledge_id ? `<p><a href="#evidence-${esc(last.knowledge_id)}" data-evidence-ref="${esc(last.knowledge_id)}">查看知识条目</a> · ${esc(trustLabel(d.knowledge_status))}</p>` : ''}
       ${d.reviews.length ? `<details open><summary>人工审核历史</summary>${d.reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm:'确认入库', reject:'拒绝', revoke:'撤销'})[r.action])}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
     $('#btnChatReviewBack').onclick = () => { S.semanticRef = null; refreshInspector(); };
     const rows = $$('.qa-unit-row', box);
@@ -798,10 +797,10 @@ async function loadChatUnitReview(ref, uid, target = null) {
     const priority = s => preferredTags.includes(s.tag) ? preferredTags.indexOf(s.tag) : preferredTags.length;
     const available = [...d.sources_available].sort((a,b) => priority(a)-priority(b));
     box.innerHTML = `<button class="btn sm" id="btnUnitReviewBack">${target ? '收起此条' : '返回回复审核'}</button>
-      ${target ? '' : `<h3>单元人工核对</h3><h4>原回答单元 · 只读</h4><blockquote class="reading-text qa-unit-original">${esc(d.text)}</blockquote>`}
+      ${target ? '' : `<h3>单元人工核对</h3><h4>原回答</h4><blockquote class="reading-text qa-unit-original">${esc(d.text)}</blockquote>`}
       <p class="source-intro">状态：${esc(actionName[d.decision] || '未审核')}${d.knowledge_status ? ' · '+esc(trustLabel(d.knowledge_status)) : ''}</p>
       <form id="chatUnitReviewForm"><fieldset><legend>本次采用的证据</legend>
-        <p class="source-intro">原回答或上次人工选择中仍能精确定位的原文已预选。核对正确即可保留，无需重新寻找；需要前后句时再展开补选。</p>
+        <p class="source-intro">已选原文可直接保留，需要时补选前后句。</p>
         <p id="unitEvidenceCount" class="source-intro" role="status">正在读取已选原文…</p>
         <div id="unitEvidenceChoices"></div>
         <details class="qa-unit-other-sources"><summary>查找其他来源与原文</summary>
@@ -811,20 +810,20 @@ async function loadChatUnitReview(ref, uid, target = null) {
         </details></fieldset>
         <label>核对后的单元知识<textarea class="textarea" name="reviewed_text" rows="5" maxlength="20000">${esc(d.suggested_text)}</textarea></label>
         <label>人工核对依据<textarea class="textarea" name="note" rows="3" maxlength="5000" required placeholder="说明如何核对原文，或说明拒绝、撤销原因"></textarea></label>
-        <p class="source-intro">入库只索引本次修订正文。修订会生成新知识并撤销旧版本，不连带确认整答。</p>
+        ${active ? '<p class="source-intro">修订后会替换原知识。</p>' : ''}
         <div class="row wrap qa-unit-actions"><button class="btn primary" name="action" value="confirm" ${active ? 'disabled' : ''}>确认此单元并入库</button>
           <button class="btn" name="action" value="revise" ${active ? '' : 'disabled'}>修订并重新入库</button>
           <button class="btn" name="action" value="reject" ${d.decision === 'reject' ? 'disabled' : ''}>拒绝此单元</button>
           <button class="btn" name="action" value="revoke" ${active ? '' : 'disabled'}>撤销此单元入库</button></div>
         <p class="task-error" role="alert"></p></form>
-      ${d.knowledge_id ? `<p><a href="#evidence-${esc(d.knowledge_id)}" data-evidence-ref="${esc(d.knowledge_id)}">查看单元知识快照</a></p>` : ''}
-      <details><summary>原回答所选证据 · 只读</summary>${d.original_evidence.map(q => `<p>[${esc(q.source)}]</p><blockquote class="reading-text">${esc(q.quote)}</blockquote>`).join('') || '<p>原回答没有保存可定位证据，请人工选择。</p>'}</details>
+      ${d.knowledge_id ? `<p><a href="#evidence-${esc(d.knowledge_id)}" data-evidence-ref="${esc(d.knowledge_id)}">查看知识条目</a></p>` : ''}
+      <details><summary>原回答引用的证据</summary>${d.original_evidence.map(q => `<p>[${esc(q.source)}]</p><blockquote class="reading-text">${esc(q.quote)}</blockquote>`).join('') || '<p>原回答未保存选证记录，请选择支持正文的原文。</p>'}</details>
       ${d.reviews.length ? `<details><summary>这个单元的审核历史</summary>${d.reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(actionName[r.action] || r.action)}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
     $('#btnUnitReviewBack').onclick = () => {if (target) target.closest('.qa-unit-row').open=false; else loadChatReview(ref);};
     const form = $('#chatUnitReviewForm'), loaded = new Set();
     const preselected = new Set(d.suggested_evidence.map(q => q.source+':'+q.anchor_id));
     const modelSelected = new Set(d.original_evidence.map(q => q.source+':'+q.anchor_id));
-    const updateCount = () => { $('#unitEvidenceCount').textContent = `本次已选择 ${$$('[data-unit-anchor]:checked', form).length} 段原文。仅保存明确勾选的证据。`; };
+    const updateCount = () => { $('#unitEvidenceCount').textContent = `已选 ${$$('[data-unit-anchor]:checked', form).length} 段原文`; };
     form.addEventListener('change', updateCount);
     async function addContext(tag) {
       if (!tag || loaded.has(tag)) return;
@@ -933,7 +932,7 @@ async function loadEvidenceDetail(ref) {
   try {
     const d = await api('/api/evidence/'+encodeURIComponent(ref));
     if (S.evidenceRef !== ref || loadSeq !== S.evidenceLoadSeq) return;
-    const kind = ({ paper: '论文原文', web: '网页摘要快照', knowledge: '知识条目快照' })[d.source_kind] || '来源';
+    const kind = ({ paper: '论文原文', web: '网页摘要', knowledge: '知识条目' })[d.source_kind] || '来源';
     const url = safeSourceUrl(d.url || (d.doi ? 'https://doi.org/'+encodeURIComponent(d.doi) : ''));
     const canReview = d.source_kind !== 'paper' || (!d.citable && d.trust_level !== 'deleted');
     box.innerHTML = `<button class="btn sm" id="btnSourceBack">查看本轮其他来源</button><h3>${esc(d.title || d.paper_title)}</h3>
@@ -944,9 +943,9 @@ async function loadEvidenceDetail(ref) {
       ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">打开原始来源 ↗</a><p class="source-url">${esc(url)}</p>` : '<p class="source-intro">来源：本地文献或用户提供的知识</p>'}
       ${d.doi ? `<p>DOI：${esc(d.doi)}</p>` : ''}
       ${d.authors ? `<p>作者：${esc(Array.isArray(d.authors) ? d.authors.join('、') : d.authors)}</p>` : ''}
-      <p class="source-intro">${d.citable ? '当前可以作为证据；人工确认不等于自动核验。' : d.trust_level === 'pending' && d.acquisition === 'search_summary' ? '尚未加入可信知识库；实际取得该快照的问答可标明未审核后引用。' : '当前不可作为可信知识依据；原快照保留供核对。'}</p>
+      ${!d.citable ? `<p class="source-intro">${d.trust_level === 'pending' && d.acquisition === 'search_summary' ? '搜索摘要，尚未人工确认。' : '该来源当前不可用，请选择其他依据。'}</p>` : ''}
       <div class="reading-text evidence-excerpt">${esc(d.text || '')}</div>
-      ${d.content && d.content !== d.text ? `<details><summary>查看完整审核快照（${d.content.length} 字符）</summary><div class="reading-text">${esc(d.content)}</div></details>` : ''}
+      ${d.content && d.content !== d.text ? `<details><summary>查看完整内容</summary><div class="reading-text">${esc(d.content)}</div></details>` : ''}
       ${d.review_note ? `<p>审核依据：${esc(d.review_note)}</p><p class="source-intro">审核时间（本地）：${esc(sourceTime(d.reviewed_at))}</p>` : ''}
       ${d.source_kind === 'paper' && d.verify_evidence ? `<details><summary>核验记录</summary><pre class="reading-text">${esc(typeof d.verify_evidence === 'string' ? d.verify_evidence : JSON.stringify(d.verify_evidence, null, 2))}</pre></details>` : ''}
       ${canReview ? `<form id="evidenceReview"><label>人工审核依据<textarea class="textarea" name="note" required placeholder="核对出处、原文与适用范围后填写"></textarea></label><div class="row wrap"><button class="btn primary" name="action" value="confirm" ${d.status === 'manual_confirmed' || d.citable ? 'disabled' : ''}>${d.citable ? '已加入可信知识库' : d.trust_level === 'needs_review' ? '依据失效，需修订知识' : '确认可信并加入知识库'}</button>${d.source_kind !== 'paper' ? `<button class="btn" name="action" value="reject" ${d.trust_level === 'rejected' ? 'disabled' : ''}>拒绝</button><button class="btn" name="action" value="revoke" ${d.status !== 'manual_confirmed' ? 'disabled' : ''}>撤销可信</button>` : ''}</div><p class="task-error" role="alert"></p></form>` : ''}

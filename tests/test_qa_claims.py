@@ -225,3 +225,32 @@ def test_presentation_notices_do_not_turn_valid_source_locations_into_review_def
     warnings, notices = presentation_warnings(messages)
     assert notices == [note] and warnings == [defect, unknown]
     assert messages == [note, defect, unknown]
+
+
+def test_long_compound_hyphen_quote_recovers_actual_pdf_text_and_offsets():
+    from litprism.qa_claims import locate
+    original = ('the Transformer is the first transduction model relying\nentirely on self-attention '
+                'to compute representations of its input and output without using sequencealigned RNNs or convolution.')
+    quote = original.replace('\n',' ').replace('sequencealigned','sequence-aligned')
+    located = locate(original, quote)
+    assert located['normalization'] == 'compound_hyphen'
+    assert located['quote'] == original[located['start']:located['end']] == original
+    report = audit_map(ANSWER, proposal(quotes=[{'source':'P1','quote':quote}]), [{'tag':'P1','text':original}])
+    assert not report['blocking_issues'] and report['semantic_status'] == 'unreviewed'
+
+
+@pytest.mark.parametrize('old,new', [
+    (' uses ', ' does not use '), ('ModelA', 'ModelB'), ('ModelA', 'Model-A'),
+    ('67.0%', '68.0%'), ('resign', 're-sign'), ('noncancer', 'non-cancer'),
+])
+def test_compound_recovery_does_not_erase_negation_numbers_objects_or_short_prefixes(old,new):
+    from litprism.qa_claims import locate
+    original = 'The reported model uses sequencealigned representations with ModelA at 67.0% and can resign for noncancer tasks.'
+    quote = original.replace('sequencealigned','sequence-aligned').replace(old,new)
+    assert locate(original, quote) is None
+
+
+def test_compound_recovery_does_not_guess_between_repeated_locations():
+    from litprism.qa_claims import locate
+    text = 'A long description using sequencealigned representations to compute inputs and outputs.'
+    assert locate(text+'\n'+text, text.replace('sequencealigned','sequence-aligned')) is None

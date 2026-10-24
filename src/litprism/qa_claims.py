@@ -30,12 +30,16 @@ def presentation_warnings(messages):
     return warnings, notices
 
 
-def _canonical(text):
+def _canonical(text, *, compound_hyphens=False):
     chars, positions = [], []
+    # Recover a narrow PDF compound-word discrepancy in a long unique quote.
+    # Do not collapse numbers, identifiers or ambiguous short prefixes (re-sign).
+    missing = {m.start()+len(m[1]) for m in re.finditer(
+        r'(?<![A-Za-z0-9_])([a-z]{4,})-([a-z]{4,})(?![A-Za-z0-9_])', text)} if compound_hyphens else set()
     ligatures = str.maketrans({'ﬁ':'fi','ﬂ':'fl','ﬀ':'ff','ﬃ':'ffi','ﬄ':'ffl'})
     for m in re.finditer(r'(?<=[A-Za-z])-[ \t]*\r?\n[ \t]*(?=[A-Za-z])|\u00ad|\s+|.', text, re.S):
         token = m.group()
-        if token == '\u00ad' or token.startswith('-') and '\n' in token:
+        if m.start() in missing or token == '\u00ad' or token.startswith('-') and '\n' in token:
             continue
         value = ' ' if token.isspace() else token.translate(ligatures)
         for char in value:
@@ -53,10 +57,18 @@ def locate(text, quote):
     haystack, offsets = _canonical(text)
     needle = _canonical(quote)[0].strip()
     start = haystack.find(needle) if needle else -1
+    normalization = 'typography'
+    if start < 0 and len(quote.strip()) >= 48:
+        haystack, offsets = _canonical(text, compound_hyphens=True)
+        needle = _canonical(quote, compound_hyphens=True)[0].strip()
+        start = haystack.find(needle) if needle else -1
+        if start >= 0 and haystack.find(needle, start+1) >= 0:
+            return None
+        normalization = 'compound_hyphen'
     if start < 0:
         return None
     a,b = offsets[start][0], offsets[start+len(needle)-1][1]
-    return {'start':a,'end':b,'quote':text[a:b], 'normalization':'typography'}
+    return {'start':a,'end':b,'quote':text[a:b], 'normalization':normalization}
 
 
 def audit_map(answer, proposed, excerpts, *, anchor_trial=False, answer_bindings=None,

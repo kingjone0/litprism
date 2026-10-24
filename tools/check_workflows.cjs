@@ -138,7 +138,14 @@ const path = require('node:path');
     await page.locator('.chat-reasoning summary').click();
     await expect(page.locator('.chat-reasoning pre')).toHaveText('<script>thinking_ui_marker</script>');
     assert.equal(await page.locator('.chat-reasoning script').count(), 0);
-    await expect(page.locator('.request-budget')).toContainText('自动分配 384,000');
+    await expect(page.locator('.request-budget')).toHaveCount(0);
+    await expect(page.locator('.from-assistant')).not.toContainText('等待设置');
+    const storedDiagnostics = await page.evaluate(async () => {
+      const d = await api('/api/conversations/'+S.activeConv+'/messages');
+      return d.items.filter(m=>m.role==='assistant').at(-1).request_settings;
+    });
+    assert.equal(storedDiagnostics.max_tokens,384000);
+    assert.equal(storedDiagnostics.timeout,300);
     await expect(page.locator('.chat-bubble').last()).not.toContainText('thinking_ui_marker');
 
     await page.locator('.answer-sources [data-evidence-ref]').first().click();
@@ -354,9 +361,9 @@ const path = require('node:path');
     await expect(page.locator('#paperList')).toBeVisible();
     await page.locator('[data-conv]').filter({ hasText: '知识条目验收' }).click();
     await expect(page.locator('.chat-reasoning')).toHaveCount(1);
-    await expect(page.locator('.request-budget')).toContainText('384,000');
+    await expect(page.locator('.request-budget')).toHaveCount(0);
     await page.locator(`.answer-sources [data-evidence-ref="${evidenceRef}"]`).click();
-    await expect(page.locator('#inspSources')).toContainText('知识条目快照');
+    await expect(page.locator('#inspSources')).toContainText('知识条目');
     const output = process.env.LITPRISM_UI_OUTPUT;
     if (output) {
       fs.mkdirSync(output, { recursive: true });
@@ -602,7 +609,8 @@ const path = require('node:path');
     }, materialFixture.paper_id);
     const history = await page.evaluate(pid => api(`/api/paper/${pid}/materials`), materialFixture.paper_id);
     await page.locator('#analysisVersionSelect').selectOption(history.analyses[0].id);
-    await expect(page.locator('#paperDetail')).toContainText('历史分析只读');
+    await expect(page.locator('#paperDetail')).toContainText('历史分析');
+    await expect(page.locator('#paperDetail')).toContainText('修改或补录请返回最新版本');
     await expect(page.locator('#paperDetail')).toContainText('originalmarker');
     await expect(page.locator('#btnAddClaim')).toHaveCount(0);
     await page.locator('[data-ptab=text]').click();
