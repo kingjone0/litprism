@@ -12,10 +12,11 @@
  */
 
 const electron = require('electron');
-const { app, BrowserWindow, dialog, ipcMain, shell } = electron;
+const { app, BrowserWindow, dialog, ipcMain, shell, screen } = electron;
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const { createWindowState } = require('./window-state');
 
 // 环境变量 ELECTRON_RUN_AS_NODE=1 会让 Electron 以**纯 Node** 身份启动，
 // 此时 require('electron') 拿不到 app，下一行就会以
@@ -246,6 +247,7 @@ async function selfTest() {
 }
 
 async function createWindow() {
+  const windowState = createWindowState({ statePath: path.join(userDataRoot, 'window-state.json'), screen, log: trace });
   // 叠层控件与页面顶栏同色，避免出现一条突兀的浅/深色带
   const TITLEBAR_COLORS = {
     light: { color: '#ffffff', symbol: '#55504a' },
@@ -253,10 +255,7 @@ async function createWindow() {
   };
 
   win = new BrowserWindow({
-    width: 1360,
-    height: 880,
-    minWidth: 1000,
-    minHeight: 660,
+    ...windowState.options,
     title: '文献棱镜 LitPrism',
     backgroundColor: '#fcfcfa',
     autoHideMenuBar: true,
@@ -272,6 +271,9 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+  windowState.attach(win);
+  const mainWindow = win;
+  mainWindow.once('closed', () => { if (win === mainWindow) win = null; });
 
   ipcMain.on('ui:titlebar-theme', (_event, theme) => {
     if (!win || win.isDestroyed()) return;
@@ -284,7 +286,7 @@ async function createWindow() {
     }
   });
 
-  win.once('ready-to-show', () => win.show());
+  mainWindow.once('ready-to-show', () => { if (!mainWindow.isDestroyed()) mainWindow.show(); });
 
   // 外链一律交给系统浏览器，窗口永远只待在本机后台
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -294,13 +296,15 @@ async function createWindow() {
 
   try {
     const { port, token } = await startSidecar();
+    if (mainWindow.isDestroyed()) return;
     trace('handshake ok: port=' + port);
-    await win.loadURL(`http://127.0.0.1:${port}/#t=${encodeURIComponent(token)}`);
+    await mainWindow.loadURL(`http://127.0.0.1:${port}/#t=${encodeURIComponent(token)}`);
     trace('window loaded');
     if (process.env.LITPRISM_SELFTEST) await selfTest();
   } catch (err) {
+    if (mainWindow.isDestroyed()) return;
     trace('startup failed: ' + err.message);
-    await win.loadURL(
+    await mainWindow.loadURL(
       'data:text/html;charset=utf-8,' +
         encodeURIComponent(
           `<body style="margin:0;background:#0b1120;color:#f87171;font:14px/1.7 -apple-system,'Segoe UI','Microsoft YaHei',sans-serif;padding:32px">
@@ -309,7 +313,7 @@ async function createWindow() {
            </body>`
         )
     );
-    win.show();
+    if (!mainWindow.isDestroyed()) mainWindow.show();
   }
 }
 

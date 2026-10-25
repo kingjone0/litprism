@@ -6,6 +6,7 @@
   "scripts": {
     "start": "electron desktop-electron/main.js",
     "dev": "electron desktop-electron/main.js",
+    "test:desktop": "node --test desktop-electron/test/window-state.test.cjs desktop-electron/test/main-window.test.cjs",
     "dist": "electron-builder --win nsis",
     "pack": "electron-builder --win --dir"
   },
@@ -23,6 +24,7 @@
     },
     "files": [
       "desktop-electron/**/*",
+      "!desktop-electron/test/**/*",
       "package.json"
     ],
     "extraResources": [

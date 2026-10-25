@@ -207,6 +207,8 @@ Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
 
 回归覆盖核验、引用、范围、计划原文区间、完整请求预算、截断与用量、持久化、导出、人工修正与撤销。`tools/check_workflows.py` 使用临时库和无窗口浏览器验证真实本地 API/UI。详细工具与证据边界见 [当前实现与验收状态](docs/当前实现与验收状态.md)。纯文档整理不重新计为一次测试通过。
 
+桌面窗口会记住普通位置、尺寸和最大化状态；显示器改变时按当前可用工作区恢复。仅窗口缓存保存于独立数据根的`window-state.json`，不含研究内容或密钥。运行`npm run test:desktop`可验证窗口几何、文件写入及模拟Electron事件，无需安装或启动Electron；真实窗口/安装体验尚待N11。详见[N10报告](docs/N10体验与管理验收-2026-10-25.md)。
+
 ---
 
 ## 已知局限

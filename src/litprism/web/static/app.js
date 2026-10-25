@@ -19,7 +19,7 @@ const S = {
   convScope: null,
   theme: localStorage.getItem('litprism-theme') || 'light',
   inspector: localStorage.getItem('litprism-evidence-panel') === '1',
-  sidebar: localStorage.getItem('litprism-sidebar') !== '0',
+  sidebar: !window.matchMedia('(max-width: 760px)').matches && localStorage.getItem('litprism-sidebar') !== '0',
   inspectorTab: 'sources',
   messages: [],
   sources: [],
@@ -188,6 +188,8 @@ function applySidebar() {
   $('#main').classList.toggle('sidebar-hidden', !S.sidebar);
   $('#sidebar').inert = !S.sidebar;
   $('#btnSidebar').setAttribute('aria-expanded', String(S.sidebar));
+  // 窄屏导航覆盖工作区；关闭后才恢复背景的键盘操作。
+  $('.work').inert = window.matchMedia('(max-width: 760px)').matches && S.sidebar;
 }
 function toggleSidebar() {
   S.sidebar = !S.sidebar;
@@ -212,6 +214,11 @@ const VIEW_TITLES = {
 };
 
 function openView(view, opts = {}) {
+  if (S.sidebar && window.matchMedia('(max-width: 760px)').matches) {
+    S.sidebar = false;
+    applySidebar();
+    $('#btnSidebar').focus();
+  }
   S.evidenceRef = null;
   S.activeView = view;
   $('#tbTitle').textContent = VIEW_TITLES[view] || view;
@@ -403,6 +410,9 @@ async function loadLibrary() {
     : S.papers;
   const group = $('#collectionFilter').value;
   if (group) items = items.filter(p => collectionDescendants(group).includes(p.collection_id));
+  // 批量操作只包含屏幕上的勾选，搜索/换组不会暗中操作隐藏文献。
+  const visibleIds = new Set(items.map(p => p.id));
+  S.selectedPapers = new Set([...S.selectedPapers].filter(id => visibleIds.has(id)));
 
   const st = S.status?.stats || {};
   $('#libSub').textContent =
@@ -1566,18 +1576,21 @@ S.activeModel = { provider_id: null, model: null };
 S.secretsInfo = {};
 
 function openSettings(key = 'general') {
-  $('#settingsModal').classList.add('open');
-  renderSettingsNav();
+  const modal = $('#settingsModal');
+  if (!modal.open) modal.showModal();
+  modal.classList.add('open');
+  renderSettingsNav(key);
   renderSettingsPane(key);
 }
 
 function closeSettings() {
+  $('#settingsModal').close();
   $('#settingsModal').classList.remove('open');
 }
 
-function renderSettingsNav() {
+function renderSettingsNav(key = 'general') {
   $('#settingsNav').innerHTML = SETTINGS_SECTIONS.map((s, i) => `
-    <button class="${i === 0 ? 'active' : ''}" data-set="${s.key}">
+    <button class="${s.key === key ? 'active' : ''}" data-set="${s.key}">
       <span class="set-ico">${icon(s.ico)}</span> ${s.label}
     </button>`).join('');
   $$('#settingsNav [data-set]').forEach(b => b.onclick = () => {
@@ -2461,6 +2474,11 @@ function bindGlobal() {
   // 设置弹窗
   $('#btnCloseSettings').onclick = closeSettings;
   $('#settingsModal').onclick = e => { if (e.target.id === 'settingsModal') closeSettings(); };
+  $('#settingsModal').addEventListener('close', () => $('#settingsModal').classList.remove('open'));
+  window.matchMedia('(max-width: 760px)').addEventListener('change', e => {
+    S.sidebar = e.matches ? false : localStorage.getItem('litprism-sidebar') !== '0';
+    applySidebar();
+  });
   $('#btnOpenConfig').onclick = () => {
     const p = S.status?.config?.app?.data_dir;
     toast(p ? `配置文件位于 ${p}/../config/config.yaml` : '配置文件位于项目 config/ 目录');
@@ -2468,10 +2486,9 @@ function bindGlobal() {
 
   // 快捷键
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && $('#settingsModal').classList.contains('open')) {
-      closeSettings();
-      return;
-    }
+    // 原生 dialog 处理顶层 Escape、焦点圈定和关闭后的焦点归还。
+    // 背景快捷键不得在任何模态任务中切页或关闭证据栏。
+    if (e.defaultPrevented || document.querySelector('dialog[open]')) return;
     if ((e.ctrlKey || e.metaKey) && e.key === ',') {
       e.preventDefault();
       openSettings('general');
@@ -2480,6 +2497,12 @@ function bindGlobal() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
       e.preventDefault();
       if (e.altKey) toggleInspector(); else toggleSidebar();
+      return;
+    }
+    if (e.key === 'Escape' && S.sidebar && window.matchMedia('(max-width: 760px)').matches) {
+      S.sidebar = false;
+      applySidebar();
+      $('#btnSidebar').focus();
       return;
     }
     if (e.key === 'Escape' && S.inspector) {

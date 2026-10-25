@@ -82,6 +82,8 @@ def retrieve(kb, question, query, *, paper_ids, top_k, llm, search,
                          and cfg.llm.model_window_tokens and fits_full)
     whole = [hit(c) for pid in ids for c in chunks(pid)] if full_eligible else []
     full_fits = bool(whole and fits_full(whole + supplemental))
+    full_papers = ids[:] if full_fits else []
+    completion_candidates, expanded_sections = [], []
     if full_fits:
         hits, mode = whole, 'full_material'
     elif overview and ids:
@@ -136,14 +138,59 @@ def retrieve(kb, question, query, *, paper_ids, top_k, llm, search,
                     seen.add(c['id'])
                     expanded.append(c)
         hits = expanded
-    unique = {}
-    for h in hits + supplemental:
-        unique.setdefault(h['id'], h)
-    hits = list(unique.values())
+    def unique_sources(sources):
+        unique = {}
+        for h in sources:
+            unique.setdefault(h['id'], h)
+        return list(unique.values())
+
+    # Default scope still starts with relevant lexical matches, not every paper
+    # in the library. Complete their current materials only when the actual
+    # prompt fits, retaining all seed hits, knowledge and external evidence.
+    if paper_ids is None and mode in ('passages', 'cross_paper') and cfg and cfg.llm.model_window_tokens and fits_full:
+        completion_candidates = list(dict.fromkeys(h['paper_id'] for h in hits if h.get('paper_id') in titles))
+        full_eligible = bool(completion_candidates)
+
+        def replace_group(sources, pid, group, section=None):
+            out, inserted = [], False
+            for source in sources:
+                matches = source.get('paper_id') == pid and (section is None or source.get('section') == section)
+                if matches:
+                    if not inserted:
+                        out.extend(group)
+                        inserted = True
+                else:
+                    out.append(source)
+            return out
+
+        whole = [hit(c) for pid in completion_candidates for c in chunks(pid)]
+        nonpapers = [h for h in hits if h.get('paper_id') not in titles]
+        full_fits = bool(whole and fits_full(unique_sources(whole + nonpapers + supplemental)))
+        if full_fits:
+            hits, mode, full_papers = whole + nonpapers, 'full_material', completion_candidates[:]
+        else:
+            for pid in completion_candidates:
+                candidate = replace_group(hits, pid, [hit(c) for c in chunks(pid)])
+                if fits_full(unique_sources(candidate + supplemental)):
+                    hits = candidate
+                    full_papers.append(pid)
+                    continue
+                # An oversized paper may still have a complete relevant section
+                # that fits. Empty headings do not establish a section boundary.
+                sections = list(dict.fromkeys(h.get('section') for h in hits if h.get('paper_id') == pid and h.get('section')))
+                for section_name in sections:
+                    group = [hit(c) for c in chunks(pid) if c.get('section') == section_name]
+                    candidate = replace_group(hits, pid, group, section_name)
+                    if {h['id'] for h in candidate} != {h['id'] for h in hits} and fits_full(unique_sources(candidate + supplemental)):
+                        hits = candidate
+                        expanded_sections.append({'paper_id': pid, 'section': section_name})
+    hits = unique_sources(hits + supplemental)
     report = {'mode': mode, 'requested_paper_ids': paper_ids, 'scope_papers': ids,
               'scope_policy': 'strict' if strict_scope else 'focus_and_related_knowledge',
               'external_chunks': len(external),
               'full_material_considered': full_eligible, 'full_material_fits': full_fits,
+              'full_material_candidate_paper_ids': ids if paper_ids and full_eligible else completion_candidates,
+              'full_material_paper_ids': full_papers, 'expanded_sections': expanded_sections,
               'restored_chunk_ids': [h['id'] for h in restored],
               'candidate_chunks': len(hits), 'materials': {p['id']: p['current_material_id'] for p in papers},
               'material_levels': {p['id']: p['material_level'] for p in papers},

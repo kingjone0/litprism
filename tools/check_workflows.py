@@ -115,6 +115,10 @@ class AcceptanceModel:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--suite', choices=('workflows', 'n10'), default='workflows')
+    args = parser.parse_args()
     import uvicorn
     home = Path(os.environ['LITPRISM_HOME'])
     home.mkdir(parents=True, exist_ok=True)
@@ -201,7 +205,8 @@ def main():
                     raise RuntimeError('验收后端启动超时')
                 time.sleep(.05)
             env = dict(os.environ, LITPRISM_ACCEPTANCE_URL=f'http://127.0.0.1:{port}', LITPRISM_ACCEPTANCE_SEED=seed)
-            result = subprocess.run(['node', str(ROOT / 'tools/check_workflows.cjs')], env=env,
+            script = 'check_n10.cjs' if args.suite == 'n10' else 'check_workflows.cjs'
+            result = subprocess.run(['node', str(ROOT / 'tools' / script)], env=env,
                                     capture_output=True, text=True, encoding='utf-8',
                                     creationflags=subprocess.CREATE_NO_WINDOW)
             print(result.stdout, end='')

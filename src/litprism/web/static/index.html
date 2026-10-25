@@ -275,20 +275,20 @@
 <div class="toast-wrap" id="toasts"></div>
 
 <!-- ==================== 设置弹窗 ==================== -->
-<div class="modal-backdrop" id="settingsModal">
+<dialog class="modal-backdrop" id="settingsModal" aria-labelledby="settingsTitle">
   <div class="modal">
     <header class="modal-head">
-      <div class="modal-title">设置</div>
+      <div class="modal-title" id="settingsTitle">设置</div>
       <div class="spacer" style="flex:1"></div>
       <button class="btn sm" id="btnOpenConfig">打开配置文件</button>
-      <button class="modal-close" id="btnCloseSettings" title="关闭">✕</button>
+      <button class="modal-close" id="btnCloseSettings" title="关闭" aria-label="关闭设置" autofocus><span data-icon="close"></span></button>
     </header>
     <div class="modal-body">
       <nav class="modal-nav" id="settingsNav"></nav>
       <div class="modal-content" id="settingsPanes"></div>
     </div>
   </div>
-</div>
+</dialog>
 
 <script src="/static/lit-ui.js"></script>
 <script src="/static/app.js"></script>

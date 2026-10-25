@@ -153,7 +153,8 @@ function workflowDialog(title, body, submit, action = '确定') {
   const dialog = document.createElement('dialog');
   dialog.id = 'researchTask';
   dialog.className = 'task-dialog';
-  dialog.innerHTML = `<form><header><h2>${esc(title)}</h2><button type="button" data-cancel aria-label="关闭">${icon('close')}</button></header>
+  dialog.setAttribute('aria-labelledby', 'researchTaskTitle');
+  dialog.innerHTML = `<form><header><h2 id="researchTaskTitle">${esc(title)}</h2><button type="button" data-cancel aria-label="关闭">${icon('close')}</button></header>
     <div class="task-body">${body}</div><p class="task-error" role="alert"></p>
     <footer><button type="button" class="btn" data-cancel>取消</button>${submit ? `<button class="btn primary" type="submit">${esc(action)}</button>` : ''}</footer></form>`;
   document.body.appendChild(dialog);
@@ -256,11 +257,19 @@ async function downloadApi(path, filename, body) {
 }
 
 async function refreshLibrary() {
+  S.libraryRevision = (S.libraryRevision || 0) + 1;
+  S.compareKey = null;
+  S.comparison = null;
+  S.compareSources = [];
   S.status = await api('/api/status');
   await loadSidebar();
   S.selectedPapers = new Set([...S.selectedPapers].filter(id => S.papers.some(p => p.id === id)));
   syncBatchActions();
   await loadLibrary();
+  if (S.activeView === 'compare') {
+    $('#comparisonResult').textContent = '文献已变化，请重新选择文献进行对比。';
+    refreshInspector();
+  }
 }
 
 async function refreshCollections() {
@@ -367,13 +376,23 @@ async function importFiles(files) {
 
 async function loadComparison() {
   const box = $('#comparisonResult');
+  const request = S.compareRequest = (S.compareRequest || 0) + 1;
   const ids = [...S.selectedPapers];
   if (ids.length < 2) { box.innerHTML = '<div class="empty">请先在知识库勾选至少两篇文献，然后点击「对比所选」。</div>'; return; }
   box.innerHTML = '<div class="insp-note">正在读取原文并对比，完成后检查引用…</div>';
   const key = [...ids].sort().join(',');
   if (S.compareKey !== key) {
-    try { S.comparison = await runTask('compare', { refs: ids }); }
-    catch (error) { box.textContent = error.message; return; }
+    const revision = S.libraryRevision || 0;
+    try {
+      const result = await runTask('compare', { refs: ids });
+      if (request !== S.compareRequest) return;
+      if (revision !== (S.libraryRevision || 0) || [...S.selectedPapers].sort().join(',') !== key) {
+        box.textContent = '文献已变化，请重新选择文献进行对比。';
+        return;
+      }
+      S.comparison = result;
+    }
+    catch (error) { if (request === S.compareRequest) box.textContent = error.message; return; }
     S.compareKey = key;
   }
   const r = S.comparison;
@@ -1081,9 +1100,11 @@ $('#btnMovePapers').onclick = () => {
   });
 };
 $('#btnPaperExport').onclick = () => {
-  workflowDialog('导出文献', '<p class="source-intro">导出勾选文献；未勾选时导出全库。仅接受核验可引用的文献。</p><select class="select" name="format"><option value="bibtex">BibTeX</option><option value="ris">RIS</option><option value="json">JSON</option><option value="markdown">Markdown 解读与引用</option></select>', async values => {
+  const paperIds = [...S.selectedPapers];
+  if (!paperIds.length) return toast('请先勾选文献');
+  workflowDialog('导出文献', `<p class="source-intro">导出本次选择的 ${paperIds.length} 篇文献。仅接受核验可引用的文献。</p><select class="select" name="format"><option value="bibtex">BibTeX</option><option value="ris">RIS</option><option value="json">JSON</option><option value="markdown">Markdown 解读与引用</option></select>`, async values => {
     const extensions = { bibtex: 'bib', ris: 'ris', json: 'json', markdown: 'md' };
-    await downloadApi('/api/library/export', 'litprism.' + extensions[values.format], { format: values.format, ...(S.selectedPapers.size ? { paper_ids: [...S.selectedPapers] } : {}) });
+    await downloadApi('/api/library/export', 'litprism.' + extensions[values.format], { format: values.format, paper_ids: paperIds });
   }, '下载');
 };
 document.addEventListener('dragover', e => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });

@@ -506,6 +506,8 @@ const path = require('node:path');
     assert(budgetSubmit.x >= 0 && budgetSubmit.y >= 0 && budgetSubmit.x + budgetSubmit.width <= 1000 && budgetSubmit.y + budgetSubmit.height <= 660);
     await page.locator('#researchTask [data-cancel]').first().click();
     await page.locator('.workspace-nav [data-view=library]').click();
+    // 批量导出只对可见勾选开放，刷新后不继承已回收文献的选择。
+    await page.locator('[data-select-paper]').first().check();
     await page.locator('#btnPaperExport').click();
     await expect(page.locator('#researchTask')).toBeVisible();
     const submit = await page.locator('#researchTask [type=submit]').boundingBox();

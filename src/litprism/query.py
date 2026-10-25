@@ -13,6 +13,7 @@ BM25 是词法检索，中文问题直接去匹配英文正文必然全军覆没
 from __future__ import annotations
 
 import re
+from itertools import zip_longest
 
 from .textutil import build_fts_query
 
@@ -276,26 +277,30 @@ def llm_expand(llm, query: str) -> list[str]:
 
 
 def expand_query(query: str, llm=None, *, use_llm: bool = True) -> list[str]:
-    """返回检索词列表：关键词切分 + 中英词表扩展 +（可选）LLM 改写。"""
-    terms: list[str] = []
-    terms += keyword_terms(query)
-    terms += glossary_expand(query)
+    """Bound each branch separately; Chinese fragments cannot evict translations.
+
+    Interleave branches so the short LIKE fallback also sees translations.
+    This changes lexical candidates, never the source/trust/range checks.
+    """
+    branches = [keyword_terms(query)[:MAX_TERMS], glossary_expand(query)]
     if use_llm and llm is not None:
-        terms += llm_expand(llm, query)
+        branches.append(llm_expand(llm, query))
     # 原文本身也作为一路高精度分支（标题式查询能精确命中）
     if query and query.strip() and len(query) <= 80:
-        terms.insert(0, query.strip())
+        branches.insert(0, [query.strip()])
 
     seen: set[str] = set()
     out: list[str] = []
-    for t in terms:
-        k = t.lower()
-        if k in seen or not k.strip():
-            continue
-        seen.add(k)
-        out.append(t)
-        if len(out) >= MAX_TERMS:
-            break
+    for row in zip_longest(*branches):
+        for t in row:
+            if t is None:
+                continue
+            t = t.strip()
+            k = t.lower()
+            if k in seen or not k:
+                continue
+            seen.add(k)
+            out.append(t)
     return out
 
 

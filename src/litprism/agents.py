@@ -239,6 +239,10 @@ class QAAgent:
                              evidence_papers=list(dict.fromkeys(e['paper_id'] for e in excerpts if e['paper_id'])),
                              window_limited=len(excerpts) < res.retrieval['candidate_chunks'])
         res.retrieval['evidence_manifest'] = delivery
+        # A provider overflow may have removed excerpts after the local fit
+        # check. Report complete papers from the final request, not the plan.
+        res.retrieval['full_material_paper_ids'] = [p['paper_id'] for p in delivery['papers']
+                                                  if p['complete_current_material']]
         res.provider_usage = getattr(self.llm, 'last_usage', None) if error is None else None
         res.reasoning = getattr(self.llm, 'last_reasoning', '') if error is None else ''
         res.request_settings = dict(getattr(self.llm, 'last_request_settings', {}) or {})

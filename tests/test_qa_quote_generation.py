@@ -55,3 +55,49 @@ def test_real_qa_generation_preserves_full_prefix_budget_and_protocol(env,anchor
     assert texts[1][located['start']:located['end']] == located['quote'] == texts[1]
     assert first.evidence_audit['semantic_status']=='unreviewed'
     assert cfg.llm.model_window_tokens==1000000 and cfg.llm.model_max_output_tokens==384000
+
+
+def test_coverage_guidance_is_delivered_without_auto_rewriting_or_new_semantic_block(env):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    cfg.llm.model_max_output_tokens = 384000
+    pid = kb.add_paper(title='Coverage control', verify_level='verified', material_level='fulltext')
+    kb.add_chunks(pid, [{'text': 'Parallel attention is computed. Outputs are concatenated. Different subspaces are used.', 'page': 1}])
+    text = 'Attention is computed in parallel and outputs are concatenated.[P1]'
+    calls = []
+    def respond(messages, *, task='', **kwargs):
+        calls.append(task)
+        assert '不等于当前短引句已覆盖这些细节' in messages[0]['content']
+        assert '局部缺口扩大为整个问题未定位' in messages[-1]['content']
+        return {'answer_units': [{'text': text, 'subject': 'Attention', 'basis': 'direct',
+                'sources': ['P1'], 'quotes': [{'source': 'P1', 'quote': 'Different subspaces are used.'}]}],
+                'insufficient_evidence': False, 'confidence': 'high', 'open_questions': []}
+    model.chat_json = respond
+    answer = QAAgent(kb, cfg, model).ask('How does the mechanism work?', paper_ids=[pid])
+    assert calls == ['qa']
+    assert answer.answer == text and answer.status == 'answered'
+    assert answer.evidence_audit['semantic_status'] == 'unreviewed'
+    assert not answer.evidence_audit['blocking_issues']
+
+
+def test_local_gap_keeps_supported_part_and_does_not_force_whole_answer_refusal(env):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    cfg.llm.model_max_output_tokens = 384000
+    pid = kb.add_paper(title='Partial information', verify_level='verified', material_level='fulltext')
+    kb.add_chunks(pid, [{'text': 'Different subspaces are used to represent positions.', 'page': 1}])
+    calls = []
+    def respond(messages, *, task='', **kwargs):
+        calls.append(task)
+        assert '已有简短动机或局部作用' in messages[0]['content']
+        return {'answer_units': [
+            {'text': 'Different subspaces represent positions.[P1]', 'subject': 'Representation', 'basis': 'direct',
+             'sources': ['P1'], 'quotes': [{'source': 'P1', 'quote': 'Different subspaces are used to represent positions.'}]},
+            {'text': 'An exact loss formula has not been located in these excerpts.', 'subject': 'Exact loss formula',
+             'basis': 'not_located', 'sources': [], 'quotes': []}],
+            'insufficient_evidence': False, 'confidence': 'medium', 'open_questions': []}
+    model.chat_json = respond
+    answer = QAAgent(kb, cfg, model).ask('What is the role, and what is the exact loss formula?', paper_ids=[pid])
+    assert calls == ['qa'] and answer.status == 'answered'
+    assert 'Different subspaces' in answer.answer and 'has not been located' in answer.answer
+    assert not answer.evidence_audit['blocking_issues']
