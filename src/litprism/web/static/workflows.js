@@ -187,7 +187,7 @@ async function loadAnalysisRuns(pid) {
   try {
     const { items } = await api('/api/paper/'+encodeURIComponent(pid)+'/analysis-runs');
     if (S.activePaper !== pid || $('#analysisRuns') !== box) return;
-    box.innerHTML = `<details ${items.length ? 'open' : ''}><summary>分阶段运行记录（${items.length}${items.length === 30 ? '，最近' : ''}）</summary>
+    box.innerHTML = `<details class="run-log" ${items.length ? 'open' : ''}><summary>分阶段运行记录（${items.length}${items.length === 30 ? '，最近' : ''}）</summary>
       <p class="source-intro">暂停时保留原解读。刷新或重新打开应用不会自动恢复调用。机器复核通过仍不等于人工确认。</p>
       <button class="btn sm" data-refresh-runs>刷新记录</button>
       ${items.map(run => `<div class="analysis-run" data-run-id="${esc(run.id)}">
@@ -259,7 +259,7 @@ async function refreshLibrary() {
   S.status = await api('/api/status');
   await loadSidebar();
   S.selectedPapers = new Set([...S.selectedPapers].filter(id => S.papers.some(p => p.id === id)));
-  $('#btnCompareSelected').disabled = S.selectedPapers.size < 2;
+  syncBatchActions();
   await loadLibrary();
 }
 
@@ -490,6 +490,17 @@ function evHit(text, claim) {
     if (score > bestScore) { bestScore = score; best = [a, b]; }
   }
   return bestScore >= 0.12 ? best : null;
+}
+
+/**
+ * 作者行折叠：30 位作者全列会把右栏撑满，且看不出重点。
+ * 8 人以内全列，超过则前 6 位 + 「等 N 人」，完整名单放 title。
+ */
+function authorLine(authors) {
+  const list = (Array.isArray(authors) ? authors : String(authors || '').split(/[;,]/))
+    .map(a => String(a).trim()).filter(Boolean);
+  if (!list.length) return '';
+  return list.length <= 8 ? list.join('、') : `${list.slice(0, 6).join('、')} 等 ${list.length} 人`;
 }
 
 function renderEvidenceText(text, claim) {
@@ -939,10 +950,10 @@ async function loadEvidenceDetail(ref) {
       <div class="source-intro">${esc(kind)} · ${esc(trustLabel(d.trust_level))} · ${d.page == null ? '无页码' : '第 '+esc(d.page)+' 页'}</div>
       ${d.dependency_status?.refs?.length || d.dependency_status?.issues?.length ? `<details open><summary>知识依据与当前状态</summary>${[...(d.dependency_status.issues || []),...(d.dependency_status.warnings || [])].map(s => `<p>${esc(s)}</p>`).join('')}${d.dependency_status.refs.map(s => `<p><a href="#evidence-${esc(s.chunk_id)}" data-evidence-ref="${esc(s.chunk_id)}">${esc(s.title || '上游来源已不可用')}${s.page == null ? '' : ' · p.'+esc(s.page)}</a>${s.historical ? ' · 历史材料' : ''}${s.issues.length ? ' · '+s.issues.map(esc).join('；') : ''}</p>`).join('')}</details>` : ''}
       ${d.acquired_at ? `<p class="source-intro">搜索摘要获取时间：${esc(sourceTime(d.acquired_at))}</p>` : ''}
-      ${d.material ? `<p class="source-intro">${d.material.status === 'current' ? '当前材料' : '历史材料'} · ${esc(d.material.imported_at)} · 原引用仍指向这份材料。</p>` : ''}
+      ${d.material ? `<p class="source-intro">${d.material.status === 'current' ? '当前材料' : '历史材料'} · ${esc(materialTime(d.material.imported_at))} · 原引用仍指向这份材料。</p>` : ''}
       ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">打开原始来源 ↗</a><p class="source-url">${esc(url)}</p>` : '<p class="source-intro">来源：本地文献或用户提供的知识</p>'}
       ${d.doi ? `<p>DOI：${esc(d.doi)}</p>` : ''}
-      ${d.authors ? `<p>作者：${esc(Array.isArray(d.authors) ? d.authors.join('、') : d.authors)}</p>` : ''}
+      ${d.authors ? `<p>作者：<span title="${esc((Array.isArray(d.authors) ? d.authors : [d.authors]).join('、'))}">${esc(authorLine(d.authors))}</span></p>` : ''}
       ${!d.citable ? `<p class="source-intro">${d.trust_level === 'pending' && d.acquisition === 'search_summary' ? '搜索摘要，尚未人工确认。' : '该来源当前不可用，请选择其他依据。'}</p>` : ''}
       <div class="reading-text evidence-excerpt">${esc(d.text || '')}</div>
       ${d.content && d.content !== d.text ? `<details><summary>查看完整内容</summary><div class="reading-text">${esc(d.content)}</div></details>` : ''}
@@ -969,7 +980,8 @@ async function loadEvidenceDetail(ref) {
 
 async function loadKnowledge() {
   const d = await api('/api/evidence');
-  $('#knowledgeList').innerHTML = d.items.length ? d.items.map(s => `<div class="list-item"><div class="list-main"><a href="#evidence-${esc(s.id)}" data-evidence-ref="${esc(s.id)}">${esc(s.title)}</a><p>${esc(s.kind === 'web' ? '网页' : '知识条目')} · ${esc(trustLabel(s.effective_status || s.status))}</p></div></div>`).join('') : '<div class="empty">尚无知识或网页候选。保存原文片段后，在右栏人工审核。</div>';
+  $('#knowledgeList').innerHTML = d.items.length ? d.items.map(s => `<div class="list-item"><div class="list-main"><a href="#evidence-${esc(s.id)}" data-evidence-ref="${esc(s.id)}">${esc(s.title)}</a><p>${esc(s.kind === 'web' ? '网页' : '知识条目')} · ${esc(trustLabel(s.effective_status || s.status))}</p></div></div>`).join('')
+    : emptyState({ icon: 'library', title: '还没有知识条目', desc: '在右栏把可引用的原文片段或网页快照人工确认后，会出现在这里。' });
 }
 
 document.addEventListener('click', e => {
@@ -992,7 +1004,8 @@ $('#btnSearchEvidence').onclick = async () => {
 async function loadMemories() {
   const d = await api('/api/memories');
   $('#memoryList').innerHTML = (d.items || []).map(m => `<div class="list-item"><div class="list-main"><strong>${esc(m.key || m.kind)}</strong><p>${esc(m.value)}</p></div>
-    <button class="btn sm" data-edit-memory="${esc(m.id)}">编辑</button><button class="btn sm" data-delete-memory="${esc(m.id)}">删除</button></div>`).join('') || '<div class="empty">尚未设置研究偏好。</div>';
+    <button class="btn sm" data-edit-memory="${esc(m.id)}">编辑</button><button class="btn sm" data-delete-memory="${esc(m.id)}">删除</button></div>`).join('')
+    || emptyState({ icon: 'settings', title: '还没有研究偏好', desc: '研究方向、术语与表达习惯记在这里；论文事实仍必须走核验知识库。' });
   $$('[data-edit-memory]').forEach(b => b.onclick = () => editMemory(d.items.find(m => m.id === b.dataset.editMemory)));
   $$('[data-delete-memory]').forEach(b => b.onclick = async () => {
     try { await api('/api/memories/' + b.dataset.deleteMemory, { method: 'DELETE' });
@@ -1016,7 +1029,8 @@ function editMemory(memory = {}) {
 
 async function loadTrash() {
   const data = await api('/api/trash');
-  $('#trashList').innerHTML = (data.items || []).map(p => `<div class="list-item"><div class="list-main">${esc(p.display_title || p.title)}<p class="muted">${esc(p.deleted_at)}</p></div><button class="btn" data-restore-paper="${esc(p.id)}">恢复文献</button></div>`).join('') || '<div class="empty">回收站为空。</div>';
+  $('#trashList').innerHTML = (data.items || []).map(p => `<div class="list-item"><div class="list-main">${esc(p.display_title || p.title)}<p class="muted">${esc(p.deleted_at)}</p></div><button class="btn" data-restore-paper="${esc(p.id)}">恢复文献</button></div>`).join('')
+    || emptyState({ icon: 'trash', title: '回收站为空', desc: '删除的文献会在这里保留至少 30 天，恢复前不参与检索。' });
   $$('[data-restore-paper]').forEach(b => b.onclick = async () => {
     try { await api('/api/trash/' + b.dataset.restorePaper + '/restore', { method: 'POST' }); await loadTrash(); await refreshLibrary(); }
     catch (error) { toast(error.message, true); }
@@ -1088,6 +1102,20 @@ refreshCollections().catch(e => toast(e.message, true));
  * ------------------------------------------------------------------------ */
 const POOL_FILTERS = { open: '待处理', library: '已在库', all: '全部' };
 
+/**
+ * 批量动作都依赖「已选」。未选中时全部禁用 —— 否则点了没有任何反应，
+ * 用户会以为功能坏了。对比需要至少两篇。
+ */
+function syncBatchActions() {
+  const none = S.selectedPapers.size === 0;
+  ['#btnMovePapers', '#btnBatchDelete', '#btnPaperExport', '#btnBatchVerify'].forEach(sel => {
+    const el = $(sel);
+    if (el) el.disabled = none;
+  });
+  const cmp = $('#btnCompareSelected');
+  if (cmp) cmp.disabled = S.selectedPapers.size < 2;
+}
+
 function poolStatusChip(item) {
   if (item.in_library) return '<span class="ev-claim-chip ok">已在库</span>';
   if (item.status === 'ignored') return '<span class="ev-claim-chip">已忽略</span>';
@@ -1149,9 +1177,13 @@ async function loadCandidates() {
     ? `<ul class="pool-list">${[...groups].map(([q, rows]) => `
         ${filter === 'all' ? `<li class="pool-group">${esc(q)}<span>${rows.length}</span></li>` : ''}
         ${rows.map(poolRow).join('')}`).join('')}</ul>`
-    : `<p class="pool-empty">${filter === 'library'
-        ? '还没有已入库的候选。导入论文后点「与知识库核对」，这里会自动更新。'
-        : '暂无待处理候选。用上方检索，或手动补充一条。'}</p>`;
+    : emptyState({
+        icon: 'search',
+        title: filter === 'library' ? '还没有已入库的候选' : '候选池为空',
+        desc: filter === 'library'
+          ? '导入论文后点「与知识库核对」，这里会自动更新。'
+          : '用上方检索获取候选，或手动补充一条题录。',
+      });
   box.innerHTML = `<div class="pool-head">
       <h2>候选池<span class="pool-count">${items.length}</span></h2>
       <div class="pool-tools">
@@ -1159,8 +1191,10 @@ async function loadCandidates() {
           ${Object.entries(POOL_FILTERS).map(([k, label]) =>
             `<button data-pool-filter="${k}" class="${filter === k ? 'active' : ''}">${label}</button>`).join('')}
         </div>
-        <button class="btn sm" data-pool-sync>与知识库核对</button>
-        <button class="btn sm" data-pool-add>手动补充</button>
+        <div class="pool-actions">
+          <button class="btn sm" data-pool-sync>与知识库核对</button>
+          <button class="btn sm" data-pool-add>手动补充</button>
+        </div>
       </div>
     </div>
     <form class="pool-form" id="poolAddForm" hidden>

@@ -1,10 +1,27 @@
 """统一来源详情和右栏人工审核入口。"""
 from __future__ import annotations
 
+import json
+
 from fastapi import HTTPException
 
 from ..knowledge import create_source, get_source, review_source, source_chunk
 from ..whitelist import is_citable
+
+
+def _parse_authors(raw):
+    """作者在库里是 JSON 文本；直接透传会让前端把 `["A", "B"]` 原样打出来。"""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(v) for v in raw]
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return [part.strip() for part in str(raw).split(';') if part.strip()]
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return [str(value)] if str(value).strip() else []
 
 
 def evidence_detail(kb, ref):
@@ -27,6 +44,7 @@ def _evidence_detail(kb, ref):
     if row is None:
         raise HTTPException(404, '来源已不存在，不能替换为其他来源。')
     data = dict(row)
+    data['authors'] = _parse_authors(data.get('authors'))
     data['material'] = next((m for m in kb.list_materials(data['paper_id']) if m['id'] == data.get('material_id')), None)
     return {**data, 'source_kind': 'paper', 'chunk_id': data['id'], 'trust_level': 'deleted' if data['deleted_at'] else data['verify_level'],
             'citable': not data['deleted_at'] and is_citable(data['verify_level'])}

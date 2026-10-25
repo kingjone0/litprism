@@ -79,7 +79,6 @@
           <div class="page-head">
             <div class="row">
               <div>
-                <div class="eyebrow">YOUR RESEARCH LIBRARY</div>
                 <h1 class="page-title">从可靠的文献开始</h1>
                 <div class="page-sub" id="libSub">—</div>
               </div>
@@ -96,15 +95,18 @@
             <select class="select" id="collectionFilter" aria-label="按分组筛选"><option value="">全部分组</option></select>
             <button class="btn" id="btnCollection">管理分组</button>
             <span class="spacer"></span>
-            <button class="btn" id="btnMovePapers">移动到分组</button>
-            <button class="btn" id="btnCompareSelected" disabled>对比所选</button>
-            <button class="btn" id="btnPaperExport">导出文献</button>
-            <button class="btn" id="btnBatchDelete">批量移入回收站</button>
-            <button class="btn" id="btnBatchVerify">重新核验所选</button>
+            <div class="tool-group" role="group" aria-label="对所选文献的批量操作">
+              <span class="tool-group-label">对所选</span>
+              <button class="btn" id="btnMovePapers">移入分组</button>
+              <button class="btn" id="btnCompareSelected" disabled>对比</button>
+              <button class="btn" id="btnPaperExport">导出</button>
+              <button class="btn" id="btnBatchDelete">回收站</button>
+              <button class="btn" id="btnBatchVerify">重新核验</button>
+            </div>
           </div>
           <div id="collectionChips" class="row wrap"></div>
           <div id="importResults" aria-live="polite"></div>
-          <div class="library-summary" id="libSummary"></div>
+          <div id="libSummary"></div>
           <div class="section-heading"><h2>全部文献</h2><span>核验状态随文献保留</span></div>
           <div class="card library-card">
             <div class="list" id="paperList"></div>
@@ -116,7 +118,23 @@
         </section>
         <section class="pane" data-pane="knowledge">
           <div class="page-head"><div class="page-title">来源与知识</div><p class="page-sub">候选先审核。确认后进入知识库；网页和知识条目保留原始类型，不冒充论文。</p></div>
-          <div class="row wrap"><button class="btn primary" id="btnAddKnowledge">保存原文候选</button><input class="input" id="webEvidenceQuery" placeholder="搜索网页候选（需要搜索服务配置）"><button class="btn" id="btnSearchEvidence">搜索网页</button></div>
+          <div class="action-block">
+            <div class="action-text">
+              <p class="action-title">保存原文候选</p>
+              <p class="action-desc">把一段原文存为待审候选，在右栏人工审核后才进入知识库。</p>
+            </div>
+            <button class="btn primary" id="btnAddKnowledge">保存候选</button>
+          </div>
+          <div class="action-block">
+            <div class="action-text">
+              <p class="action-title">搜索网页</p>
+              <p class="action-desc">需要先配置搜索服务；结果先作为候选，不直接当事实依据。</p>
+            </div>
+            <div class="action-controls">
+              <input class="input" id="webEvidenceQuery" placeholder="关键词">
+              <button class="btn" id="btnSearchEvidence">搜索</button>
+            </div>
+          </div>
           <div id="knowledgeList"></div>
         </section>
 
@@ -161,7 +179,7 @@
                 <input class="input" id="verifyInput" placeholder="输入论文标题或 DOI">
                 <button class="btn primary" id="btnVerify">核验</button>
               </div>
-              <div style="margin-top:8px;font-size:11.5px;color:var(--muted)">
+              <div style="margin-top:8px;font-size:12px;color:var(--muted)">
                 白名单命中的文献不走网络，直接返回「🔵人工确认」，并显示确认当时的自动判定。
               </div>
             </div>
@@ -203,7 +221,7 @@
             </div>
           </div>
           <div class="search-box" style="margin-bottom:12px">
-            <span class="ico">⌕</span>
+            <span class="ico"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></span>
             <input id="skillSearch" placeholder="搜索 Skill 名称或路径">
           </div>
           <div id="skillCards"></div>
@@ -215,10 +233,10 @@
               </div>
             </div>
             <div class="hr"></div>
-            <div style="font-size:11.5px;color:var(--muted);line-height:1.7">
+            <div style="font-size:12px;color:var(--muted);line-height:1.7">
               每个 Skill 是一个子目录，内含 <code class="mono">skill.yaml</code> 与
               <code class="mono">prompt.md</code>。<br>
-              ⚠️ 一期只支持<strong>声明式</strong> Skill —— 目录内的可执行文件不会被加载或执行。
+              <span class="inline-note"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 2.5 20h19L12 4Z"/><path d="M12 10v4.5M12 17.4v.1"/></svg>一期只支持<strong>声明式</strong> Skill —— 目录内的可执行文件不会被加载或执行。</span>
             </div>
           </div></div>
         </section>

@@ -104,7 +104,59 @@ app.whenReady().then(async () => {
   await run(`openView('paper', {paperId: ${JSON.stringify(paper)}})`);
   await sleep(1800);
   log('论文页位置条:', await run(`(document.querySelector('.loc-chip')||{}).textContent||''`));
+
+  // 2a) 量状态条与 summary 标记的真实几何：三角默认画在内容盒外，
+  //     父级 padding 不足时会压到边框上
+  const geom = await run(`(() => {
+    const pick = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      return {x: Math.round(b.x), w: Math.round(b.width), pl: cs.paddingLeft, ml: cs.marginLeft,
+              display: cs.display, list: cs.listStylePosition};
+    };
+    const box = document.querySelector('.analysis-status');
+    const bb = box && box.getBoundingClientRect();
+    // 其他 details.card 是否同样贴边
+    const cards = [...document.querySelectorAll('details.card')].map(el => {
+      const b = el.getBoundingClientRect();
+      const s = el.querySelector('summary');
+      const cs = s ? getComputedStyle(s) : null;
+      const r = document.createRange(); if (s) r.selectNodeContents(s);
+      return {text: (s?.textContent || '').trim().slice(0, 12),
+              pad: getComputedStyle(el).paddingLeft,
+              sumPad: cs?.paddingLeft, sumDisplay: cs?.display,
+              markerRoom: s ? Math.round(r.getBoundingClientRect().x - b.x) : null};
+    });
+    return {
+      box: pick('.analysis-status'),
+      summary: pick('.analysis-status[data-level="block"] > .status-more > summary'),
+      // 三角在内容盒左侧，用首行文字的起点减去盒左边界估算其占用
+      cards,
+      textStart: (() => {
+        const s = document.querySelector('.status-more > summary');
+        if (!s) return null;
+        const r = document.createRange(); r.selectNodeContents(s);
+        return Math.round(r.getBoundingClientRect().x - bb.x);
+      })(),
+    };
+  })()`);
+  log('状态条几何:', geom);
   await shot('paper-view');
+
+  // 2b) 只有提示、没有阻断时的状态条形态（真实数据难凑，直接替换 DOM 验证）
+  const noticeOnly = await run(`(() => {
+    const block = document.querySelector('.analysis-status');
+    if (!block) return 'no-block';
+    block.outerHTML = analysisStatusBlock([
+      {level: 'notice', text: '当前使用离线占位模型（mock），结果仅演示流程，不构成真实学术解读。'},
+      {level: 'notice', text: '术语提取未完成：provider 超时'},
+    ]);
+    return 'replaced';
+  })()`);
+  log('提示态替换:', noticeOnly);
+  await shot('paper-notice-only');
 
   // 3) N05 补录：加一条 → 面板与召回应更新
   const added = await run(`(async () => {
@@ -143,6 +195,43 @@ app.whenReady().then(async () => {
   await run(`enterView('library')`);
   await sleep(900);
   log('点知识库后:', await run(`({view:S.activeView, chip:(document.querySelector('.loc-chip')||{}).textContent||'', 关闭按钮:!!document.querySelector('[data-close]')})`));
+
+  // 6) 深色主题下的状态条：新组件自带配色，必须两种主题都看
+  await run(`localStorage.setItem('litprism-theme','dark'); location.reload()`);
+  await sleep(2200);
+  await run(`openView('paper', {paperId: ${JSON.stringify(paper)}})`);
+  await sleep(1600);
+  await shot('paper-view-dark');
+  await run(`localStorage.setItem('litprism-theme','light'); location.reload()`);
+  await sleep(2200);
+
+  // 7) 其余页面逐个过一遍（只截图，不改动）
+  const views = ['library', 'verify', 'recommend', 'deliverables', 'knowledge',
+                 'memories', 'trash', 'skills', 'settings'];
+  for (const v of views) {
+    await run(`enterView('${v}')`);
+    await sleep(800);
+    await shot('view-' + v);
+  }
+
+  // 8) 右栏：证据详情（来源面板）—— 这是对话与解读共用的侧栏
+  // 设置页会留下模态框，先关掉，否则挡住右栏
+  // 设置页是 #settingsModal 覆盖层（不是 <dialog>），必须用它的关闭函数
+  await run(`typeof closeSettings === 'function' ? closeSettings() : $('#settingsModal')?.classList.remove('open')`);
+  await sleep(500);
+  const evidence = await run(`(async () => {
+    const d = await api('/api/paper/' + ${JSON.stringify(paper)} + '/text');
+    const c = d.pages.flatMap(p => p.chunks)[0];
+    openView('paper', {paperId: ${JSON.stringify(paper)}});
+    await new Promise(r => setTimeout(r, 600));
+    S.evidenceRef = c.chunk_id;
+    toggleInspector(true);
+    refreshInspector();
+    return c.chunk_id;
+  })()`);
+  log('右栏证据:', evidence);
+  await sleep(1400);
+  await shot('inspector-evidence');
 
   child.kill();
   app.quit();

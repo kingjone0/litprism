@@ -13,7 +13,7 @@
   --border-strong: #d5d1ca;
   --text:          #23211e;
   --text-2:        #55504a;
-  --muted:         #86807a;
+  --muted:         #726c65;
   --accent:        #2d6a4f;
   --accent-soft:   #e8f1ec;
   --accent-line:   #b9d5c6;
@@ -373,6 +373,78 @@ body.is-electron .titlebar { padding-right: 150px; }
   font-weight: 600; color: var(--text); border-top: 1px solid var(--border-strong); border-bottom: 0;
 }
 
+/* 解读状态条：阻断只留一条，其余折叠 —— 同权重堆叠会让人跳过全部告警 */
+.analysis-status {
+  margin: 12px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+.analysis-status[data-level="block"] {
+  padding: 12px 14px;
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+.status-lead { display: flex; align-items: flex-start; gap: 10px; }
+.status-mark { flex: 0 0 auto; margin-top: 1px; color: var(--warn); }
+.status-mark .icon { width: 18px; height: 18px; display: block; }
+.status-text { flex: 1; min-width: 0; }
+.status-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.status-detail { margin: 3px 0 0; font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.analysis-status .btn { flex: 0 0 auto; align-self: center; }
+.status-more { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border-strong); }
+
+/* ---------------- 折叠头统一 ----------------
+   原生 details 三角画在内容盒外侧，父级内边距只有 12–14px 时会压住边框。
+   四处折叠头共用一套自绘 chevron，位置可控且互相一致。 */
+.analysis-status > summary,
+.status-more > summary,
+details.card > summary,
+.run-log > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  list-style: none;
+  cursor: pointer;
+}
+.analysis-status > summary::-webkit-details-marker,
+.status-more > summary::-webkit-details-marker,
+details.card > summary::-webkit-details-marker,
+.run-log > summary::-webkit-details-marker { display: none; }
+.analysis-status > summary::before,
+.status-more > summary::before,
+details.card > summary::before,
+.run-log > summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-left: 4.5px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transform-origin: 35% 50%;
+  transition: transform .15s ease;
+}
+.analysis-status[open] > summary::before,
+.status-more[open] > summary::before,
+details.card[open] > summary::before,
+.run-log[open] > summary::before { transform: rotate(90deg); }
+
+/* 状态条内的折叠头更轻：小一号、次级色 */
+.analysis-status > summary,
+.status-more > summary { font-size: 12px; color: var(--text-2); }
+/* 卡片与运行记录保留正文字号，靠内边距与卡片正文对齐 */
+details.card > summary,
+.run-log > summary { padding: 10px 14px; }
+details.card > summary::before,
+.run-log > summary::before { opacity: .5; }
+
+.analysis-status[data-level="notice"] { padding: 8px 12px; }
+.status-list { margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.7; color: var(--text-2); }
+.status-list li + li { margin-top: 4px; }
+/* 解读元信息：跟在状态条下方，与告警区分开，也不落在两块卡片之间 */
+.analysis-meta { margin: 2px 0 6px; font-size: 12px; color: var(--muted); }
+
 .work-body {
   flex: 1;
   min-height: 0;
@@ -534,6 +606,50 @@ body.is-electron .titlebar { padding-right: 150px; }
   border-radius: 4px;
   border: 1px solid var(--border);
 }
+
+/* 页面上的并列动作：每件事一个区块，标题 + 说明 + 控件，不再被输入框串成一排 */
+.action-block {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.action-block:last-of-type { border-bottom: 0; }
+.action-text { min-width: 0; }
+.action-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.action-desc { margin: 3px 0 0; font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.action-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.action-controls .input { width: 240px; }
+
+/* 批量操作组：依赖"已选"的动作单独成组，避免和一次性动作同权重 */
+.tool-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+.tool-group-label { font-size: 12px; color: var(--muted); }
+.tool-group .btn { background: var(--panel); }
+
+/* 统一空状态 ----------------
+   之前存在卡片 / 虚线框 / 裸文字三种写法，现在只有这一种。 */
+.empty-state { padding: 46px 24px; text-align: center; }
+.empty-state .empty-mark { margin: 0 auto 16px; }
+.empty-state-title { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: var(--text); }
+.empty-state-desc { margin: 0 auto; max-width: 460px; font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
+
+/* 设置左栏图标：改用 SVG 后需要固定尺寸与基线 */
+.set-ico { display: inline-flex; width: 15px; height: 15px; opacity: .75; }
+.set-ico .icon { width: 15px; height: 15px; }
+/* 行内提示图标：与文字同高、同色 */
+.inline-note { display: inline-flex; align-items: center; gap: 5px; }
+.inline-note .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 
 /* ---------------- 表单 ---------------- */
 .field { margin-bottom: 14px; }
@@ -965,7 +1081,7 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
 .evidence-toggle.selected { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 .brand-mark { width: 36px; height: 40px; border-radius: 10px; background: var(--accent); color: var(--panel); }
 .brand-mark .icon { width: 26px; height: 26px; }
-.brand-caption { display: block; font-size: 10px; color: var(--text-2); letter-spacing: .06em; margin-top: 2px; }
+.brand-caption { display: block; font-size: 11px; color: var(--text-2); letter-spacing: .06em; margin-top: 2px; }
 .brand-caption #brandVersion { margin-left: 5px; color: var(--muted); }
 .side-launch { padding: 0 14px 18px; }
 .side-launch .side-new { width: 100%; margin: 0; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; background: var(--accent); border: 1px solid var(--accent); color: #fff; border-radius: 9px; font-size: 13px; }
@@ -978,20 +1094,16 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
 .side-items .side-item { padding-top: 8px; padding-bottom: 8px; }
 .side-items .side-item .icon { width: 15px; height: 15px; color: var(--muted); }
 .side-items .side-item .label { font-size: 12px; }
-.eyebrow { font: 10px/1.5 var(--sans); letter-spacing: .15em; color: var(--accent); margin-bottom: 9px; font-weight: 600; }
 .library-search { width: 250px; max-width: 100%; background: var(--panel); }
-.library-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 36px; }
-.summary-item { display: flex; align-items: center; gap: 14px; padding: 20px; background: var(--panel-2); border-radius: 12px; }
-.summary-item > .icon { color: var(--accent); width: 22px; height: 22px; }
-.summary-item strong { display: block; font-size: 26px; font-weight: 550; line-height: 1.25; }
-.summary-item span { display: block; font-size: 12px; color: var(--text-2); margin-top: 4px; }
+.library-facts { margin: 12px 0 0; font-size: 12px; color: var(--muted); }
 .section-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 14px; }
 .section-heading h2 { font-size: 14px; font-weight: 600; }
 .section-heading > span { font-size: 11px; color: var(--muted); }
 .library-card { overflow: hidden; }
 .library-card .list-item { padding: 22px; gap: 18px; }
 .paper-mark { display: grid; place-items: center; width: 38px; height: 46px; border: 1px solid var(--border); border-radius: 6px; color: var(--accent); background: var(--bg); flex: none; }
-.paper-open { color: var(--muted); align-self: center; }
+.paper-open { color: var(--muted); align-self: center; display: inline-flex; }
+.paper-open .icon { width: 14px; height: 14px; }
 .status-badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; margin-right: 3px; }
 .reading-text { white-space: pre-wrap; font-size: 15px; line-height: 1.95; overflow-wrap: anywhere; }
 .empty-mark { display: grid; place-items: center; width: 58px; height: 58px; margin: 0 auto 22px; color: var(--accent); border-radius: 18px; background: var(--accent-soft); }
@@ -1010,6 +1122,8 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
 .starter { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 11px 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); font-size: 12.5px; color: var(--text-2); transition: border-color .15s ease, color .15s ease, background .15s ease; }
 .starter:hover { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
 .starter span { opacity: .55; font-size: 12px; }
+.starter-arrow { display: inline-flex; align-items: center; }
+.starter-arrow .icon { width: 13px; height: 13px; }
 
 /* 输入区：一体化面板，不再是一个浮在页面上的卡片。
    焦点环落在整块面板上，视线只跟一个框。 */
@@ -1083,8 +1197,7 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
   .main.sidebar-hidden { grid-template-columns: 0 1fr 0; }
   .inspector { position: absolute; right: 0; top: 0; bottom: 0; width: min(var(--inspector-w), 90vw); z-index: 20; box-shadow: -12px 0 32px rgba(0,0,0,.12); }
   .main.inspector-hidden .inspector { display: none; }
-  .summary-item { gap: 10px; padding: 16px; }
-  .toolbar-search kbd { display: none; }
+    .toolbar-search kbd { display: none; }
   .settings { grid-template-columns: 1fr; }
   .settings-nav { position: static; display: flex; gap: 4px; flex-wrap: wrap; }
   .settings-nav button { width: auto; }
@@ -1094,13 +1207,7 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
   :root { --sidebar-w: 190px; }
   .titlebar { gap: 8px; padding: 0 12px; }
   .toolbar-label, .toolbar-divider, .toolbar-search > span:not([data-icon]) { display: none; }
-  .toolbar-search { margin: 0; padding: 6px; }
-  .library-summary { gap: 8px; }
-  .summary-item { padding: 12px; }
-  .summary-item > .icon { display: none; }
-  .summary-item strong { font-size: 22px; }
-  .summary-item span { font-size: 11px; }
-  .library-card .list-item { padding: 16px; gap: 10px; }
+  .toolbar-search { margin: 0; padding: 6px; }          .library-card .list-item { padding: 16px; gap: 10px; }
   .paper-mark { display: none; }
   .chat-layout { padding-left: 16px; padding-right: 16px; }
   #chatCompose kbd { display: none; }
@@ -1175,7 +1282,9 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
 .pool-head h2 { margin: 0; font-size: 15px; letter-spacing: .01em; color: var(--text); }
 .pool-count { margin-left: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .pool-sub { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
-.pool-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pool-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* 筛选与动作分开：贴在一起时两个按钮会被读成分段控件的一部分 */
+.pool-actions { display: inline-flex; align-items: center; gap: 8px; padding-left: 10px; border-left: 1px solid var(--border); }
 .pool-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .pool-seg button {
   border: 0; background: transparent; padding: 5px 11px; font-size: 12.5px; color: var(--text-2);

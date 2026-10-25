@@ -46,11 +46,33 @@ function icon(name) {
     skills: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3H9Z"/>',
     send: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
+    alert: '<path d="M12 4 2.5 20h19L12 4Z"/><path d="M12 10v4.5M12 17.4v.1"/>',
+    trash: '<path d="M4 7h16M9.5 7V4.8h5V7"/><path d="M6.5 7 7.6 20h8.8L17.5 7"/><path d="M10.5 11v5M13.5 11v5"/>',
+    note: '<path d="M5 3.5h9L19 8.5V20.5H5Z"/><path d="M14 3.5v5h5"/><path d="M8.5 13h7M8.5 16.5h4.5"/>',
+    arrow: '<path d="M7 17 17 7"/><path d="M9 7h8v8"/>',
   };
   return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.document}</svg>`;
 }
 
 /* ---------------------------------------------------------------- 工具 */
+/**
+ * 统一空状态。
+ *
+ * 同一件事此前有三种写法：带图标的卡片（交付物/Skill）、虚线框（发现文献）、
+ * 裸文字居中（来源与知识/研究偏好/回收站）。收敛成一种：图标方块 + 标题 +
+ * 一句说明 + 可选动作。
+ *
+ * ``bare`` 用于已经处在卡片内部的场景 —— 卡片里再套卡片是错的。
+ */
+function emptyState({ icon: name = 'document', title = '', desc = '', action = '', bare = false }) {
+  const inner = `<div class="empty-mark">${icon(name)}</div>
+    ${title ? `<p class="empty-state-title">${esc(title)}</p>` : ''}
+    ${desc ? `<p class="empty-state-desc">${esc(desc)}</p>` : ''}
+    ${action || ''}`;
+  return bare ? `<div class="empty-state">${inner}</div>`
+    : `<div class="card"><div class="empty-state">${inner}</div></div>`;
+}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -309,7 +331,7 @@ async function loadSidebar() {
   S.papers = papers.items || [];
   if (S.selectedPapers) {
     S.selectedPapers = new Set([...S.selectedPapers].filter(id => S.papers.some(p => p.id === id)));
-    $('#btnCompareSelected').disabled = S.selectedPapers.size < 2;
+    syncBatchActions();
   }
   S.compareKey = null;
   S.conversations = convs.items || [];
@@ -386,18 +408,22 @@ async function loadLibrary() {
   $('#libSub').textContent =
     q ? `找到 ${items.length} 篇匹配文献` : '整理文献、阅读原文，让每一个结论有据可查。';
   const citable = S.papers.filter(p => ['verified', 'manual_confirmed'].includes(p.verify_level)).length;
-  $('#libSummary').innerHTML = [
-    [S.papers.length, '篇文献', 'library'], [citable, '篇核验可引用', 'shield'],
-    [st.analyses ?? 0, '篇已解读', 'document'],
-  ].map(([n, label, glyph]) => `<div class="summary-item">${icon(glyph)}<div><strong>${fmtNum(n)}</strong><span>${label}</span></div></div>`).join('');
+  // 三张 hero 数字卡与下方列表重复，收成一行事实描述
+  $('#libSummary').innerHTML = `<p class="library-facts">${fmtNum(S.papers.length)} 篇文献 · `
+    + `${fmtNum(citable)} 篇可引用 · ${fmtNum(st.analyses ?? 0)} 篇已解读</p>`;
+  // 每次重绘都对齐批量按钮的可用状态（含空列表与首次加载）
+  syncBatchActions();
 
   const box = $('#paperList');
   if (!items.length) {
-    box.innerHTML = `<div class="empty">
-      <div class="empty-mark">${icon('library')}</div>
-      <div class="title">${q ? '没有匹配的论文' : group ? '此分组暂无文献' : '知识库还是空的'}</div>
-      <div class="desc">${q ? '换个标题或作者关键词试试。' : group ? '切换到全部分组，或将已有文献移入此分组。' : '点击「导入文献」或拖入 PDF，完成核验后开始阅读。核验未通过时可查看原因并人工确认。'}</div>
-    </div>`;
+    box.innerHTML = emptyState({
+      bare: true,
+      icon: 'library',
+      title: q ? '没有匹配的论文' : group ? '此分组暂无文献' : '知识库还是空的',
+      desc: q ? '换个标题或作者关键词试试。'
+        : group ? '切换到全部分组，或将已有文献移入此分组。'
+        : '点击「导入文献」或拖入 PDF，完成核验后开始阅读。核验未通过时可查看原因并人工确认。',
+    });
     return;
   }
 
@@ -414,14 +440,14 @@ async function loadLibrary() {
           ${badgeOf(p.verify_level)}
         </div>
       </button>
-      <span class="paper-open" aria-hidden="true">↗</span>
+      <span class="paper-open" aria-hidden="true">${icon('arrow')}</span>
     </div>`).join('');
 
   $$('[data-paper]', box).forEach(b => b.onclick = () => openView('paper', { paperId: b.dataset.paper }));
   $$('[data-drag-paper]', box).forEach(row => row.ondragstart = e => e.dataTransfer.setData('application/litprism-paper', row.dataset.dragPaper));
   $$('[data-select-paper]', box).forEach(cb => cb.onchange = () => {
     if (cb.checked) S.selectedPapers.add(cb.dataset.selectPaper); else S.selectedPapers.delete(cb.dataset.selectPaper);
-    $('#btnCompareSelected').disabled = S.selectedPapers.size < 2;
+    syncBatchActions();
   });
 }
 
@@ -495,18 +521,26 @@ async function loadPaperDetail(versionId = null) {
       </div>
 
       <div data-ppane="analysis">
-        ${d.analysis_material && !d.analysis_material.current ? '<p class="lui-degraded" role="status">这份分析基于旧材料或尚未绑定材料，不能视为当前原文的结论。旧引用仍可查看；请重新解读当前材料。</p>' : ''}
+        ${analysisStatusBlock([
+          d.analysis_material && !d.analysis_material.current
+            ? {level: 'block', title: '这份分析基于旧材料', detail: '不能视为当前原文的结论；旧引用仍可查看。', action: 'reanalyze'}
+            : null,
+          a.research_question && !a._citation_check
+            ? {level: 'block', title: '旧版解读未经过字段级引用检查', detail: '其中的结论不能直接引用，请重新解读。', action: 'reanalyze'}
+            : null,
+          a._mock ? {level: 'notice', text: '当前使用离线占位模型（mock），结果仅演示流程，不构成真实学术解读。'} : null,
+          a._concepts_error ? {level: 'notice', text: `术语提取未完成：${a._concepts_error}`} : null,
+          a._citation_check?.passed === false
+            ? {level: 'notice', text: `部分解读字段缺少可回溯证据，已留空：${(a._citation_check.issues || []).join('；')}`}
+            : null,
+        ])}
+        ${a._model ? `<p class="analysis-meta">生成模型：${esc(a._model)}</p>` : ''}
         <div id="analysisRuns" aria-live="polite"></div>
         ${materialNote(a._coverage)}
         ${coverageNote(a._coverage)}
         ${versionId ? '<p class="source-intro">历史分析。修改或补录请返回最新版本。</p>' : semanticReviewPanel(candidateView._semantic_review, {kind: 'paper', id: p.id}, candidateView._candidates)}
         ${versionId ? '' : qualityPanel(p.id)}
         ${versionId ? '' : manualClaimsPanel(p.id)}
-        ${a._concepts_error ? `<div class="lui-degraded">术语提取未完成：${esc(a._concepts_error)}</div>` : ''}
-        ${a._mock ? '<div class="lui-degraded">离线占位模型（mock）：仅演示流程，不构成真实学术解读。配置模型后请重新解读。</div>' : ''}
-        ${a._model ? `<div class="source-intro">生成模型：${esc(a._model)}</div>` : ''}
-        ${a._citation_check?.passed === false ? `<div class="lui-degraded">部分解读字段缺少可回溯证据，已留空：${esc((a._citation_check.issues || []).join('；'))}</div>` : ''}
-        ${a.research_question && !a._citation_check ? '<div class="lui-degraded">旧版解读尚未经过字段级引用检查，请重新解读。</div>' : ''}
         ${(a._model || a.research_question) && !reviewOnly ? `
           <div class="card"><div class="card-body">
             ${analysisSection('研究问题', a.research_question)}
@@ -577,7 +611,7 @@ async function loadPaperDetail(versionId = null) {
         .catch(e => toast(e.message, true));
     };
 
-    $('#btnReanalyze').onclick = async () => {
+    const reanalyze = async () => {
       try {
         toast('正在解读…');
         await runTask('analyze', { paper_id: S.activePaper });
@@ -585,6 +619,10 @@ async function loadPaperDetail(versionId = null) {
         loadPaperDetail();
       } catch (e) { toast(e.message, true); }
     };
+    $('#btnReanalyze').onclick = reanalyze;
+    // 状态条里的「重新解读」是同一个动作，只是出现在阻断提示里
+    const statusReanalyze = $('#btnStatusReanalyze');
+    if (statusReanalyze) statusReanalyze.onclick = reanalyze;
     $('#btnBudgetAnalyze').onclick = () => analysisRunDialog(p.id);
 
     // 就这篇提问：新建一个只含本片的对话，而不是改现有会话 —— 改现有会话会把
@@ -644,6 +682,51 @@ async function loadPaperText(pid, materialId) {
     if (request !== paperTextRequest || body !== $('#paperTextBody')) return;
     body.innerHTML = `<div class="empty"><div class="desc">${esc(e.message)}</div></div>`;
   }
+}
+
+/**
+ * 解读状态条。
+ *
+ * 原先论文页会同时冒出 4~5 条同权重琥珀色提示（旧材料、mock、术语失败、
+ * 字段留空、旧版未检查）。同权重堆叠的结果是用户直接跳过**全部**告警，
+ * 包括真正阻断的那条。
+ *
+ * 分级依据只有一个问题：**这条提示是否让当前展示的结论不可信**。
+ * - block：旧材料 / 旧版未经引用检查 —— 结论不能当作当前原文的结果；
+ * - notice：mock 模型、术语失败、字段留空 —— 影响可信度但不阻断阅读。
+ *
+ * 有阻断时只显示一条，其余折叠；只有提示时整条收成一行，不占告警视觉。
+ */
+function analysisStatusBlock(items) {
+  const list = (items || []).filter(Boolean);
+  if (!list.length) return '';
+  const blocking = list.filter(i => i.level === 'block');
+  const notices = list.filter(i => i.level !== 'block');
+  const noticeList = notices.length
+    ? `<ul class="status-list">${notices.map(n => `<li>${esc(n.text)}</li>`).join('')}</ul>`
+    : '';
+
+  if (!blocking.length) {
+    return `<details class="analysis-status" data-level="notice">
+      <summary>解读说明（${notices.length}）</summary>${noticeList}
+    </details>`;
+  }
+
+  const primary = blocking[0];
+  const more = notices.length
+    ? `<details class="status-more"><summary>另有 ${notices.length} 条说明</summary>${noticeList}</details>`
+    : '';
+  return `<section class="analysis-status" data-level="block" role="status">
+    <div class="status-lead">
+      <span class="status-mark">${icon('alert')}</span>
+      <div class="status-text">
+        <p class="status-title">${esc(primary.title)}</p>
+        <p class="status-detail">${esc(primary.detail)}</p>
+      </div>
+      ${primary.action === 'reanalyze' ? '<button class="btn sm" id="btnStatusReanalyze" type="button">重新解读</button>' : ''}
+    </div>
+    ${more}
+  </section>`;
 }
 
 /** 比例渲染：None 一律显示 n/a —— 绝不能因为 (v||0) 而渲染成 0%。 */
@@ -709,8 +792,8 @@ async function loadQuality(pid) {
         </tr>`).join('');
     }
     const defs = $('#qualityDefs');
-    if (defs && d.definitions) {
-      defs.textContent = '口径：' + Object.values(d.definitions).join(' · ')
+    if (defs) {
+      defs.textContent = (table.hidden || !d.definitions) ? '' : '口径：' + Object.values(d.definitions).join(' · ')
         + '。分母为 0 时显示 n/a；人工确认只表示接受这份快照，不等于内容客观真实。';
     }
   } catch (e) {
@@ -980,12 +1063,11 @@ async function loadChat() {
         <div id="chatStream" role="log" aria-label="研究对话">
           ${visibleMsgs.length ? visibleMsgs.map(renderMessage).join('') : `
             <div class="empty chat-welcome"><div class="empty-mark">${icon('prism')}</div>
-              <div class="eyebrow">READ · QUESTION · CONNECT</div>
               <h2 class="title">把问题交给文献</h2>
               <div class="desc">从一个研究问题开始，回答将附上原文来源。<br>证据不足时，会明确告诉你。</div>
               <div class="question-starters">
-                <button class="starter" data-question="这些论文分别研究了什么问题？">梳理研究问题 <span>↗</span></button>
-                <button class="starter" data-question="这些研究的方法有哪些局限？">寻找方法局限 <span>↗</span></button>
+                <button class="starter" data-question="这些论文分别研究了什么问题？">梳理研究问题 <span class="starter-arrow">${icon('arrow')}</span></button>
+                <button class="starter" data-question="这些研究的方法有哪些局限？">寻找方法局限 <span class="starter-arrow">${icon('arrow')}</span></button>
               </div>
             </div>`}
         </div>
@@ -1193,11 +1275,11 @@ async function loadDeliverables() {
   const box = $('#delivList');
 
   if (!S.deliverables.length) {
-    box.innerHTML = `<div class="empty">
-      <div class="ico">📝</div>
-      <div class="title">还没有交付物</div>
-      <div class="desc">交付物由 Skill 的 <code>output.type: deliverable</code> 生成，<br>或由综述 / 对比等内核能力产出。</div>
-    </div>`;
+    box.innerHTML = emptyState({
+      icon: 'note',
+      title: '还没有交付物',
+      desc: '综述草稿、对比报告与 Skill 产出会出现在这里，导出时一并带出来源。',
+    });
     return;
   }
 
@@ -1279,13 +1361,12 @@ async function loadSkills() {
 
   const box = $('#skillCards');
   if (!items.length) {
-    box.innerHTML = `<div class="card"><div class="card-body"><div class="empty">
-      <div class="ico">◈</div>
-      <div class="title">${q ? '没有匹配的 Skill' : '尚未添加 Skill'}</div>
-      <div class="desc">
-        ${q ? '换个关键词试试。' : 'Skill 是声明式的提示词扩展（不含可执行代码）。<br>在下方目录里新建一个子目录，放入 <code>skill.yaml</code> 与 <code>prompt.md</code> 即可。'}
-      </div>
-    </div></div></div>`;
+    box.innerHTML = emptyState({
+      icon: 'skills',
+      title: q ? '没有匹配的 Skill' : '尚未添加 Skill',
+      desc: q ? '换个关键词试试。'
+        : 'Skill 是声明式的提示词扩展，不含可执行代码。在下方目录新建子目录，放入 skill.yaml 与 prompt.md 即可。',
+    });
     return;
   }
 
@@ -1368,10 +1449,12 @@ async function loadWhitelist() {
   $('#wlCount').textContent = S.whitelist.length;
   const box = $('#wlList');
   if (!S.whitelist.length) {
-    box.innerHTML = `<div class="empty" style="padding:28px">
-      <div class="title">白名单为空</div>
-      <div class="desc">核验未通过的文献可人工确认放行，但必须填写确认依据，且会保留确认当时的自动判定。</div>
-    </div>`;
+    box.innerHTML = emptyState({
+      bare: true,
+      icon: 'shield',
+      title: '白名单为空',
+      desc: '核验未通过的文献可人工确认放行，但必须填写确认依据，且会保留确认当时的自动判定。',
+    });
     return;
   }
   box.innerHTML = S.whitelist.map(e => `
@@ -1465,14 +1548,14 @@ async function doVerify() {
    设置弹窗
    ========================================================================== */
 const SETTINGS_SECTIONS = [
-  { key: 'general',   label: '通用设置',    ico: '◐' },
-  { key: 'model',     label: '模型',        ico: '◈' },
-  { key: 'sources',   label: '数据源',      ico: '⇄' },
-  { key: 'verify',    label: '核验与白名单', ico: '✓' },
-  { key: 'retrieval', label: '检索',        ico: '⌕' },
-  { key: 'export',    label: '导出',        ico: '⇩' },
-  { key: 'backup',    label: '备份与恢复',  ico: '' },
-  { key: 'about',     label: '关于',        ico: 'ℹ' },
+  { key: 'general',   label: '通用设置',    ico: 'settings' },
+  { key: 'model',     label: '模型',        ico: 'prism' },
+  { key: 'sources',   label: '数据源',      ico: 'library' },
+  { key: 'verify',    label: '核验与白名单', ico: 'shield' },
+  { key: 'retrieval', label: '检索',        ico: 'search' },
+  { key: 'export',    label: '导出',        ico: 'document' },
+  { key: 'backup',    label: '备份与恢复',  ico: 'panel' },
+  { key: 'about',     label: '关于',        ico: 'chat' },
 ];
 
 S.providers = [];
@@ -1495,7 +1578,7 @@ function closeSettings() {
 function renderSettingsNav() {
   $('#settingsNav').innerHTML = SETTINGS_SECTIONS.map((s, i) => `
     <button class="${i === 0 ? 'active' : ''}" data-set="${s.key}">
-      <span style="opacity:.7;font-size:12px">${s.ico}</span> ${s.label}
+      <span class="set-ico">${icon(s.ico)}</span> ${s.label}
     </button>`).join('');
   $$('#settingsNav [data-set]').forEach(b => b.onclick = () => {
     $$('#settingsNav [data-set]').forEach(x => x.classList.toggle('active', x === b));
