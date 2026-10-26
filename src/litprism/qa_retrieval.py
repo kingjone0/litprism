@@ -51,8 +51,11 @@ def retrieve(kb, question, query, *, paper_ids, top_k, llm, search,
         "WHERE deleted_at IS NULL AND verify_level IN ('verified','manual_confirmed') ORDER BY rowid")
         if paper_ids is None or r['id'] in paper_ids]
     ids = [p['id'] for p in papers]
-    cross = bool(re.search(r'这些论文|这些研究|各篇|分别|跨论文|两篇|多篇|对比|比较|\b(compare|papers|studies)\b', question, re.I))
+    # Separately explaining facets or source types is not a request to balance
+    # every paper in the library. Keep explicit multi-paper cues for balancing.
+    cross = bool(re.search(r'这些论文|这些研究|各篇|跨论文|两篇|多篇|对比|比较|\b(compare|papers|studies)\b', question, re.I))
     overview = bool(re.search(r'整篇|全文|概览|概述|研究(?:了)?什么|研究问题|主要解决什么|\b(overview|summarize|research questions?)\b', question, re.I))
+    library = bool(re.search(r'这些论文|这些研究|各篇|(?:所有|全部)(?:的)?(?:论文|文献|研究)|全库|\b(?:these|all|each)\s+(?:papers|studies)\b', question, re.I))
     mode = 'overview' if overview else 'cross_paper' if cross and len(ids) > 1 else 'passages'
     queues = {}
     def chunks(pid):
@@ -86,20 +89,43 @@ def retrieve(kb, question, query, *, paper_ids, top_k, llm, search,
     completion_candidates, expanded_sections = [], []
     if full_fits:
         hits, mode = whole, 'full_material'
-    elif overview and ids:
+    elif overview and ids and (paper_ids is not None or library):
         groups = [chunks(pid) for pid in ids]
         hits = [hit(group[i]) for i in range(max(map(len, groups), default=0))
                 for group in groups if i < len(group)]
     else:
         hits = search(kb, query, top_k=top_k, paper_ids=paper_ids, llm=llm, citable_only=True)
+        task_ids = ids
+        if paper_ids is None and (overview or cross) and not library:
+            # Task words control organization, not the subject universe. Prefer
+            # literal matches to the actual question over generic translations;
+            # fall back to the normal expanded retrieval when none are found.
+            literal = search(kb, question, top_k=top_k, paper_ids=ids, llm=None,
+                             expand=False, citable_only=True)
+            from .query import keyword_terms
+            # Separate original names from Chinese task text, and from each
+            # other so one name's many chunks cannot crowd the other out.
+            for term in dict.fromkeys(keyword_terms(question)):
+                if re.fullmatch(r'[a-z][a-z-]{2,}', term, re.I):
+                    literal += search(kb, term, top_k=top_k, paper_ids=ids, llm=None,
+                                      expand=False, citable_only=True)
+            current_refs = [hit(c) for ref in prior_refs if ref.get('paper_id') in titles
+                            for c in chunks(ref['paper_id']) if c['id'] == ref.get('chunk_id')]
+            seeds = literal + current_refs or hits
+            task_ids = list(dict.fromkeys(h['paper_id'] for h in seeds if h.get('paper_id') in titles))
+            hits = [h for h in hits if not h.get('paper_id') or h['paper_id'] in task_ids] + literal + current_refs
+            if overview:
+                groups = [chunks(pid) for pid in task_ids]
+                hits = [hit(group[i]) for i in range(max(map(len, groups), default=0))
+                        for group in groups if i < len(group)] + [h for h in hits if not h.get('paper_id')]
         if mode == 'cross_paper':
             # Balancing an already-truncated global list cannot recover absent
             # papers. Retrieve within each paper without extra model expansion.
             groups = [search(kb, query, top_k=top_k, paper_ids=[pid], llm=None, citable_only=True)
-                      for pid in ids]
+                      for pid in task_ids]
             balanced = [group[i] for i in range(max(map(len, groups), default=0))
                         for group in groups if i < len(group)]
-            hits = balanced[:max(top_k, len([g for g in groups if g]))]
+            hits = balanced[:max(top_k, len([g for g in groups if g]))] + [h for h in hits if not h.get('paper_id')]
 
     section = None
     if len(ids) == 1 and not re.search(r'多少|几|数值|\b(how many|how long|gpu)\b', question, re.I):
@@ -147,7 +173,7 @@ def retrieve(kb, question, query, *, paper_ids, top_k, llm, search,
     # Default scope still starts with relevant lexical matches, not every paper
     # in the library. Complete their current materials only when the actual
     # prompt fits, retaining all seed hits, knowledge and external evidence.
-    if paper_ids is None and mode in ('passages', 'cross_paper') and cfg and cfg.llm.model_window_tokens and fits_full:
+    if paper_ids is None and mode in ('passages', 'cross_paper', 'overview') and cfg and cfg.llm.model_window_tokens and fits_full:
         completion_candidates = list(dict.fromkeys(h['paper_id'] for h in hits if h.get('paper_id') in titles))
         full_eligible = bool(completion_candidates)
 

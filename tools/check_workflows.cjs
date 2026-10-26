@@ -321,8 +321,10 @@ const path = require('node:path');
     await expect(page.locator('#inspSources')).toContainText('知识依据与当前状态');
     await page.locator('#inspSources details a[data-evidence-ref]').filter({hasText:'混合取证外部快照'}).click();
     await expect(page.locator('#inspSources')).toContainText('待人工审核');
+    await expect(page.locator('#inspSources')).toContainText('尚未人工确认');
+    await expect(page.locator('#evidenceReview [value=confirm]')).toBeEnabled();
+    await expect(page.locator('#evidenceReview [value=revoke]')).toBeDisabled();
     if (process.env.LITPRISM_UI_OUTPUT) {
-      await expect(page.locator('#inspSources')).toContainText('尚未加入可信知识库');
       await expect(page.locator('#inspSources')).toContainText('搜索摘要获取时间');
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT,'mixed-evidence-light.png')});
       await page.evaluate(() => document.documentElement.dataset.theme='dark');

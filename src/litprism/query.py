@@ -270,8 +270,9 @@ def llm_expand(llm, query: str) -> list[str]:
     ]
     try:
         data = llm.chat_json(messages, task="expand")
-        kws = data.get("keywords") or []
-        return [str(k).strip() for k in kws if str(k).strip()][:12]
+        if not isinstance(data, dict) or not isinstance(data.get("keywords"), list):
+            return []
+        return [k.strip() for k in data["keywords"] if isinstance(k, str) and k.strip()][:12]
     except Exception:
         return []
 

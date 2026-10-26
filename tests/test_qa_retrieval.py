@@ -1,10 +1,127 @@
 """Task routing must preserve scope, current material, and evidence breadth."""
 from test_workflow_guards import env as workflow_env  # noqa: F401
 from test_workflow_guards import paper
+import pytest
 
 from litprism.agents import QAAgent
 
 env = workflow_env
+
+
+@pytest.mark.parametrize('known_window', [False, True])
+@pytest.mark.parametrize('question', ['请概述 RAG 原论文的方法。', '比较 RAG 论文的结论与网页描述。'])
+def test_default_task_words_do_not_select_the_library(env, known_window, question):
+    cfg, kb, model, _ = env
+    if known_window:
+        cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    related = paper(kb, title='RAG study', text='RAG retrieval method conclusion')
+    other = paper(kb, title='Other study', text='unrelated method conclusion')
+    answer = QAAgent(kb, cfg, model).ask(question, strict_scope=False)
+    assert set(answer.retrieval['evidence_papers']) == {related}
+    assert other not in {e['paper_id'] for e in answer.excerpts}
+    assert len([t for t, _ in model.calls if t == 'expand']) == 1
+
+
+def test_named_comparison_recovers_each_name_without_searching_every_paper(env):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    a = paper(kb, title='BERT', text='BERT attention')
+    kb.add_chunks(a, [{'text': 'BERT attention '+('attention '*20), 'page': n} for n in range(1, 9)])
+    b = paper(kb, title='Transformer', text='Transformer attention')
+    unrelated = paper(kb, title='Other', text='unrelated attention method')
+    answer = QAAgent(kb, cfg, model).ask('比较 BERT 与 Transformer 的注意力方法。', top_k=1, strict_scope=False)
+    assert set(answer.retrieval['evidence_papers']) == {a, b}
+    assert unrelated not in {e['paper_id'] for e in answer.excerpts}
+    assert len([t for t, _ in model.calls if t == 'expand']) == 1
+
+
+def test_overview_followup_uses_current_parent_source_without_selecting_library(env):
+    cfg, kb, model, client = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    selected = paper(kb, title='Parent', text='alphatopic original evidence')
+    paper(kb, title='Other', text='unrelated evidence')
+    cid = kb.add_conversation('Actual parent')
+    response = client.post('/api/chat/'+cid, json={'question': 'alphatopic'})
+    assert response.json()['status'] == 'answered'
+    old_chunk = kb.get_chunks(selected)[0]['id']
+    answer = QAAgent(kb, cfg, model).ask('概述这篇的方法。', conversation_id=cid, strict_scope=False)
+    assert set(answer.retrieval['evidence_papers']) == {selected}
+    kb.add_chunks(selected, [{'text': 'replacement material', 'page': 2}])
+    stale = QAAgent(kb, cfg, model).ask('概述这篇的方法。', conversation_id=cid, strict_scope=False)
+    assert old_chunk not in set(stale.retrieval['restored_chunk_ids'])
+    assert not any('original evidence' in e['text'] for e in stale.excerpts)
+
+
+def test_default_overview_keeps_knowledge_and_current_web_beside_target_paper(env):
+    from litprism.qa_retrieval import retrieve
+    from litprism.search import search_local
+    from litprism.knowledge import create_source, review_source
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    selected = paper(kb, title='RAG', text='RAG retrieval evidence')
+    paper(kb, title='Other', text='unrelated method evidence')
+    knowledge = create_source(kb, kind='knowledge', title='RAG note', content='RAG checked knowledge')
+    review_source(kb, knowledge['id'], action='confirm', note='Isolated source fixture', content_hash=knowledge['content_hash'])
+    web = {'id': 'current-web', 'text': 'current search summary', 'source_kind': 'web', 'paper_id': None}
+    hits, report = retrieve(kb, '概述 RAG 方法。', '概述 RAG 方法。', paper_ids=None, top_k=8,
+                           llm=model, search=search_local, cfg=cfg, fits_full=lambda _: True,
+                           strict_scope=False, external=[web])
+    assert {h['paper_id'] for h in hits if h.get('paper_id')} == {selected}
+    assert knowledge['id'] in {h.get('source_id') for h in hits}
+    assert web in hits and report['requested_paper_ids'] is None
+
+
+def test_overview_without_literal_match_keeps_normal_query_expansion(env):
+    cfg, kb, model, _ = env
+    selected = paper(kb, title='Residual study', text='residual evidence')
+    paper(kb, title='Other', text='unrelated material')
+    original = model.chat_json
+
+    def expand(messages, task='', **kwargs):
+        if task == 'expand':
+            model.calls.append((task, messages))
+            return {'keywords': ['residual']}
+        return original(messages, task=task, **kwargs)
+
+    model.chat_json = expand
+    answer = QAAgent(kb, cfg, model).ask('概述残差连接的实现。', strict_scope=False)
+    assert set(answer.retrieval['evidence_papers']) == {selected}
+    assert len([t for t, _ in model.calls if t == 'expand']) == 1
+
+
+@pytest.mark.parametrize('question', ['概述所有论文的方法。', 'Summarize all papers.'])
+def test_explicit_library_overview_keeps_all_current_papers(env, question):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    a = paper(kb, title='A', text='alpha evidence')
+    b = paper(kb, title='B', text='completely different vocabulary')
+    paper(kb, title='Unverified', level='unchecked', text='forbidden material')
+    answer = QAAgent(kb, cfg, model).ask(question, strict_scope=False)
+    assert set(answer.retrieval['evidence_papers']) == {a, b}
+    assert not any(t == 'expand' for t, _ in model.calls)
+
+
+@pytest.mark.parametrize('known_window', [False, True])
+def test_separate_source_types_do_not_expand_to_every_paper(env, monkeypatch, known_window):
+    cfg, kb, model, _ = env
+    if known_window:
+        cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    related = paper(kb, title='RAG study', text='alphatopic knowledge index')
+    other = paper(kb, title='Unrelated study', text='knowledge background only')
+    from litprism.search import search_local
+    calls = []
+
+    def observed_search(*args, **kwargs):
+        calls.append(kwargs.get('paper_ids'))
+        return search_local(*args, **kwargs)
+
+    monkeypatch.setattr('litprism.agents.search_local', observed_search)
+    result = QAAgent(kb, cfg, model).ask(
+        'alphatopic knowledge：请分别说明论文依据和网页做法。', top_k=1, strict_scope=False)
+    assert result.retrieval['evidence_papers'] == [related]
+    assert other not in {e['paper_id'] for e in result.excerpts}
+    assert calls == [None]
+
 
 def test_global_overview_delivers_each_current_paper_without_lexical_bias(env):
     cfg, kb, model, _ = env
