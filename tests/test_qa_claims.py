@@ -176,8 +176,12 @@ def test_durable_response_replay_retains_exact_mapping_after_publication_interru
     review = client.get('/api/chat-reviews/'+result['assistant']['qa_review_id']).json()
     from litprism.qa_answer import compile_answer
     answer, records, bindings, protocol = compile_answer(value)
-    assert review['evidence_audit'] == audit_map(answer, records, [{'tag': 'P1', 'text': TEXT}],
-                                               answer_bindings=bindings, answer_protocol=protocol)
+    saved_audit = dict(review['evidence_audit'])
+    coverage = saved_audit.pop('question_coverage')
+    assert coverage['state'] == 'missing' and coverage['items'] == []
+    assert coverage['semantic_status'] == 'unreviewed'
+    assert saved_audit == audit_map(answer, records, [{'tag': 'P1', 'text': TEXT}],
+                                   answer_bindings=bindings, answer_protocol=protocol)
     assert len(model.calls) == calls == 1
 
 

@@ -162,3 +162,57 @@ def test_missing_comparison_item_is_not_auto_filled_or_sent_to_another_model(env
     assert calls == ['qa'] and answer.answer == text and answer.status == 'answered'
     assert answer.evidence_audit['semantic_status'] == 'unreviewed'
     assert not answer.guard_issues
+
+
+@pytest.mark.parametrize('text,tags', [
+    ('The two tasks include A.[P1]', ['P1']),
+    ('The two tasks are A and C.[P1]', ['P1']),
+    ('The paper evaluates A and C and separately compares modes on B.[P1][P2]', ['P1', 'P2']),
+])
+def test_set_scope_guidance_preserves_subset_complete_list_and_cross_section_summary(env, text, tags):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    cfg.llm.model_max_output_tokens = 384000
+    pid = kb.add_paper(title='Scoped experiments', verify_level='verified', material_level='fulltext')
+    texts = ['This section reports results on two tasks: A and C.',
+             'A separate section compares modes using B.']
+    kb.add_chunks(pid, [{'text': value, 'page': i, 'section': f'Experiment {i}'}
+                        for i, value in enumerate(texts, 1)])
+    calls = []
+    def respond(messages, *, task='', **kwargs):
+        calls.append(task)
+        assert '同篇共同出现不等于属于同一' in messages[0]['content']
+        assert '也可作不带总数的跨节概括' in messages[0]['content']
+        assert '跨节汇总不冒充该集合或完整清单' in messages[-1]['content']
+        return {'answer_units': [{'text': text, 'subject': 'Evaluation tasks', 'basis': 'direct',
+                'sources': tags, 'quotes': [{'source': tag, 'quote': texts[int(tag[1:])-1]}
+                                           for tag in tags]}]}
+    model.chat_json = respond
+    answer = QAAgent(kb, cfg, model).ask('What are the main evaluation tasks?', paper_ids=[pid])
+    assert calls == ['qa'] and answer.status == 'answered' and answer.answer == text
+    assert answer.retrieval['delivered_chunks'] == 2
+    assert not answer.guard_issues
+    assert answer.evidence_audit['semantic_status'] == 'unreviewed'
+
+
+def test_located_quotes_do_not_certify_wrong_set_membership_or_trigger_auto_repair(env):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    pid = kb.add_paper(title='Scoped experiments', verify_level='verified')
+    texts = ['This section reports results on two tasks: A and C.',
+             'A separate section compares modes using B.']
+    kb.add_chunks(pid, [{'text': value, 'page': i} for i, value in enumerate(texts, 1)])
+    wrong = 'The two tasks include B.[P1][P2]'
+    calls = []
+    def respond(messages, *, task='', **kwargs):
+        calls.append(task)
+        return {'answer_units': [{'text': wrong, 'subject': 'Task set', 'basis': 'direct',
+                 'sources': ['P1', 'P2'], 'quotes': [{'source': f'P{i}', 'quote': value}
+                                                  for i, value in enumerate(texts, 1)]}]}
+    model.chat_json = respond
+    answer = QAAgent(kb, cfg, model).ask('What are the two tasks?', paper_ids=[pid])
+    # These are valid locations but invalid membership. No local entailment
+    # classifier exists: retain that boundary, do not silently repair the draft.
+    assert calls == ['qa'] and answer.answer == wrong and answer.status == 'answered'
+    assert not answer.evidence_audit['blocking_issues']
+    assert answer.evidence_audit['semantic_status'] == 'unreviewed'

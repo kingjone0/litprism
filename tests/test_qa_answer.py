@@ -105,3 +105,48 @@ def test_new_units_do_not_hide_invented_source_quotes():
                   answer_bindings=bindings, answer_protocol=protocol)
     assert a['items'][0]['answer_binding']['state'] == 'bound'
     assert a['blocking_issues'] and a['semantic_status'] == 'unreviewed'
+
+
+@pytest.mark.parametrize('bad_link', [False, True])
+def test_question_links_persist_with_reply_without_changing_text_status_or_call_count(env, bad_link):
+    import json
+    from test_chat_runs import wait
+    cfg, kb, model, client = env
+    pid = paper(kb, text='alphatopic predicts next symbols.', page=2)
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    value = {'question_items': [{'id': 'Q1', 'object': 'alphatopic', 'aspect': 'objective'},
+                                {'id': 'Q2', 'object': 'alphatopic', 'aspect': 'exact formula'}],
+             'answer_units': [
+                 {'text': 'It predicts next symbols.[P1]', 'subject': 'alphatopic', 'basis': 'direct',
+                  'addresses': ['Q99' if bad_link else 'Q1'], 'sources': ['P1'],
+                  'quotes': [{'source': 'P1', 'quote': 'alphatopic predicts next symbols.'}]},
+                 {'text': 'The exact formula has not been located.', 'subject': 'alphatopic formula',
+                  'basis': 'not_located', 'addresses': ['Q2'], 'sources': [], 'quotes': []}]}
+    def respond(messages, task='', **kwargs):
+        model.calls.append((task, messages))
+        assert 'question_items' in messages[0]['content']
+        return copy.deepcopy(value)
+    model.chat_json = respond
+    cid = kb.add_conversation('问题项对应', scope={'paper_ids': [pid]})
+    response = client.post('/api/conversations/'+cid+'/chat-runs', json={
+        'question': 'Describe alphatopic objective and exact formula.', 'request_id': 'question-item-links'})
+    rid = response.json()['run_id']
+    assert wait(client, rid)['status'] == 'completed'
+    result = client.get('/api/chat-runs/'+rid+'/result').json()
+    assert result['status'] == 'answered' and len(model.calls) == 1
+    qrid = result['assistant']['qa_review_id']
+    review = client.get('/api/chat-reviews/'+qrid).json()
+    diagnostic = review['evidence_audit']['question_coverage']
+    assert diagnostic['state'] == ('invalid' if bad_link else 'recorded')
+    assert diagnostic['items'][1]['state'] == 'gap_only'
+    assert diagnostic['semantic_status'] == 'unreviewed'
+    assert review['draft'] == compile_answer(value)[0]
+    assert 'question_items' not in result['assistant']['content'] and 'Q1' not in review['draft']
+    saved = json.loads(kb._con.execute('SELECT response FROM chat_run_calls WHERE run_id=?', (rid,)).fetchone()[0])
+    assert saved['value'] == value
+    # Reopening and source invalidation preserve the original diagnostic; its
+    # structural links cannot promote a source or bypass existing trust checks.
+    kb.update_paper(pid, verify_level='unchecked')
+    reopened = client.get('/api/chat-reviews/'+qrid).json()
+    assert reopened['evidence_audit']['question_coverage'] == diagnostic
+    assert not reopened['sources'][0]['citable'] and len(model.calls) == 1

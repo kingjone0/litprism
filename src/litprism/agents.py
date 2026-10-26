@@ -275,6 +275,9 @@ class QAAgent:
         res.evidence_audit = audit_map(res.draft_answer, mapping, res.excerpts,
                                        anchor_trial=self.cfg.qa.evidence_anchor_trial,
                                        answer_bindings=answer_bindings, answer_protocol=answer_protocol)
+        from .qa_question_items import record as record_question_items
+        res.evidence_audit['question_coverage'] = record_question_items(
+            question, data, res.draft_answer, res.evidence_audit['items'])
         res.retrieval['evidence_protocol'] = res.evidence_audit['protocol']
         res.evidence_map = res.evidence_audit['items']
 

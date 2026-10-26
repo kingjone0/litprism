@@ -23,7 +23,7 @@ Codex 从这里读项目约定。**开发交接文档是 `AGENT.md`（单数）�
 ## 环境
 
 - Python：`C:/Users/18434/.workbuddy/binaries/python/envs/default/Scripts/python.exe`
-  （**必须用全路径**，系统的 `python` 里没有 pytest）
+  （**必须用全路径**，系统的 `python` 里没有 pytest；若旧启动器失效，先按 `AGENT.md` 的已验证兼容命令使用本机运行时，不改全局环境）
 - 测试：使用上述 Python 执行 `-m pytest tests` ；测试进程须清除 `LITPRISM_HOME`，改动前后都要跑
   - ⚠️ **不要加 `-q`**：pyproject 的 `addopts` 已有 `-q`，再传一次变 `-qq`，汇总行被吞掉、看起来像"没跑"，但退出码是 0
 - 不要假设 `node_modules` / `packaging/dist` 已生成，需要时自己生成（当前不做打包）：
@@ -73,7 +73,7 @@ curl.exe -s --noproxy '*' http://127.0.0.1:8899/api/ping
 
 ## 当前边界与事实来源
 
-- 当前实现及验收统一维护在 `docs/当前实现与验收状态.md`；唯一功能实施计划是 `docs/实现计划.md`。设计稿在 `docs/design/`，历史证据在 `docs/history/`，不要用历史“下一步”覆盖当前计划。
+- 当前实现及验收统一维护在 `docs/当前实现与验收状态.md`；唯一功能实施计划是 `docs/实现计划.md`。技术背景在 `docs/design/`，陈旧方案在 `docs/history/design/`，历史证据在 `docs/history/`，不要用历史“下一步”覆盖当前计划。
 - 先遵守 AGENT 中的防幻觉、来源失效、版本恢复和密钥边界。N01 仅单篇新入口；旧入口不自动获得持久恢复，机器支持不等于人工确认。
 - 测试和真实验收使用独立临时/子数据根；不为读取配置迁移用户主库。UI 用 `tools/check_workflows.py` 无窗口验证，覆盖审核和撤销；不要启动可见桌面窗口。
 - 扩大付费调用前明确目标与预算；F3/打包、D3、本地 embedding 继续暂停。原始 PDF、模型响应、库与截图只留本地 `_selftest.*`，不得强制加入 Git。
