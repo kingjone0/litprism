@@ -101,3 +101,64 @@ def test_local_gap_keeps_supported_part_and_does_not_force_whole_answer_refusal(
     assert calls == ['qa'] and answer.status == 'answered'
     assert 'Different subspaces' in answer.answer and 'has not been located' in answer.answer
     assert not answer.evidence_audit['blocking_issues']
+
+
+def test_comparison_contract_keeps_one_sentence_and_all_scoped_sources(env):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    cfg.llm.model_max_output_tokens = 384000
+    a = kb.add_paper(title='A', verify_level='verified')
+    b = kb.add_paper(title='B', verify_level='verified')
+    kb.add_chunks(a, [{'text': 'A predicts next tokens.', 'page': 1}])
+    kb.add_chunks(b, [{'text': 'B predicts masked tokens.', 'page': 1}])
+    text = 'A预测下一token，B预测被遮蔽token。[P1][P2]'
+    calls = []
+    def respond(messages, *, task='', **kwargs):
+        calls.append(task)
+        assert '逐对象覆盖这些必答项' in messages[0]['content']
+        assert '同一句可覆盖多个比较项' in messages[0]['content']
+        assert '比较题核对各对象所问比较项' in messages[-1]['content']
+        return {'answer_units': [{'text': text, 'subject': 'A与B的预测目标', 'basis': 'direct',
+            'sources': ['P1', 'P2'], 'quotes': [{'source': 'P1', 'quote': 'A predicts next tokens.'},
+                                             {'source': 'P2', 'quote': 'B predicts masked tokens.'}]}]}
+    model.chat_json = respond
+    answer = QAAgent(kb, cfg, model).ask('一句话比较A与B的预测目标。', paper_ids=[a, b])
+    assert calls == ['qa'] and answer.status == 'answered' and answer.answer == text
+    assert answer.retrieval['delivered_chunks'] == 2
+    assert {e['paper_id'] for e in answer.excerpts} == {a, b}
+    assert answer.evidence_audit['semantic_status'] == 'unreviewed'
+
+
+def test_genuine_author_proposal_is_not_rejected_by_verb_guidance(env):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    pid = kb.add_paper(title='New operator', verify_level='verified')
+    kb.add_chunks(pid, [{'text': 'We propose a residual operator.', 'page': 1}])
+    calls = []
+    def respond(messages, *, task='', **kwargs):
+        calls.append(task)
+        assert '不单独作为本文作者提出该方法的依据' in messages[0]['content']
+        return {'answer_units': [{'text': '作者提出一种残差算子。[P1]', 'subject': '本文方法', 'basis': 'direct',
+                 'sources': ['P1'], 'quotes': [{'source': 'P1', 'quote': 'We propose a residual operator.'}]}]}
+    model.chat_json = respond
+    answer = QAAgent(kb, cfg, model).ask('作者提出了什么？', paper_ids=[pid])
+    assert calls == ['qa'] and answer.status == 'answered' and '提出' in answer.answer
+    assert not answer.guard_issues
+
+
+def test_missing_comparison_item_is_not_auto_filled_or_sent_to_another_model(env):
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
+    pid = kb.add_paper(title='A and B', verify_level='verified')
+    kb.add_chunks(pid, [{'text': 'A predicts next tokens. B predicts masked tokens.', 'page': 1}])
+    text = 'A predicts next tokens.[P1]'
+    calls = []
+    def respond(messages, *, task='', **kwargs):
+        calls.append(task)
+        return {'answer_units': [{'text': text, 'subject': 'A', 'basis': 'direct',
+                 'sources': ['P1'], 'quotes': [{'source': 'P1', 'quote': 'A predicts next tokens.'}]}]}
+    model.chat_json = respond
+    answer = QAAgent(kb, cfg, model).ask('比较A与B的目标。', paper_ids=[pid])
+    assert calls == ['qa'] and answer.answer == text and answer.status == 'answered'
+    assert answer.evidence_audit['semantic_status'] == 'unreviewed'
+    assert not answer.guard_issues
