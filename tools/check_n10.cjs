@@ -442,6 +442,151 @@ const path = require('node:path');
       await expect(panel).toContainText('重试可能再次计费');
       await page.screenshot({path:path.join(output,'receipt-failure-visible.png')});
     });
+    await check('candidate-failure-can-retry-existing-actions', async () => {
+      await page.locator('[data-view=recommend]').first().click();
+      for (const [action, expected, width, theme] of [['ignore','ignored',1360,'light'],['reject','rejected',390,'dark']]) {
+        await page.setViewportSize({width,height:844});
+        await page.evaluate(t=>{S.sidebar=false;applySidebar();S.theme=t;applyTheme();},theme);
+        const candidate=await call('/api/candidates','POST',{title:'候选恢复 '+action,url:'https://example.org/retry-'+action});
+        await page.evaluate(()=>{S.poolFilter='open';return loadCandidates();});
+        const button=page.locator(`[data-pool-${action}="${candidate.id}"]`);
+        const row=page.locator('.pool-row').filter({has:button});
+        const endpoint=base+'/api/candidates/'+candidate.id+'/status';let attempts=0;
+        await page.route(endpoint,async route=>{
+          if (++attempts===1) {
+            await new Promise(resolve=>setTimeout(resolve,200));
+            await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'离线夹具：候选操作失败'})});
+          } else await route.continue();
+        });
+        try {
+          await button.click();
+          for (const b of await row.locator('.pool-actions button').all()) await expect(b).toBeDisabled();
+          await button.evaluate(e=>e.click());
+          await expect(row.locator('[role=alert]')).toContainText('候选操作失败');
+          await expect(button).toBeEnabled();
+          assert.equal(attempts,1,'Busy action submitted again');
+          await page.screenshot({path:path.join(output,`candidate-retry-${theme}.png`)});
+          await button.click();
+          await expect.poll(async()=>(await call('/api/candidates?limit=100')).items.find(c=>c.id===candidate.id).status).toBe(expected);
+          await expect(button).toHaveCount(0);
+          assert.equal(attempts,2,'Restored button did not send exactly one retry');
+        } finally { await page.unroute(endpoint); }
+      }
+    });
+    await check('candidate-late-filter-response-and-error-are-ignored', async () => {
+      await call('/api/candidates','POST',{title:'候选乱序回归',url:'https://example.org/late-filter'});
+      await page.locator('[data-view=recommend]').first().click();
+      for (const failure of [false,true]) {
+        await page.evaluate(()=>{S.poolFilter='open';return loadCandidates();});
+        let release,notify,reads=0;
+        const held=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{notify=resolve;});
+        const endpoint=base+'/api/candidates?limit=100';
+        await page.route(endpoint,async route=>{
+          if(++reads!==1)return route.continue();
+          const response=failure?null:await route.fetch();notify();await held;
+          if(failure)await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'离线夹具：旧筛选读取失败'})});
+          else await route.fulfill({response});
+        });
+        try {
+          await page.locator('[data-pool-filter=all]').click();await started;
+          await page.locator('[data-view=library]').first().click();
+          await page.locator('[data-view=recommend]').first().click();
+          await expect(page.locator('[data-pool-filter=all].active')).toBeVisible();
+          await page.locator('[data-pool-filter=library]').click();
+          await expect(page.locator('[data-pool-filter=library].active')).toBeVisible();
+          const response=page.waitForResponse(r=>r.url()===endpoint);release();await response;
+          await page.waitForTimeout(100);
+          assert.equal(await page.evaluate(()=>S.poolFilter),'library');
+          await expect(page.locator('[data-pool-filter=library].active')).toBeVisible();
+          await expect(page.locator('.pool-row')).toHaveCount(0);
+          await expect(page.locator('#candidatePool')).not.toContainText('旧筛选读取失败');
+          if(!failure)await page.screenshot({path:path.join(output,'candidate-late-response-ignored.png')});
+        } finally { release();await page.unroute(endpoint); }
+      }
+    });
+    await check('source-read-retry-back-and-late-error-use-current-source', async () => {
+      const a=await call('/api/evidence','POST',{kind:'knowledge',title:'来源读取 A',content:'仅供本地回归的待审核原文 A。'});
+      const b=await call('/api/evidence','POST',{kind:'knowledge',title:'来源读取 B',content:'仅供本地回归的待审核原文 B。'});
+      await page.locator('[data-view=knowledge]').first().click();
+      await page.setViewportSize({width:390,height:844});
+      await page.evaluate(()=>{S.sidebar=false;applySidebar();S.theme='dark';applyTheme();});
+      const linkA=page.locator(`#knowledgeList [data-evidence-ref="${a.id}"]`);
+      const endpoint=base+'/api/evidence/'+a.id;let reads=0;
+      await page.route(endpoint,route=> (++reads===1||reads===3)
+        ?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'离线夹具：来源暂不可读'})}):route.continue());
+      try {
+        await linkA.click();await expect(page.locator('#inspSources [role=alert]')).toContainText('来源暂不可读');
+        await expect(page.locator('#btnRetryEvidence')).toBeVisible();
+        await expect(page.locator('#btnSourceBack')).toBeVisible();
+        await page.screenshot({path:path.join(output,'source-error-recovery-narrow.png')});
+        await page.locator('#btnRetryEvidence').click();
+        await expect(page.locator('#inspSources h3')).toHaveText('来源读取 A');
+        assert.equal(await page.evaluate(()=>S.evidenceRef),a.id);
+        assert.equal(reads,2,'Retry changed source or did not read again');
+        await page.keyboard.press('Escape');await linkA.click();
+        await expect(page.locator('#inspSources [role=alert]')).toContainText('来源暂不可读');
+        await page.locator('#btnSourceBack').click();
+        await expect(page.locator('#btnInspector')).toHaveAttribute('aria-expanded','false');
+        await expect(linkA).toBeFocused();
+        assert(!await page.locator('.work').evaluate(e=>e.inert));
+      } finally { await page.unroute(endpoint); }
+      let release,notify;
+      const held=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{notify=resolve;});
+      await page.route(endpoint,async route=>{notify();await held;await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'离线夹具：来源 A 旧错误'})});});
+      try {
+        await linkA.click();await started;await page.keyboard.press('Escape');
+        await page.locator(`#knowledgeList [data-evidence-ref="${b.id}"]`).click();
+        await expect(page.locator('#inspSources h3')).toHaveText('来源读取 B');
+        const response=page.waitForResponse(r=>r.url()===endpoint);release();await response;await page.waitForTimeout(100);
+        await expect(page.locator('#inspSources h3')).toHaveText('来源读取 B');
+        await expect(page.locator('#inspSources')).not.toContainText('来源 A 旧错误');
+        assert.equal(await page.evaluate(()=>S.evidenceRef),b.id);
+      } finally { release();await page.unroute(endpoint); }
+    });
+    await check('new-knowledge-dialog-hands-focus-to-source-only-on-success', async () => {
+      await page.locator('[data-view=knowledge]').first().click();
+      await page.setViewportSize({width:390,height:844});
+      await page.evaluate(()=>{S.sidebar=false;applySidebar();});
+      const endpoint=base+'/api/evidence';let posts=0;
+      await page.route(endpoint,route=>{
+        if(route.request().method()!=='POST')return route.continue();
+        posts++;
+        return posts===1?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'离线夹具：保存暂不可用'})}):route.continue();
+      });
+      try {
+        await page.locator('#btnAddKnowledge').click();
+        await page.locator('#researchTask [name=title]').fill('窄屏知识交接');
+        await page.locator('#researchTask [name=content]').fill('仅作界面回归，不会自动可信。');
+        await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('#researchTask .task-error')).toContainText('保存暂不可用');
+        await expect(page.locator('#researchTask [name=title]')).toHaveValue('窄屏知识交接');
+        assert(await page.evaluate(()=>!!document.activeElement.closest('#researchTask')),'Failure lost modal focus');
+        await expect(page.locator('#btnInspector')).toHaveAttribute('aria-expanded','false');
+        await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+        await expect(page.locator('#inspSources h3')).toHaveText('窄屏知识交接');
+        await expect(page.locator('#btnCloseInspector')).toBeFocused();
+        assert(await page.locator('.work').evaluate(e=>e.inert));
+        await page.screenshot({path:path.join(output,'new-knowledge-focus-narrow.png')});
+        await page.keyboard.press('Escape');
+        await page.locator('#btnAddKnowledge').click();
+        await page.locator('#researchTask [name=title]').fill('取消不应创建');
+        await page.locator('#researchTask [data-cancel]').first().click();
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+        await expect(page.locator('#btnInspector')).toHaveAttribute('aria-expanded','false');
+        assert.equal(posts,2,'Cancel created another source');
+        await page.setViewportSize({width:1360,height:880});
+        await page.locator('#btnAddKnowledge').click();
+        await page.locator('#researchTask [name=title]').fill('桌面知识交接');
+        await page.locator('#researchTask [name=content]').fill('桌面保持并排操作。');
+        await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+        await expect(page.locator('#inspSources h3')).toHaveText('桌面知识交接');
+        await expect(page.locator('#btnAddKnowledge')).toBeFocused();
+        assert(!await page.locator('.work').evaluate(e=>e.inert));
+        await expect(page.locator('#inspector')).not.toHaveAttribute('aria-modal');
+      } finally { await page.unroute(endpoint); }
+    });
     await check('viewport-theme-settings-matrix', async () => {
       const measurements = [];
       for (const width of [1360, 1000, 720, 390]) {

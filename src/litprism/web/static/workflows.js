@@ -166,11 +166,14 @@ function workflowDialog(title, body, submit, action = '确定') {
   dialog.className = 'task-dialog';
   dialog.setAttribute('aria-labelledby', 'researchTaskTitle');
   dialog.innerHTML = `<form><header><h2 id="researchTaskTitle">${esc(title)}</h2><button type="button" data-cancel aria-label="关闭">${icon('close')}</button></header>
-    <div class="task-body">${body}</div><p class="task-error" role="alert"></p>
+    <div class="task-body">${body}</div><p class="task-error" role="alert" tabindex="-1"></p>
     <footer><button type="button" class="btn" data-cancel>取消</button>${submit ? `<button class="btn primary" type="submit">${esc(action)}</button>` : ''}</footer></form>`;
   document.body.appendChild(dialog);
   $$('[data-cancel]', dialog).forEach(b => b.onclick = () => dialog.close());
-  dialog.addEventListener('close', () => dialog.remove());
+  dialog.addEventListener('close', () => {
+    dialog.remove();
+    applyOverlayFocus();
+  });
   $('form', dialog).onsubmit = async e => {
     e.preventDefault();
     if (!submit) return;
@@ -183,7 +186,11 @@ function workflowDialog(title, body, submit, action = '确定') {
       $$('select[multiple][name]', dialog).forEach(s => { values[s.name] = data.getAll(s.name); });
       await submit(values, dialog); dialog.close();
     }
-    catch (error) { $('.task-error', dialog).textContent = error.message; }
+    catch (error) {
+      const message = $('.task-error', dialog);
+      message.textContent = error.message;
+      if (dialog.open) message.focus();
+    }
     finally { button.disabled = false; }
   };
   dialog.showModal();
@@ -966,6 +973,12 @@ async function showEvidence(ref) {
   toggleInspector(true);
 }
 
+function returnToSourceList() {
+  S.evidenceRef = null;
+  if (S.activeView === 'knowledge') toggleInspector(false);
+  else refreshInspector();
+}
+
 async function loadEvidenceDetail(ref) {
   const loadSeq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
   const box = $('#inspSources');
@@ -976,7 +989,7 @@ async function loadEvidenceDetail(ref) {
     const kind = ({ paper: '论文原文', web: '网页摘要', knowledge: '知识条目' })[d.source_kind] || '来源';
     const url = safeSourceUrl(d.url || (d.doi ? 'https://doi.org/'+encodeURIComponent(d.doi) : ''));
     const canReview = d.source_kind !== 'paper' || (!d.citable && d.trust_level !== 'deleted');
-    box.innerHTML = `<button class="btn sm" id="btnSourceBack">查看本轮其他来源</button><h3>${esc(d.title || d.paper_title)}</h3>
+    box.innerHTML = `<button class="btn sm" id="btnSourceBack">${S.activeView === 'knowledge' ? '返回来源列表' : '查看本轮其他来源'}</button><h3>${esc(d.title || d.paper_title)}</h3>
       <div class="source-intro">${esc(kind)} · ${esc(trustLabel(d.trust_level))} · ${d.page == null ? '无页码' : '第 '+esc(d.page)+' 页'}</div>
       ${d.dependency_status?.refs?.length || d.dependency_status?.issues?.length ? `<details open><summary>知识依据与当前状态</summary>${[...(d.dependency_status.issues || []),...(d.dependency_status.warnings || [])].map(s => `<p>${esc(s)}</p>`).join('')}${d.dependency_status.refs.map(s => `<p><a href="#evidence-${esc(s.chunk_id)}" data-evidence-ref="${esc(s.chunk_id)}">${esc(s.title || '上游来源已不可用')}${s.page == null ? '' : ' · p.'+esc(s.page)}</a>${s.historical ? ' · 历史材料' : ''}${s.issues.length ? ' · '+s.issues.map(esc).join('；') : ''}</p>`).join('')}</details>` : ''}
       ${d.acquired_at ? `<p class="source-intro">搜索摘要获取时间：${esc(sourceTime(d.acquired_at))}</p>` : ''}
@@ -991,7 +1004,7 @@ async function loadEvidenceDetail(ref) {
       ${d.source_kind === 'paper' && d.verify_evidence ? `<details><summary>核验记录</summary><pre class="reading-text">${esc(typeof d.verify_evidence === 'string' ? d.verify_evidence : JSON.stringify(d.verify_evidence, null, 2))}</pre></details>` : ''}
       ${canReview ? `<form id="evidenceReview"><label>人工审核依据<textarea class="textarea" name="note" required placeholder="核对出处、原文与适用范围后填写"></textarea></label><div class="row wrap"><button class="btn primary" name="action" value="confirm" ${d.status === 'manual_confirmed' || d.citable ? 'disabled' : ''}>${d.citable ? '已加入可信知识库' : d.trust_level === 'needs_review' ? '依据失效，需修订知识' : '确认可信并加入知识库'}</button>${d.source_kind !== 'paper' ? `<button class="btn" name="action" value="reject" ${d.trust_level === 'rejected' ? 'disabled' : ''}>拒绝</button><button class="btn" name="action" value="revoke" ${d.status !== 'manual_confirmed' ? 'disabled' : ''}>撤销可信</button>` : ''}</div><p class="task-error" role="alert"></p></form>` : ''}
       ${(d.reviews || []).length ? `<details><summary>审核历史</summary>${d.reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm: '确认加入', reject: '拒绝', revoke: '撤销'})[r.action] || r.action)}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
-    $('#btnSourceBack').onclick = () => { S.evidenceRef = null; refreshInspector(); };
+    $('#btnSourceBack').onclick = returnToSourceList;
     $('#evidenceReview')?.addEventListener('submit', async e => {
       e.preventDefault();
       const form = e.currentTarget;
@@ -1005,7 +1018,14 @@ async function loadEvidenceDetail(ref) {
         if (S.activeView === 'knowledge') await loadKnowledge();
       } catch (error) { $('.task-error', form).textContent = error.message; buttons.forEach((b, i) => { b.disabled = disabled[i]; }); }
     });
-  } catch (error) { if (S.evidenceRef === ref && loadSeq === S.evidenceLoadSeq) box.textContent = error.message; }
+  } catch (error) {
+    if (S.evidenceRef !== ref || loadSeq !== S.evidenceLoadSeq) return;
+    box.innerHTML = `<p class="task-error" role="alert">${esc(error.message)}</p><div class="row wrap">
+      <button class="btn" id="btnRetryEvidence">重新读取</button>
+      <button class="btn" id="btnSourceBack">返回来源列表</button></div>`;
+    $('#btnRetryEvidence').onclick = () => loadEvidenceDetail(ref);
+    $('#btnSourceBack').onclick = returnToSourceList;
+  }
 }
 
 async function loadKnowledge() {
@@ -1187,10 +1207,13 @@ function poolRow(item) {
   </li>`;
 }
 
+let candidateRequest = 0;
 async function loadCandidates() {
+  const request = ++candidateRequest;
   const box = $('#candidatePool');
   if (!box) return;
   const filter = S.poolFilter || 'open';
+  const isCurrent = () => request === candidateRequest && filter === (S.poolFilter || 'open');
   box.innerHTML = `<div class="pool-head"><h2>候选池</h2><p class="pool-sub">检索到的东西先落在这里；arXiv 可直接取全文，其余请手动导入。</p></div>
     <p class="pool-meta" role="status">正在读取候选…</p>`;
   const query = filter === 'open' ? '?hide_in_library=1&status=new'
@@ -1198,10 +1221,12 @@ async function loadCandidates() {
   let data;
   try { data = await api('/api/candidates' + query); }
   catch (error) {
+    if (!isCurrent()) return;
     box.innerHTML = `<div class="pool-head"><h2>候选池</h2></div>
       <p class="lui-degraded">候选读取失败：${esc(error.message)}</p>`;
     return;
   }
+  if (!isCurrent()) return;
   const items = data.items || [];
   const groups = new Map();
   items.forEach(i => { const k = i.query || '（无查询）'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(i); });
@@ -1273,16 +1298,32 @@ async function loadCandidates() {
 
 async function poolAct(button, url, body, pending) {
   const row = button.closest('.pool-row');
+  if (row.dataset.busy) return;
+  row.dataset.busy = 'true';
   const actions = $('.pool-actions', row);
-  const snapshot = actions.innerHTML;
-  button.disabled = true;
-  actions.innerHTML = `<span class="pool-pending">${esc(pending || '处理中…')}</span>`;
+  const buttons = $$('button', actions);
+  const disabled = buttons.map(b => b.disabled);
+  buttons.forEach(b => { b.disabled = true; });
+  $('[data-pool-error]', row)?.remove();
+  const status = document.createElement('span');
+  status.className = 'pool-pending';
+  status.setAttribute('role', 'status');
+  status.textContent = pending || '处理中…';
+  actions.appendChild(status);
   try {
     const r = await api(url, { method: 'POST', body });
     toast(r && r.paper_id ? (r.material_level ? `已导入（${r.material_level}）` : '已取回全文并入库') : '已更新');
     await loadCandidates();
   } catch (error) {
-    actions.innerHTML = snapshot;
-    row.insertAdjacentHTML('beforeend', `<p class="lui-degraded">${esc(error.message)}</p>`);
+    const message = document.createElement('p');
+    message.className = 'lui-degraded';
+    message.dataset.poolError = '';
+    message.setAttribute('role', 'alert');
+    message.textContent = error.message;
+    $('.pool-side', row).appendChild(message);
+  } finally {
+    status.remove();
+    buttons.forEach((b, i) => { b.disabled = disabled[i]; });
+    delete row.dataset.busy;
   }
 }
