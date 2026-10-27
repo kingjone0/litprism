@@ -24,6 +24,8 @@ const S = {
   messages: [],
   sources: [],
   sending: false,
+  chatDrafts: new Map(),
+  chatRunViews: new Map(),
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -177,19 +179,44 @@ function applyInspector() {
   $('#inspector').inert = !S.inspector;
   $('#btnInspector').setAttribute('aria-expanded', String(S.inspector));
   $('#btnInspector').classList.toggle('selected', S.inspector);
+  applyOverlayFocus();
 }
-function toggleInspector(show = !S.inspector) {
+let inspectorReturnFocus = null;
+function inspectorOverlayActive() {
+  return S.inspector && !S.sidebar && window.matchMedia('(max-width: 760px)').matches;
+}
+function applyOverlayFocus() {
+  const narrow = window.matchMedia('(max-width: 760px)').matches;
+  const overlay = inspectorOverlayActive();
+  $('.work').inert = narrow && (S.sidebar || S.inspector);
+  $('#inspector').inert = !S.inspector || (narrow && S.sidebar);
+  if (overlay) {
+    $('#inspector').setAttribute('role', 'dialog');
+    $('#inspector').setAttribute('aria-modal', 'true');
+    if (!document.querySelector('dialog[open]') && !$('#inspector').contains(document.activeElement)) $('#btnCloseInspector').focus();
+  } else {
+    $('#inspector').removeAttribute('role');
+    $('#inspector').removeAttribute('aria-modal');
+  }
+}
+function toggleInspector(show = !S.inspector, { restoreFocus = true } = {}) {
+  const wasOpen = S.inspector;
+  if (show && !wasOpen) inspectorReturnFocus = document.activeElement;
   S.inspector = show;
   localStorage.setItem('litprism-evidence-panel', show ? '1' : '0');
   applyInspector();
   if (show) refreshInspector();
+  else if (wasOpen && restoreFocus) {
+    const target = inspectorReturnFocus;
+    (target?.isConnected && target.getClientRects().length && !target.closest('[inert]') ? target : $('#btnInspector')).focus();
+  }
 }
 function applySidebar() {
   $('#main').classList.toggle('sidebar-hidden', !S.sidebar);
   $('#sidebar').inert = !S.sidebar;
   $('#btnSidebar').setAttribute('aria-expanded', String(S.sidebar));
   // 窄屏导航覆盖工作区；关闭后才恢复背景的键盘操作。
-  $('.work').inert = window.matchMedia('(max-width: 760px)').matches && S.sidebar;
+  applyOverlayFocus();
 }
 function toggleSidebar() {
   S.sidebar = !S.sidebar;
@@ -214,6 +241,8 @@ const VIEW_TITLES = {
 };
 
 function openView(view, opts = {}) {
+  rememberChatDraft();
+  if (S.inspector && window.matchMedia('(max-width: 760px)').matches) toggleInspector(false, { restoreFocus: false });
   if (S.sidebar && window.matchMedia('(max-width: 760px)').matches) {
     S.sidebar = false;
     applySidebar();
@@ -370,6 +399,8 @@ async function loadSidebar() {
     try {
       await api(`/api/conversations/${encodeURIComponent(cid)}`, { method: 'DELETE' });
       if (S.activeConv === cid) { S.activeConv = null; openView('library'); }
+      S.chatDrafts.delete(cid);
+      S.chatRunViews.delete(cid);
       toast('已删除');
       loadSidebar();
     } catch (err) { toast(err.message, true); }
@@ -1041,7 +1072,14 @@ function analysisSection(label, text) {
 /* ==========================================================================
    对话
    ========================================================================== */
+function rememberChatDraft() {
+  const input = $('#chatInput');
+  if (input?.dataset.convId) S.chatDrafts.set(input.dataset.convId, input.value);
+}
+
 async function loadChat() {
+  rememberChatDraft();
+  const loadSeq = S.chatLoadSeq = (S.chatLoadSeq || 0) + 1;
   const box = $('#chatDetail');
   const convId = S.activeConv;
   if (!S.activeConv) {
@@ -1058,7 +1096,7 @@ async function loadChat() {
 
   try {
     const d = await api(`/api/conversations/${encodeURIComponent(convId)}/messages`);
-    if (S.activeView !== 'chat' || S.activeConv !== convId) return;
+    if (S.activeView !== 'chat' || S.activeConv !== convId || S.chatLoadSeq !== loadSeq) return;
     const msgs = d.items || [];
     const visibleMsgs = msgs.filter(m => m.kind !== 'compact-checkpoint');
     S.messages = msgs;
@@ -1083,7 +1121,7 @@ async function loadChat() {
         </div>
         <div id="chatCompose">
           <div class="composer">
-            <textarea class="composer-input" id="chatInput" rows="2"
+            <textarea class="composer-input" id="chatInput" rows="2" data-conv-id="${esc(convId)}"
               aria-label="研究问题" placeholder="向文献提问，或继续追问…"></textarea>
             <div class="composer-bar">
               <div class="composer-opts">
@@ -1104,11 +1142,13 @@ async function loadChat() {
         </div>
       </div>`;
 
+    const input = $('#chatInput');
+    input.value = S.chatDrafts.get(convId) || '';
+    input.oninput = () => S.chatDrafts.set(convId, input.value);
     LitUI.bind(box);
     await refreshChatRuns(convId);
     loadModels();
 
-    const input = $('#chatInput');
     $$('.starter', box).forEach(b => b.onclick = () => { input.value = b.dataset.question; input.focus(); });
     const send = () => askQuestion();
     $('#btnSend').onclick = send;
@@ -1119,6 +1159,7 @@ async function loadChat() {
 
     refreshInspector();
   } catch (e) {
+    if (S.activeView !== 'chat' || S.activeConv !== convId || S.chatLoadSeq !== loadSeq) return;
     box.innerHTML = `<div class="empty"><div class="title">加载失败</div><div class="desc">${esc(e.message)}</div></div>`;
   }
 }
@@ -1146,6 +1187,7 @@ async function askQuestion() {
       </div>
     </div>`);
   input.value = '';
+  S.chatDrafts.delete(convId);
   $('#btnSend').disabled = true;
   stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
 
@@ -1941,11 +1983,57 @@ function modelCapacityData(m) {
   </div><p class="pm-limit-note">每次输出按模型能力自动分配，推理计入输出额度。${api.checked_at ? 'API 数据更新于 ' + esc(api.checked_at) : ''}</p>`;
 }
 
+function providerFeedbackMarkup(id) {
+  return `<p class="field-error" id="provider-${esc(id)}-error" data-pv-error role="alert"></p><p class="settings-save-status" data-pv-status role="status"></p>`;
+}
+
+function providerMessage(root, message = '', isError = false, field = null) {
+  if (!root?.isConnected) return;
+  const error = $('[data-pv-error]', root), status = $('[data-pv-status]', root);
+  error.textContent = isError ? message : '';
+  status.textContent = isError ? '' : message;
+  $$('[aria-invalid]', root).forEach(input => {
+    input.removeAttribute('aria-invalid');
+    input.setAttribute('aria-describedby', (input.getAttribute('aria-describedby') || '').split(' ').filter(id => id && id !== error.id).join(' '));
+  });
+  if (isError && field) {
+    field.setAttribute('aria-invalid', 'true');
+    field.setAttribute('aria-describedby', [field.getAttribute('aria-describedby'), error.id].filter(Boolean).join(' '));
+    field.focus();
+  }
+  if (message) (isError ? error : status).scrollIntoView({ block: 'nearest' });
+}
+
+function validProviderInputs(root) {
+  const name = $('[data-pv-name], #addPvName', root);
+  const url = $('[data-pv-url], #addPvUrl', root);
+  if (!name.value.trim()) { providerMessage(root, '显示名称不能为空。', true, name); return false; }
+  try {
+    if (!['http:', 'https:'].includes(new URL(url.value).protocol)) throw new Error();
+  } catch {
+    providerMessage(root, 'API 地址需为完整的 http:// 或 https:// 地址。', true, url);
+    return false;
+  }
+  return true;
+}
+
+async function providerAction(root, operation) {
+  if (root.dataset.busy) return;
+  root.dataset.busy = 'true';
+  const buttons = $$('[data-pv-save], [data-pv-test], [data-pv-fetch], #addPvOk', root);
+  const states = buttons.map(b => b.disabled);
+  buttons.forEach(b => { b.disabled = true; });
+  providerMessage(root);
+  try { await operation(); }
+  catch (error) { providerMessage(root, error.message, true); }
+  finally { delete root.dataset.busy; buttons.forEach((b, i) => { b.disabled = states[i]; }); }
+}
+
 function providerEditor(p) {
   const modelRows = (p.models || []).map(m => `
     <div class="pm-row">
-      <input class="input" data-pm-id placeholder="模型 ID，如 gpt-4o" value="${esc(m.model_id)}">
-      <input class="input" data-pm-name placeholder="显示名称" value="${esc(m.display_name)}">
+      <input class="input" data-pm-id aria-label="模型 ID" placeholder="模型 ID，如 gpt-4o" value="${esc(m.model_id)}">
+      <input class="input" data-pm-name aria-label="模型显示名称" placeholder="显示名称" value="${esc(m.display_name)}">
       <button class="icon-btn ${m.enabled ? 'on' : ''}" data-pm-toggle
         title="${m.enabled ? '已暴露给对话' : '未暴露给对话'}">${m.enabled ? '◉' : '○'}</button>
       <button class="icon-btn" data-pm-del title="删除">🗑</button>
@@ -1954,22 +2042,22 @@ function providerEditor(p) {
 
   return `
     <div class="field" style="margin-top:10px">
-      <label>API 密钥</label>
-      <input class="input" type="password" data-pv-key
+      <label for="pv-${esc(p.id)}-key">API 密钥</label>
+      <input class="input" type="password" data-pv-key id="pv-${esc(p.id)}-key" aria-describedby="pv-${esc(p.id)}-key-hint"
         placeholder="${p.has_key ? `已配置（${esc(p.api_key_mask)}），输入新值可替换` : '输入 API Key'}">
-      <div class="hint">留空表示不修改。Key 加密后存入本地密钥库，不写入 config.yaml。</div>
+      <div class="hint" id="pv-${esc(p.id)}-key-hint">留空表示不修改。Key 加密后存入本地密钥库，不写入 config.yaml。</div>
     </div>
     <div class="field">
-      <label>显示名称</label>
-      <input class="input" data-pv-name value="${esc(p.name)}">
+      <label for="pv-${esc(p.id)}-name">显示名称</label>
+      <input class="input" data-pv-name id="pv-${esc(p.id)}-name" value="${esc(p.name)}" required>
     </div>
     <div class="field">
-      <label>API 地址</label>
-      <input class="input" data-pv-url value="${esc(p.base_url)}">
+      <label for="pv-${esc(p.id)}-url">API 地址</label>
+      <input class="input" data-pv-url id="pv-${esc(p.id)}-url" value="${esc(p.base_url)}" type="url" required>
     </div>
     <div class="field">
-      <label>API 协议</label>
-      <select class="select" data-pv-protocol>
+      <label for="pv-${esc(p.id)}-protocol">API 协议</label>
+      <select class="select" data-pv-protocol id="pv-${esc(p.id)}-protocol">
         ${S.protocols.map(x => `<option value="${esc(x.key)}"${x.key === p.protocol ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}
       </select>
     </div>
@@ -1990,6 +2078,7 @@ function providerEditor(p) {
       <button class="btn sm" data-pv-test>测试连接</button>
       <button class="btn sm primary" data-pv-save>保存</button>
     </div>
+    ${providerFeedbackMarkup(p.id)}
     ${p.status_note ? `<div class="pv-note">${esc(p.status_note)}</div>` : ''}
   `;
 }
@@ -2019,8 +2108,8 @@ function bindProviderEditors() {
       const div = document.createElement('div');
       div.className = 'pm-row';
       div.innerHTML = `
-        <input class="input" data-pm-id placeholder="模型 ID">
-        <input class="input" data-pm-name placeholder="显示名称">
+        <input class="input" data-pm-id aria-label="模型 ID" placeholder="模型 ID">
+        <input class="input" data-pm-name aria-label="模型显示名称" placeholder="显示名称">
         <button class="icon-btn on" data-pm-toggle title="已暴露给对话">◉</button>
         <button class="icon-btn" data-pm-del title="删除">🗑</button>
         ${modelCapacityData({})}`;
@@ -2040,7 +2129,7 @@ function bindProviderEditors() {
         refreshedCard.classList.add('expanded');
         showCandidates(refreshedCard, pid, r.items || []);
       } catch (e) {
-        toast(e.message, true);
+        providerMessage(card, e.message, true);
       } finally {
         btn.disabled = false;
         btn.textContent = old;
@@ -2065,39 +2154,45 @@ function bindProviderEditors() {
       box.innerHTML = '<div class="pm-empty">已清空，可重新添加或拉取</div>';
     });
 
-    q('[data-pv-test]')?.addEventListener('click', async () => {
-      try {
+    q('[data-pv-test]')?.addEventListener('click', () => providerAction(card, async () => {
         const r = await api(`/api/providers/${encodeURIComponent(pid)}/test`, { method: 'POST' });
-        toast(r.ok ? `连接正常：${r.message}` : `连接失败：${r.message}`, !r.ok);
-        if (r.ok) loadProviders();
-      } catch (e) { toast(e.message, true); }
-    });
+        providerMessage(card, r.ok ? `连接正常：${r.message}` : `连接失败：${r.message}`, !r.ok);
+    }));
 
     q('[data-pv-save]')?.addEventListener('click', async () => {
+      if (!validProviderInputs(card)) return;
       const models = [...card.querySelectorAll('.pm-row')].map(row => ({
         model_id: row.querySelector('[data-pm-id]').value.trim(),
         display_name: row.querySelector('[data-pm-name]').value.trim(),
         enabled: row.querySelector('[data-pm-toggle]').classList.contains('on'),
       })).filter(m => m.model_id);
 
-      try {
-        await api(`/api/providers/${encodeURIComponent(pid)}`, {
-          method: 'PUT',
-          body: {
-            name: q('[data-pv-name]').value,
-            base_url: q('[data-pv-url]').value,
-            protocol: q('[data-pv-protocol]').value,
-            api_key: q('[data-pv-key]').value || null,
-          },
-        });
-        await api(`/api/providers/${encodeURIComponent(pid)}/models`, {
-          method: 'PUT', body: { models },
-        });
-        toast('已保存');
-        await loadProviders();
-        await loadModels();
-        S.status = await api('/api/status');
-      } catch (e) { toast(e.message, true); }
+      await providerAction(card, async () => {
+        let settingsSaved = false;
+        try {
+          await api(`/api/providers/${encodeURIComponent(pid)}`, {
+            method: 'PUT',
+            body: {
+              name: q('[data-pv-name]').value,
+              base_url: q('[data-pv-url]').value,
+              protocol: q('[data-pv-protocol]').value,
+              api_key: q('[data-pv-key]').value || null,
+            },
+          });
+          settingsSaved = true;
+          await api(`/api/providers/${encodeURIComponent(pid)}/models`, {
+            method: 'PUT', body: { models },
+          });
+          await loadProviders();
+          const updated = document.querySelector(`[data-pv="${CSS.escape(pid)}"]`);
+          updated?.classList.add('expanded');
+          providerMessage(updated, '已保存');
+          await loadModels();
+          S.status = await api('/api/status');
+        } catch (error) {
+          throw new Error((settingsSaved ? '提供商设置已保存，后续步骤未完成：' : '') + error.message);
+        }
+      });
     });
   });
 }
@@ -2108,7 +2203,7 @@ function showCandidates(card, pid, items) {
     (S.providers.find(p => p.id === pid)?.models || []).map(m => m.model_id)
   );
   if (!items.length) {
-    toast('该提供商未返回任何模型，可手动添加', true);
+    providerMessage(card, '该提供商未返回任何模型，可手动添加', true);
     return;
   }
   const dupes = items.filter(i => existing.has(i.model_id)).length;
@@ -2180,28 +2275,29 @@ function showAddProvider() {
     <div class="card" id="addPvCard" style="margin-bottom:12px;border-color:var(--accent)">
       <div class="card-body">
         <div class="field">
-          <label>预设</label>
+          <label for="addPvPreset">预设</label>
           <select class="select" id="addPvPreset">
             <option value="">自定义</option>${opts}
           </select>
           <div class="hint">选预设会自动填好地址与协议。</div>
         </div>
-        <div class="field"><label>显示名称</label>
-          <input class="input" id="addPvName" placeholder="如：公司内网网关"></div>
-        <div class="field"><label>API 地址</label>
-          <input class="input" id="addPvUrl" placeholder="https://api.example.com/v1"></div>
-        <div class="field"><label>API 协议</label>
+        <div class="field"><label for="addPvName">显示名称</label>
+          <input class="input" id="addPvName" placeholder="如：公司内网网关" required></div>
+        <div class="field"><label for="addPvUrl">API 地址</label>
+          <input class="input" id="addPvUrl" placeholder="https://api.example.com/v1" type="url" required></div>
+        <div class="field"><label for="addPvProtocol">API 协议</label>
           <select class="select" id="addPvProtocol">
             ${S.protocols.map(x => `<option value="${esc(x.key)}">${esc(x.label)}</option>`).join('')}
           </select></div>
-        <div class="field"><label>API 密钥</label>
-          <input class="input" type="password" id="addPvKey" placeholder="留空表示暂不配置（本地服务可留空）">
-          <div class="hint">加密后存入本地密钥库，不写入配置文件。</div></div>
+        <div class="field"><label for="addPvKey">API 密钥</label>
+          <input class="input" type="password" id="addPvKey" aria-describedby="addPvKeyHint" placeholder="留空表示暂不配置（本地服务可留空）">
+          <div class="hint" id="addPvKeyHint">加密后存入本地密钥库，不写入配置文件。</div></div>
         <div class="row" style="gap:8px">
           <span style="flex:1"></span>
           <button class="btn sm" id="addPvCancel">取消</button>
           <button class="btn sm primary" id="addPvOk">添加</button>
         </div>
+        ${providerFeedbackMarkup('add')}
       </div>
     </div>`;
 
@@ -2219,8 +2315,10 @@ function showAddProvider() {
   };
   $('#addPvCancel').onclick = () => $('#addPvCard').remove();
   $('#addPvOk').onclick = async () => {
-    try {
-      await api('/api/providers', {
+    const card = $('#addPvCard');
+    if (!validProviderInputs(card)) return;
+    await providerAction(card, async () => {
+      const created = await api('/api/providers', {
         method: 'POST',
         body: {
           name: $('#addPvName').value,
@@ -2230,10 +2328,12 @@ function showAddProvider() {
           preset: presetSel.value || null,
         },
       });
-      toast('已添加');
       await loadProviders();
+      const added = document.querySelector(`[data-pv="${CSS.escape(created.id)}"]`);
+      added?.classList.add('expanded');
+      providerMessage(added, '已添加');
       await loadModels();
-    } catch (e) { toast(e.message, true); }
+    });
   };
 }
 
@@ -2461,7 +2561,7 @@ function bindGlobal() {
   $('#btnSidebar').onclick = toggleSidebar;
   $('#btnNewConv').onclick = newConversation;
   $('#btnSearch').onclick = () => { openView('library'); $('#libSearch').focus(); };
-  $('#btnCloseInspector').onclick = () => { toggleInspector(false); $('#btnInspector').focus(); };
+  $('#btnCloseInspector').onclick = () => toggleInspector(false);
   // 主题
   $('#btnTheme').onclick = () => {
     S.theme = S.theme === 'dark' ? 'light' : 'dark';
@@ -2532,6 +2632,16 @@ function bindGlobal() {
     // 原生 dialog 处理顶层 Escape、焦点圈定和关闭后的焦点归还。
     // 背景快捷键不得在任何模态任务中切页或关闭证据栏。
     if (e.defaultPrevented || document.querySelector('dialog[open]')) return;
+    if (e.key === 'Tab' && inspectorOverlayActive()) {
+      const controls = $$('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]', $('#inspector'))
+        .filter(el => el.getClientRects().length && !el.closest('[inert]'));
+      const index = controls.indexOf(document.activeElement);
+      if (index < 0 || (!e.shiftKey && index === controls.length - 1) || (e.shiftKey && index === 0)) {
+        e.preventDefault();
+        (e.shiftKey ? controls.at(-1) : controls[0])?.focus();
+      }
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === ',') {
       e.preventDefault();
       openSettings('general');
@@ -2550,7 +2660,6 @@ function bindGlobal() {
     }
     if (e.key === 'Escape' && S.inspector) {
       toggleInspector(false);
-      $('#btnInspector').focus();
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();

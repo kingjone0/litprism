@@ -269,6 +269,179 @@ const path = require('node:path');
         assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Page overflows after reflow');
       }
     });
+    await check('conversation-drafts-survive-navigation-and-stay-isolated', async () => {
+      const a = await call('/api/conversations', 'POST', { title: '草稿 A' });
+      const b = await call('/api/conversations', 'POST', { title: '草稿 B' });
+      await page.evaluate(async id => { await loadSidebar(); openView('chat', { convId: id }); }, a.id);
+      const input = page.locator('#chatInput');
+      await expect(input).toBeVisible();
+      await input.fill('尚未发送的草稿 A');
+      await page.locator('.workspace-nav [data-view=library]').click();
+      await page.locator(`[data-conv="${a.id}"]`).click();
+      await expect(input).toHaveValue('尚未发送的草稿 A');
+      await page.keyboard.press('Control+k');
+      await expect(page.locator('#libSearch')).toBeFocused();
+      await page.locator(`[data-conv="${b.id}"]`).click();
+      await expect(input).toHaveValue('');
+      await input.fill('尚未发送的草稿 B');
+      await page.locator(`[data-conv="${a.id}"]`).click();
+      await expect(input).toHaveValue('尚未发送的草稿 A');
+      await page.evaluate(() => loadChat());
+      await expect(input).toHaveValue('尚未发送的草稿 A');
+      await page.screenshot({ path: path.join(output, 'draft-restored-desktop.png') });
+      await input.fill('alphatopic');
+      await page.locator('#btnSend').click();
+      await expect(page.locator('.from-assistant')).toHaveCount(1);
+      await page.locator(`[data-conv="${b.id}"]`).click();
+      await expect(input).toHaveValue('尚未发送的草稿 B');
+      await page.locator(`[data-conv="${a.id}"]`).click();
+      await expect(input).toHaveValue('');
+      const endpoint = base + '/api/conversations/' + a.id + '/messages';
+      let release, intercepted;
+      const started = new Promise(resolve => { intercepted = resolve; });
+      const held = new Promise(resolve => { release = resolve; });
+      let requests = 0;
+      await page.route(endpoint, async route => {
+        if (++requests === 1) {
+          intercepted(); await held;
+          await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'离线夹具：旧读取失败'})});
+        } else await route.continue();
+      });
+      const oldLoad = page.evaluate(() => loadChat());
+      try {
+        await started;
+        await page.evaluate(() => loadChat());
+        await input.fill('新读取后的草稿不能被旧错误覆盖');
+        release(); await oldLoad;
+        await expect(input).toHaveValue('新读取后的草稿不能被旧错误覆盖');
+      } finally { release(); await oldLoad; await page.unroute(endpoint); }
+    });
+    await check('provider-errors-retain-input-and-retry-in-dialog', async () => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.evaluate(() => { S.sidebar = false; applySidebar(); openSettings('model'); });
+      await page.locator('#btnAddProvider').click();
+      const add = page.locator('#addPvCard');
+      await expect(add.getByRole('combobox', { name: '预设', exact: true })).toBeVisible();
+      await expect(add.getByRole('combobox', { name: 'API 协议', exact: true })).toBeVisible();
+      await page.locator('#addPvOk').click();
+      await expect(add.locator('[data-pv-error]')).toContainText('显示名称不能为空');
+      await expect(page.locator('#addPvName')).toHaveAttribute('aria-invalid', 'true');
+      await page.locator('#addPvName').fill('交互模型夹具');
+      await page.locator('#addPvUrl').fill('invalid-url');
+      await page.locator('#addPvOk').click();
+      await expect(add.locator('[data-pv-error]')).toContainText('API 地址需为完整');
+      await expect(page.locator('#addPvName')).toHaveValue('交互模型夹具');
+      await page.screenshot({ path: path.join(output, 'provider-add-error-narrow.png') });
+      await page.locator('#addPvUrl').fill('http://127.0.0.1:9/v1');
+      await page.locator('#addPvOk').click();
+      await expect(add).toHaveCount(0);
+      const provider = (await call('/api/providers')).items.find(p => p.name === '交互模型夹具');
+      assert(provider && !provider.has_key, 'Fixture provider was not created without a key');
+      const card = page.locator(`[data-pv="${provider.id}"]`);
+      await expect(card.locator('[data-pv-status]')).toHaveText('已添加');
+      await expect(card.getByRole('combobox', { name: 'API 协议', exact: true })).toBeVisible();
+      await card.locator('[data-pv-name]').fill('修改后仍需保留');
+      let saves = 0;
+      const endpoint = base + '/api/providers/' + provider.id;
+      await page.route(endpoint, async route => {
+        saves++;
+        await new Promise(resolve => setTimeout(resolve, 250));
+        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({detail:'离线夹具：保存暂不可用'}) });
+      });
+      try {
+        await card.locator('[data-pv-save]').click();
+        await expect(card.locator('[data-pv-save]')).toBeDisabled();
+        await card.locator('[data-pv-save]').evaluate(e => e.click());
+        await expect(card.locator('[data-pv-error]')).toContainText('保存暂不可用');
+        await expect(card.locator('[data-pv-name]')).toHaveValue('修改后仍需保留');
+        assert.equal(saves, 1, 'Repeated save sent another request');
+        assert.equal((await call('/api/providers')).items.find(p => p.id === provider.id).name, '交互模型夹具');
+        await page.screenshot({ path: path.join(output, 'provider-save-error-narrow.png') });
+      } finally { await page.unroute(endpoint); }
+      await card.locator('[data-pv-save]').click();
+      await expect(card.locator('[data-pv-status]')).toHaveText('已保存');
+      assert.equal((await call('/api/providers')).items.find(p => p.id === provider.id).name, '修改后仍需保留');
+      const modelsEndpoint = endpoint + '/models';
+      await page.route(modelsEndpoint, route => route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'离线夹具：模型目录写入失败'})}));
+      try {
+        await card.locator('[data-pv-name]').fill('分步保存后的名称');
+        await card.locator('[data-pv-save]').click();
+        await expect(card.locator('[data-pv-error]')).toContainText('提供商设置已保存，后续步骤未完成');
+        assert.equal((await call('/api/providers')).items.find(p => p.id === provider.id).name, '分步保存后的名称');
+        await expect(card.locator('[data-pv-name]')).toHaveValue('分步保存后的名称');
+      } finally { await page.unroute(modelsEndpoint); }
+      await card.locator('[data-pv-save]').click();
+      await expect(card.locator('[data-pv-status]')).toHaveText('已保存');
+      const testEndpoint = endpoint + '/test';
+      await page.route(testEndpoint, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ok:false,message:'离线夹具：连接被拒绝'}) }));
+      try {
+        await card.locator('[data-pv-test]').click();
+        await expect(card.locator('[data-pv-error]')).toContainText('连接失败：离线夹具：连接被拒绝');
+        await expect(card.locator('[data-pv-name]')).toHaveValue('分步保存后的名称');
+        const visible = await card.locator('[data-pv-error]').evaluate(e => {
+          const r=e.getBoundingClientRect(), pane=document.querySelector('#settingsPanes').getBoundingClientRect();
+          return !!e.closest('dialog[open]') && r.y >= pane.y && r.bottom <= pane.bottom + 1;
+        });
+        assert(visible, 'Provider error is outside the visible dialog');
+        await page.screenshot({ path: path.join(output, 'provider-test-error-narrow.png') });
+      } finally { await page.unroute(testEndpoint); }
+    });
+    await check('narrow-source-focus-wraps-and-returns-to-trigger', async () => {
+      const conversation = await call('/api/conversations', 'POST', { title:'来源键盘反例' });
+      await page.evaluate(async id => { await loadSidebar(); openView('chat', {convId:id}); }, conversation.id);
+      await expect(page.locator('#chatInput')).toBeVisible();
+      await page.locator('#chatInput').fill('alphatopic'); await page.locator('#btnSend').click();
+      await expect(page.locator('.from-assistant')).toHaveCount(1);
+      await page.setViewportSize({width:390,height:844});
+      const source=page.locator('.answer-sources [data-evidence-ref]').first();
+      await source.focus(); await page.keyboard.press('Enter');
+      await expect(page.locator('#inspSources')).toContainText('We did not use TriviaQA');
+      await expect(page.locator('#btnCloseInspector')).toBeFocused();
+      assert(await page.locator('.work').evaluate(e=>e.inert), 'Covered workspace remains interactive');
+      for (const key of ['Shift+Tab', ...Array(10).fill('Tab')]) {
+        await page.keyboard.press(key);
+        assert(await page.evaluate(()=>document.querySelector('#inspector').contains(document.activeElement)), 'Focus escaped source overlay');
+      }
+      await page.keyboard.press('Control+,');
+      await expect(page.locator('#settingsModal')).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(page.locator('#btnInspector')).toHaveAttribute('aria-expanded','true');
+      await page.keyboard.press('Escape'); await expect(source).toBeFocused();
+      await source.click(); await expect(page.locator('#btnCloseInspector')).toBeFocused();
+      await page.setViewportSize({width:1360,height:880});
+      await expect(page.locator('#inspector')).not.toHaveAttribute('aria-modal');
+      assert(!await page.locator('.work').evaluate(e=>e.inert), 'Desktop remains locked');
+      await page.locator('#chatInput').focus(); await expect(page.locator('#chatInput')).toBeFocused();
+      await page.setViewportSize({width:390,height:844});
+      await expect(page.locator('#btnCloseInspector')).toBeFocused();
+      await page.screenshot({path:path.join(output,'source-focus-narrow.png')});
+      await page.locator('#btnCloseInspector').click(); await expect(source).toBeFocused();
+    });
+    await check('chat-receipts-collapse-only-automatic-success', async () => {
+      const conversation = await call('/api/conversations', 'POST', {title:'记录展开反例'});
+      await page.evaluate(async id=>{await loadSidebar();openView('chat',{convId:id});},conversation.id);
+      await expect(page.locator('#chatInput')).toBeVisible();
+      await page.locator('#chatInput').fill('alphatopic'); await page.locator('#btnSend').click();
+      await expect(page.locator('.from-assistant')).toHaveCount(1);
+      const panel=page.locator('#chatRunPanel');
+      await expect(panel).not.toHaveAttribute('open');
+      await expect(page.locator('#btnSend')).toBeEnabled();
+      await page.locator('#chatInput').fill('alphatopic durablereloadmarker'); await page.locator('#btnSend').click();
+      await expect(panel).toHaveAttribute('open','');
+      await page.locator('#chatRunPanel > summary').click();
+      await page.locator('#chatRunPanel > summary').click();
+      await expect(page.locator('.from-assistant')).toHaveCount(2);
+      await expect(page.locator('#btnSend')).toBeEnabled();
+      await expect(panel).toHaveAttribute('open','');
+      await page.evaluate(()=>loadChat()); await expect(panel).toHaveAttribute('open','');
+      await page.locator('#chatRunPanel > summary').click();
+      await page.locator('#chatInput').fill('alphatopic durableretrymarker'); await page.locator('#btnSend').click();
+      await expect(page.locator('#chatStream')).toContainText('回答失败');
+      await expect(panel).toHaveAttribute('open','');
+      await expect(page.locator('[data-chat-resume][data-retry=true]')).toBeVisible();
+      await expect(panel).toContainText('重试可能再次计费');
+      await page.screenshot({path:path.join(output,'receipt-failure-visible.png')});
+    });
     await check('viewport-theme-settings-matrix', async () => {
       const measurements = [];
       for (const width of [1360, 1000, 720, 390]) {

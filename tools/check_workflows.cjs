@@ -549,7 +549,7 @@ const path = require('node:path');
     await expect(card.locator('[data-model-max-output]')).toHaveText('384,000 token');
     await expect(card.locator('[data-pm-window], [data-pm-max-output], [data-pm-budget]')).toHaveCount(0);
     await card.locator('[data-pv-save]').click();
-    await expect(page.locator('#toasts')).toContainText('已保存');
+    await expect(card.locator('[data-pv-status]')).toHaveText('已保存');
     await page.locator(`[data-pv-edit="${capacityProvider}"]`).click();
     await expect(card.locator('[data-model-max-output]')).toHaveText('384,000 token');
     if (output) {
@@ -646,6 +646,7 @@ const path = require('node:path');
     await page.locator(`[data-conv="${durableConv}"]`).click();
     await expect(page.locator('#chatRunPanel')).toContainText('durablereloadmarker');
     await expect.poll(async () => page.evaluate(async cid => (await api('/api/conversations/'+cid+'/chat-runs')).items[0].status, durableConv)).toBe('completed');
+    await expect(page.locator('#chatRunPanel > summary')).toContainText('结果已保存');
     if (!await page.locator('#chatRunPanel').evaluate(el => el.open)) await page.locator('#chatRunPanel > summary').click();
     await page.locator('[data-chat-result]').first().click();
     await expect(page.locator('.from-assistant')).toHaveCount(1);

@@ -87,6 +87,12 @@ async function refreshChatRuns(convId) {
   if (!panel) {
     panel = document.createElement('details'); panel.id = 'chatRunPanel'; panel.className = 'chat-run-panel';
     $('#chatStream')?.before(panel);
+    panel.addEventListener('click', event => {
+      if (event.target.closest('summary') === panel.firstElementChild) {
+        const view = S.chatRunViews.get(convId);
+        if (view) view.manualOpen = !panel.open;
+      }
+    });
   }
   try {
     const d = await api('/api/conversations/'+encodeURIComponent(convId)+'/chat-runs');
@@ -108,7 +114,12 @@ async function refreshChatRuns(convId) {
         <details><summary>查看逐次调用记录</summary>${r.calls.length ? r.calls.map(c => `<p class="source-intro">${esc(c.task)} · 第 ${c.step} 步 / 尝试 ${c.attempt} · ${esc(({started:'发送已登记，结果未知', succeeded:'响应已保存', failed:'失败'})[c.status])}${c.error_type ? ' · '+esc(c.error_type) : ''}</p>`).join('') : '<p>尚无调用登记。</p>'}</details>
       </section>`).join('') || '<p>尚无持久请求；旧消息不自动补建调用记录。</p>'}</div><p class="task-error" role="alert"></p>`;
     panel.hidden = !d.items.length;
-    if (incomplete.length && !panel.dataset.opened) { panel.open = true; panel.dataset.opened = 'true'; }
+    const view = S.chatRunViews.get(convId) || { manualOpen: null, attentionKey: '' };
+    const attentionKey = incomplete.map(r => r.id + ':' + r.status).join('|');
+    if (attentionKey && attentionKey !== view.attentionKey && view.manualOpen === false) view.manualOpen = null;
+    view.attentionKey = attentionKey;
+    S.chatRunViews.set(convId, view);
+    panel.open = view.manualOpen ?? Boolean(incomplete.length);
     $$('[data-chat-result]', panel).forEach(b => b.onclick = async () => {
       b.disabled = true;
       try {
