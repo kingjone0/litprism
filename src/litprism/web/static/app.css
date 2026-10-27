@@ -628,6 +628,8 @@ details.card > summary::before,
 /* 批量操作组：依赖"已选"的动作单独成组，避免和一次性动作同权重 */
 .tool-group {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   align-items: center;
   gap: 6px;
   padding: 3px 5px 3px 10px;
@@ -636,6 +638,16 @@ details.card > summary::before,
   background: var(--panel-2);
 }
 .tool-group-label { font-size: 12px; color: var(--muted); }
+.tool-group-label, .library-tools .btn, #btnVerify, #btnSaveCfg, #btnAddProvider { flex-shrink: 0; white-space: nowrap; }
+.verify-controls .input { flex: 1; min-width: 0; width: auto; }
+.provider-heading { flex-wrap: wrap; }
+.provider-heading > :first-child { flex: 1 1 220px; min-width: 0; }
+.settings-save-actions { margin-top: 14px; flex-wrap: wrap; }
+.settings-save-actions > .muted { flex: 1 1 220px; }
+.field-error { color: var(--danger); font-size: 12.5px; line-height: 1.6; margin-top: 10px; overflow-wrap: anywhere; }
+.settings-save-status { color: var(--text-2); font-size: 12.5px; line-height: 1.6; margin-top: 10px; }
+.field-error:empty, .settings-save-status:empty { display: none; }
+[aria-invalid="true"] { border-color: var(--danger); }
 .tool-group .btn { background: var(--panel); }
 
 /* 统一空状态 ----------------
@@ -819,7 +831,7 @@ details.card > summary::before,
 }
 .setting-row:last-child { border-bottom: none; }
 .setting-label { flex: 1; min-width: 0; }
-.setting-label .name { font-size: 13px; font-weight: 550; }
+.setting-label .name { display: block; font-size: 13px; font-weight: 550; }
 .setting-label .desc { margin-top: 3px; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
 .setting-control { flex: none; width: 220px; }
 .setting-control .input, .setting-control .select { font-size: 12.5px; }

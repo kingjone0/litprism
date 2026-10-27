@@ -1489,8 +1489,16 @@ async function loadWhitelist() {
 }
 
 async function doVerify() {
-  const q = $('#verifyInput').value.trim();
-  if (!q) return;
+  const input = $('#verifyInput');
+  const q = input.value.trim();
+  const error = $('#verifyInputError');
+  error.textContent = q ? '' : '请输入论文标题或 DOI。';
+  input.toggleAttribute('aria-invalid', !q);
+  if (!q) {
+    input.setAttribute('aria-invalid', 'true');
+    input.focus();
+    return;
+  }
   const box = $('#verifyResult');
   box.innerHTML = `<div class="card" style="margin-top:12px"><div class="card-body">
     <div class="skeleton" style="width:50%"></div></div></div>`;
@@ -1621,11 +1629,12 @@ async function renderSettingsPane(key) {
   const EDITABLE = ['sources', 'verify', 'retrieval', 'export'];
   box.innerHTML = `
     <div class="card" id="set-pane-${key}"><div class="card-body">${settingsBody(key, c)}</div></div>
-    ${EDITABLE.includes(key) ? `<div class="row" style="margin-top:14px;gap:8px">
+    ${EDITABLE.includes(key) ? `<div class="row settings-save-actions">
       <span class="muted" style="font-size:11.5px">改动会写入配置文件；部分项需重启应用才完全生效。</span>
       <span style="flex:1"></span>
       <button class="btn sm primary" id="btnSaveCfg">保存</button>
-    </div>` : ''}`;
+    </div><p class="field-error" id="settingsSaveError" role="alert"></p>
+    <p class="settings-save-status" id="settingsSaveStatus" role="status"></p>` : ''}`;
   const saveBtn = $('#btnSaveCfg');
   if (saveBtn) saveBtn.onclick = () => saveSettingsPane(key);
 
@@ -1644,9 +1653,20 @@ async function renderSettingsPane(key) {
 }
 
 function row(name, desc, control) {
+  const template = document.createElement('template');
+  template.innerHTML = control;
+  const fields = [...template.content.querySelectorAll('input, select, textarea')];
+  const key = fields[0]?.id || fields[0]?.dataset.cfg;
+  const labelId = key ? `setting-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}-label` : '';
+  const descId = labelId + '-description';
+  fields.forEach((field, index) => {
+    field.id ||= `${labelId}-input-${index}`;
+    if (!field.hasAttribute('aria-label')) field.setAttribute('aria-labelledby', labelId);
+    field.setAttribute('aria-describedby', descId);
+  });
   return `<div class="setting-row">
-    <div class="setting-label"><div class="name">${name}</div><div class="desc">${desc}</div></div>
-    <div class="setting-control">${control}</div>
+    <div class="setting-label">${fields.length ? `<label class="name" id="${labelId}" for="${fields[0].id}">${name}</label>` : `<div class="name">${name}</div>`}<div class="desc"${fields.length ? ` id="${descId}"` : ''}>${desc}</div></div>
+    <div class="setting-control">${template.innerHTML}</div>
   </div>`;
 }
 
@@ -1661,7 +1681,7 @@ function settingsBody(key, c) {
             <option value="light"${S.theme === 'light' ? ' selected' : ''}>浅色</option>
             <option value="dark"${S.theme === 'dark' ? ' selected' : ''}>深色</option>
           </select>`) +
-        row('语言', '界面语言（一期仅简体中文）。', `<input class="input" value="简体中文" disabled>`) +
+        row('语言', '界面语言（一期仅简体中文）。', `<input class="input" id="setLanguage" value="简体中文" disabled>`) +
         row('面板布局', '右侧检视面板的显示状态会被记住。',
           `<button class="btn sm" id="btnResetLayout">重置布局</button>`);
 
@@ -1679,10 +1699,10 @@ function settingsBody(key, c) {
             : '免费开放，建议保持启用。',
           `<div style="display:flex;flex-direction:column;gap:6px">
              <label class="row" style="gap:6px;cursor:pointer">
-               <input type="checkbox" data-cfg="sources.${k}.enabled" data-type="bool"${on ? ' checked' : ''}>
+               <input type="checkbox" data-cfg="sources.${k}.enabled" data-type="bool" aria-label="${label}：启用"${on ? ' checked' : ''}>
                <span style="font-size:12.5px">启用</span>
              </label>
-             ${v && 'mailto' in v ? `<input class="input" data-cfg="sources.${k}.mailto"
+             ${v && 'mailto' in v ? `<input class="input" data-cfg="sources.${k}.mailto" aria-label="${label} 联系邮箱"
                placeholder="联系邮箱（部分源要求）" value="${esc(v.mailto || '')}"
                style="font-size:11.5px;padding:4px 8px">` : ''}
            </div>`);
@@ -1718,7 +1738,7 @@ function settingsBody(key, c) {
           `<input class="input" type="number" min="0" max="1000"
             data-cfg="retrieval.chunk_overlap" data-type="number"
             value="${c.retrieval?.chunk_overlap ?? 150}">`) +
-        row('漏提占比数', '每次检索返回的片段数。受上下文预算约束，实际会动态调整。',
+        row('返回片段数', '每次检索返回的片段数。受上下文预算约束，实际会动态调整。',
           `<input class="input" type="number" min="1" max="50"
             data-cfg="retrieval.top_k" data-type="number"
             value="${c.retrieval?.top_k ?? 8}">`) +
@@ -1797,15 +1817,34 @@ function collectPatch(pane) {
 async function saveSettingsPane(key) {
   const pane = $(`#set-pane-${key}`);
   if (!pane) return;
+  const button = $('#btnSaveCfg');
+  const error = $('#settingsSaveError');
+  const status = $('#settingsSaveStatus');
+  if (button.disabled) return;
+  error.textContent = '';
+  status.textContent = '';
+  pane.querySelectorAll('[aria-invalid]').forEach(field => {
+    field.removeAttribute('aria-invalid');
+    field.setAttribute('aria-describedby', field.getAttribute('aria-describedby').replace(' settingsSaveError', ''));
+  });
+  button.disabled = true;
   const patch = collectPatch(pane);
   try {
     const r = await api('/api/config', { method: 'PATCH', body: patch });
     S.status = { ...(S.status || {}), config: r.config };
-    toast('已保存');
-    (r.warnings || []).forEach(w => toast(w, true));
+    status.textContent = ['已保存', ...(r.warnings || [])].join('；');
     if (key === 'sources') loadSidebar();
   } catch (e) {
-    toast(e.message, true);
+    error.textContent = e.message;
+    const invalid = [...pane.querySelectorAll('[data-cfg]')].filter(field => !field.checkValidity());
+    invalid.forEach(field => {
+      field.setAttribute('aria-invalid', 'true');
+      field.setAttribute('aria-describedby', field.getAttribute('aria-describedby') + ' settingsSaveError');
+    });
+    if (invalid.length) invalid[0].focus();
+    error.scrollIntoView({ block: 'nearest' });
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1850,7 +1889,7 @@ function renderProviders() {
   }).join('');
 
   area.innerHTML = `
-    <div class="row" style="margin-bottom:12px">
+    <div class="row provider-heading" style="margin-bottom:12px">
       <div>
         <div style="font-size:13px;font-weight:600">模型提供商</div>
         <div class="muted" style="font-size:11.5px;margin-top:2px">
@@ -2459,6 +2498,10 @@ function bindGlobal() {
   // 核验
   $('#btnVerify').onclick = doVerify;
   $('#verifyInput').onkeydown = e => { if (e.key === 'Enter') doVerify(); };
+  $('#verifyInput').oninput = () => {
+    $('#verifyInput').removeAttribute('aria-invalid');
+    $('#verifyInputError').textContent = '';
+  };
 
   // 导出全部
   $('#btnExportAll').onclick = () => toast('批量导出将在后续版本提供');

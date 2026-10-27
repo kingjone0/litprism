@@ -131,7 +131,7 @@
               <p class="action-desc">需要先配置搜索服务；结果先作为候选，不直接当事实依据。</p>
             </div>
             <div class="action-controls">
-              <input class="input" id="webEvidenceQuery" placeholder="关键词">
+              <input class="input" id="webEvidenceQuery" placeholder="关键词" aria-label="网页搜索关键词">
               <button class="btn" id="btnSearchEvidence">搜索</button>
             </div>
           </div>
@@ -175,10 +175,11 @@
           </div>
           <div class="card">
             <div class="card-body">
-              <div class="row" style="gap:10px">
-                <input class="input" id="verifyInput" placeholder="输入论文标题或 DOI">
+              <div class="row verify-controls" style="gap:10px">
+                <input class="input" id="verifyInput" placeholder="输入论文标题或 DOI" aria-label="待核验论文标题或 DOI" aria-describedby="verifyInputError">
                 <button class="btn primary" id="btnVerify">核验</button>
               </div>
+              <p class="field-error" id="verifyInputError" role="alert"></p>
               <div style="margin-top:8px;font-size:12px;color:var(--muted)">
                 白名单命中的文献不走网络，直接返回「🔵人工确认」，并显示确认当时的自动判定。
               </div>
@@ -222,7 +223,7 @@
           </div>
           <div class="search-box" style="margin-bottom:12px">
             <span class="ico"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></span>
-            <input id="skillSearch" placeholder="搜索 Skill 名称或路径">
+            <input id="skillSearch" placeholder="搜索 Skill 名称或路径" aria-label="搜索研究技能名称或路径">
           </div>
           <div id="skillCards"></div>
           <div class="card" style="margin-top:12px"><div class="card-body">

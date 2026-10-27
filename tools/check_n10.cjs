@@ -165,6 +165,110 @@ const path = require('node:path');
       const restored = await call('/api/search', 'POST', { query: 'alphatopic', external: false });
       assert(restored.local.some(r => r.paper_id === pid), 'Restored paper absent from search');
     });
+    await check('settings-control-names-and-visible-save-feedback', async () => {
+      await page.locator('[data-view=settings]').click();
+      await expect(page.getByRole('combobox', { name: '主题', exact: true })).toBeVisible();
+      for (const section of ['sources', 'verify', 'retrieval', 'export']) {
+        await page.locator(`[data-set="${section}"]`).click();
+        const unnamed = await page.locator('#settingsPanes').evaluate(root =>
+          [...root.querySelectorAll('input, select')].filter(e => !e.disabled && !e.getAttribute('aria-label')
+            && !e.getAttribute('aria-labelledby') && !e.labels.length).length);
+        assert.equal(unnamed, 0, section + ' has unnamed settings');
+      }
+      await page.locator('[data-set=sources]').click();
+      await expect(page.getByRole('checkbox', { name: 'Crossref：启用', exact: true })).toBeVisible();
+      await expect(page.getByRole('textbox', { name: 'Crossref 联系邮箱', exact: true })).toBeVisible();
+      await page.locator('[data-set=retrieval]').click();
+      const field = page.getByRole('spinbutton', { name: '返回片段数', exact: true });
+      const before = (await call('/api/status')).config.retrieval.top_k;
+      for (const [width, theme] of [[1360, 'light'], [390, 'dark']]) {
+        await page.setViewportSize({ width, height: 844 });
+        await page.evaluate(t => { S.theme = t; applyTheme(); }, theme);
+        await page.locator('label', { hasText: '返回片段数' }).click();
+        await expect(field).toBeFocused();
+        await field.fill('0');
+        const failed = page.waitForResponse(r => r.url().endsWith('/api/config') && r.request().method() === 'PATCH');
+        await page.locator('#btnSaveCfg').click();
+        assert.equal((await failed).status(), 400);
+        await expect(page.locator('#settingsSaveError')).toContainText('返回片段数必须在 1–50 之间');
+        await expect(field).toHaveValue('0');
+        await expect(field).toHaveAttribute('aria-invalid', 'true');
+        await expect(field).toHaveAttribute('aria-describedby', /settingsSaveError/);
+        assert.equal((await call('/api/status')).config.retrieval.top_k, before, 'Rejected config changed saved value');
+        const visible = await page.locator('#settingsSaveError').evaluate(e => {
+          const r = e.getBoundingClientRect(), pane = document.querySelector('#settingsPanes').getBoundingClientRect();
+          return !!e.closest('dialog[open]') && r.y >= pane.y && r.bottom <= pane.bottom + 1;
+        });
+        assert(visible, 'Save error must be readable inside the active dialog');
+        await page.screenshot({ path: path.join(output, `save-error-${width}-${theme}.png`) });
+        await field.fill(String(before === 9 ? 8 : 9));
+        const saved = page.waitForResponse(r => r.url().endsWith('/api/config') && r.request().method() === 'PATCH');
+        await page.locator('#btnSaveCfg').click();
+        assert.equal((await saved).status(), 200);
+        await expect(page.locator('#settingsSaveStatus')).toHaveText('已保存');
+        await expect(page.locator('#settingsSaveError')).toBeEmpty();
+        await expect(field).not.toHaveAttribute('aria-invalid');
+        assert.equal((await call('/api/status')).config.retrieval.top_k, before === 9 ? 8 : 9);
+        await field.fill(String(before));
+        await page.locator('#btnSaveCfg').click();
+        await expect.poll(async () => (await call('/api/status')).config.retrieval.top_k).toBe(before);
+        await expect(page.locator('#btnSaveCfg')).toBeEnabled();
+      }
+    });
+    await check('empty-verification-guides-input-without-request', async () => {
+      await page.locator('[data-view=verify]').first().click();
+      let requests = 0;
+      const observe = req => { if (req.method() === 'POST' && req.url().endsWith('/api/verify')) requests++; };
+      page.on('request', observe);
+      try {
+        const input = page.getByRole('textbox', { name: '待核验论文标题或 DOI', exact: true });
+        await input.fill('   ');
+        await page.locator('#btnVerify').click();
+        await expect(input).toBeFocused();
+        await expect(input).toHaveAttribute('aria-invalid', 'true');
+        await expect(page.locator('#verifyInputError')).toContainText('请输入论文标题或 DOI');
+        assert.equal(requests, 0, 'Empty verification sent a request');
+        await input.fill('验收文献 A');
+        await expect(page.locator('#verifyInputError')).toBeEmpty();
+        await expect(input).not.toHaveAttribute('aria-invalid');
+        const response = page.waitForResponse(r => r.url().endsWith('/api/verify'));
+        await input.press('Enter');
+        assert.equal((await response).status(), 200);
+        assert.equal(requests, 1, 'Corrected verification did not submit exactly once');
+      } finally { page.off('request', observe); }
+    });
+    await check('narrow-short-actions-stay-readable', async () => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.evaluate(() => { S.sidebar = false; applySidebar(); });
+      const oneLine = async selector => {
+        const controls = page.locator(selector);
+        assert(await controls.count(), 'Missing short action: ' + selector);
+        for (const control of await controls.all()) {
+          const lines = await control.evaluate(e => {
+            const range = document.createRange(); range.selectNodeContents(e);
+            return new Set([...range.getClientRects()].filter(r => r.width > 0).map(r => Math.round(r.y))).size;
+          });
+          assert.equal(lines, 1, 'Short action wraps: ' + await control.innerText());
+        }
+      };
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(t => { S.theme = t; applyTheme(); openView('library'); }, theme);
+        await oneLine('.library-tools .btn, .tool-group-label');
+        await page.screenshot({ path: path.join(output, `short-actions-library-${theme}.png`) });
+        await page.evaluate(() => openView('verify'));
+        await oneLine('#btnVerify');
+        await page.screenshot({ path: path.join(output, `short-actions-verify-${theme}.png`) });
+        await page.evaluate(() => openSettings('model'));
+        await expect(page.locator('#btnAddProvider')).toBeVisible();
+        await oneLine('#btnAddProvider');
+        await page.screenshot({ path: path.join(output, `short-actions-model-${theme}.png`) });
+        await page.locator('[data-set=export]').click();
+        await oneLine('#btnSaveCfg');
+        await page.screenshot({ path: path.join(output, `short-actions-export-${theme}.png`) });
+        await page.keyboard.press('Escape');
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Page overflows after reflow');
+      }
+    });
     await check('viewport-theme-settings-matrix', async () => {
       const measurements = [];
       for (const width of [1360, 1000, 720, 390]) {

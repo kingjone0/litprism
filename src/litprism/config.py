@@ -421,7 +421,7 @@ def _validate(cfg: Config) -> None:
     if type(cfg.llm.automatic_output) is not bool:
         raise ValueError('llm.automatic_output 必须为布尔值。')
     if not 1 <= cfg.retrieval.top_k <= 50:
-        raise ValueError('召回数必须在 1–50 之间。')
+        raise ValueError('返回片段数必须在 1–50 之间。')
 
     if cfg.memory.resident_token_budget <= 0:
         raise ValueError(
