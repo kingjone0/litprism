@@ -825,7 +825,7 @@ async function loadPaperDetail(versionId = null) {
           <div class="card"><div class="card-body">
             <div class="empty"><div class="ico">🧩</div>
               <div class="title">${candidateView._candidates?.length ? '正式解读尚未发布' : '尚未解读'}</div>
-              <div class="desc">${candidateView._candidates?.length ? '候选已保留，可在上方直接核对原文并人工审核。未经核实的候选不会显示为正式结论。' : '先确认本次材料范围，再开始解读。'}</div>
+              <div class="desc">${candidateView._candidates?.length ? '候选已保留，可在上方核对原文并人工审核。' : '先确认本次材料范围，再开始解读。'}</div>
               <div class="empty-actions">${candidateView._candidates?.length ? '' : emptyCta('analyze', '解读这篇论文')}</div>
             </div>
           </div></div>`}
@@ -1864,7 +1864,7 @@ async function doVerify() {
       <div class="card-body">
         <div style="font-size:12px;color:var(--muted);line-height:1.65;margin-bottom:10px">
           如果你确认这篇文献真实存在，可以人工放行。<strong>确认依据必填</strong>，
-          且会保留确认当时的自动判定 —— 将来复核时能分清哪些是机器判的、哪些是人拍的板。
+          且会保留确认当时的自动判定。
         </div>
         <label for="wlReason">人工确认依据</label>
         <textarea class="textarea" id="wlReason" rows="2"
@@ -2781,7 +2781,7 @@ async function loadInspectorContext() {
       <div class="metric"><span class="k">会话记账</span><span class="v">${fmtNum(occ.total_tokens)}</span></div>
       <div class="metric"><span class="k">会话可见内容（估算）</span><span class="v">${fmtNum(occ.surface_tokens)}</span></div>
       <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.6">
-        记账含已压缩原文；可见内容仅统计消息与摘要。系统指令、偏好和本轮检索片段另占空间，实际请求可能裁减历史。
+        记账含已压缩原文；可见内容只算消息与摘要，系统指令与检索片段另占空间。
       </div>
 
       <div style="margin-top:16px;font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.05em;text-transform:uppercase">

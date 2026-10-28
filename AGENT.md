@@ -35,7 +35,8 @@ G01全库可达性已收口；G02/G03将Web论文初读/重读统一为N01持久
   `tests/test_theme_attribute.py` 会拦。改主题走 `setTheme(id)`，入口在设置 → 通用。
 - **空态不许只写文字指路**：用 `emptyCta(action, label)` 生成按钮，`data-empty-action` 委托到原控件
   （`view:<name>` 前缀表示跳转）。`tests/test_empty_states.py` 拦"点某某按钮"这类写法。
-- UI 端到端验收 `tools/check_workflows.py --suite workflows`（需 playwright + 本机 Chrome）；
+- UI 端到端验收 `tools/check_workflows.py --suite workflows`（需本机 Chrome）。playwright **不进依赖清单**，
+  本地按需 `npm i --no-save playwright` 即可，换机器或重装依赖后需再执行一次；
   主题步骤断言的是主题 id，之前点 `#btnTheme` 的脚本早已失效。
 
 ## 验证命令
@@ -64,6 +65,15 @@ Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
 运行验收脚本时同样先 `site.addsitedir(...)`，再 `runpy.run_path('tools/check_workflows.py',run_name='__main__')`；仍须指定隔离LITPRISM_HOME和NODE_PATH。此为本机已验证的临时兼容路径，先核对文件存在和Python ABI，不擅自换成系统Python。
 
 2026-10-28全套测试的临时目录注意：不要把pytest的`--basetemp`放在`_selftest.*`祖先内；离线回放路径守卫的负例会因此变为合法隔离路径，破坏测试前提。全套用上面的标准pytest临时目录，权限拒绝时保留日志并按获准方式执行；应用/浏览器验收及原始证据仍留独立`_selftest.*`。不要为消除此环境失败而修改数据守卫或测试断言。
+
+## 辅助脚本（不常跑，但别当垃圾删）
+
+| 脚本 | 用途 |
+|---|---|
+| `tools/_probe.js` | 运行时缺口探针：起 sidecar、走遍所有视图与设置面板，收集控制台报错/失败请求/未处理拒绝 |
+| `tools/_shot.js`、`tools/window_shot.py` | 出图：前者抓页面，后者用 ctypes 抓桌面窗口（外壳渲染是否有内容只能靠看） |
+| `tools/check_workbench.cjs` | 无窗口的前端交互验收（与 `check_workflows` 覆盖面不同，需要 playwright） |
+| `tools/_empty_state_check.cjs`、`tools/_theme_check.cjs` | 空态按钮点击、四套主题明暗与分层校验（需运行中的实例与 `BASE_URL`） |
 
 ## 不能削弱的边界
 

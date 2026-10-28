@@ -219,7 +219,7 @@ async function loadAnalysisRuns(pid) {
       entry.textContent=items.some(run=>run.active) ? '查看解读进度' : entry.dataset.readingLabel;
     }
     box.innerHTML = `<details class="run-log" ${items.length ? 'open' : ''}><summary>解读运行记录（${items.length}${items.length === 30 ? '，最近' : ''}）</summary>
-      <p class="source-intro">暂停时保留原解读。刷新或重新打开应用不会自动恢复调用。机器复核通过仍不等于人工确认。</p>
+      <p class="source-intro">暂停时保留原解读。刷新或重新打开应用不会自动恢复调用。</p>
       <button class="btn sm" data-refresh-runs>刷新记录</button>
       ${items.map(run => `<div class="analysis-run" data-run-id="${esc(run.id)}">
         <div class="row wrap"><strong>${esc(analysisRunStatuses[run.status] || run.status)}</strong><span class="source-intro">${esc(run.model)} · ${esc(run.updated_at)}</span>
@@ -786,7 +786,7 @@ async function loadChatReview(ref, openUnitId = null) {
       ${d.review_mode === 'reply' ? '<p class="source-intro">此回复已有整答裁决，请继续使用下方整答入口。</p>' : ''}</section>` : '';
     const audit = d.evidence_audit || {state:'missing', items:[], issues:[]};
     const mapping = `<details class="qa-claim-map"><summary>来源定位记录（辅助）</summary>
-      <p class="source-intro">对象和依据类型由模型提出。原句可定位不等于支持结论，请核对是否谈论同一对象。</p>
+      <p class="source-intro">原句可定位不等于支持结论，请核对是否在谈同一对象。</p>
       ${audit.state === 'missing' ? '<p>此回复没有保存陈述对应记录，请直接对照草稿与原文。</p>' : ''}
       ${(audit.items || []).map(item => `<section><h4>${esc(item.answer_binding?.state === 'bound' ? item.answer_binding.span.text : item.claim || '未对应到正文的记录')}</h4>
         <p class="source-intro qa-answer-binding">${item.answer_binding?.state === 'bound' ? '已对应回答原文' : item.answer_binding?.state === 'ambiguous' ? '回答中有多处相同文字，尚未确定对应位置。' : item.answer_binding ? '模型辅助记录尚未对应回答原文，请对照回复核对。' : '旧记录未保存回答位置，请对照回复核对。'}</p>
