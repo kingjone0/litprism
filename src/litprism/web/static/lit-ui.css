@@ -8,6 +8,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--panel);
+  box-shadow: var(--shadow-xs);
   overflow: hidden;
 }
 .lui + .lui { margin-top: 10px; }
@@ -16,41 +17,51 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 12px;
+  padding: 9px 14px;
   background: var(--panel-2);
   border-bottom: 1px solid var(--border);
   font-size: 11.5px;
   color: var(--muted);
   letter-spacing: .03em;
 }
-.lui-head .lui-kind { font-weight: 600; color: var(--text-2); text-transform: uppercase; }
-.lui-body { padding: 12px; }
+.lui-head .lui-kind {
+  font-weight: 650;
+  color: var(--accent);
+  text-transform: uppercase;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+}
+.lui-body { padding: 14px; }
 
 /* ---------------- paper-card ---------------- */
-.lui-pc { padding: 12px 13px; }
+.lui-pc { padding: 13px 15px; }
 .lui-pc-top { display: flex; align-items: flex-start; gap: 10px; }
 .lui-pc-title {
   flex: 1;
-  font-size: 13.5px;
-  font-weight: 600;
-  line-height: 1.45;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.48;
+  color: var(--text);
 }
 .lui-pc-meta {
-  margin-top: 5px;
-  font-size: 11.5px;
+  margin-top: 6px;
+  font-size: 12px;
   color: var(--muted);
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
 }
 .lui-pc-foot {
-  margin-top: 8px;
-  padding-top: 8px;
+  margin-top: 10px;
+  padding-top: 9px;
   border-top: 1px dashed var(--border);
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--muted);
 }
 .lui-pc-foot .mono { font-family: var(--mono); }
@@ -64,13 +75,15 @@
 
 /* ---------------- paper-list ---------------- */
 .lui-plist .lui-plist-item {
-  padding: 10px 12px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--border);
+  transition: background-color .12s ease;
 }
+.lui-plist .lui-plist-item:hover { background: var(--panel-2); }
 .lui-plist .lui-plist-item:last-child { border-bottom: none; }
-.lui-plist-item .t { font-size: 13px; font-weight: 550; line-height: 1.45; }
+.lui-plist-item .t { font-size: 13.5px; font-weight: 600; line-height: 1.45; color: var(--text); }
 .lui-plist-item .m {
-  margin-top: 3px;
+  margin-top: 4px;
   font-size: 11.5px;
   color: var(--muted);
   display: flex;
@@ -80,84 +93,98 @@
 }
 
 /* ---------------- analysis ---------------- */
-.lui-analysis .lui-field { margin-bottom: 14px; }
+.lui-analysis .lui-field {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
 .lui-analysis .lui-field:last-child { margin-bottom: 0; }
 .lui-field-label {
   font-size: 10.5px;
   font-weight: 650;
   letter-spacing: .06em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--accent);
   margin-bottom: 4px;
 }
 .lui-field-text {
   font-size: 13px;
-  line-height: 1.72;
+  line-height: 1.75;
   white-space: pre-wrap;
+  color: var(--text);
 }
 
 /* ---------------- comparison-table ---------------- */
 .lui-cmp { overflow-x: auto; }
-.lui-cmp table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.lui-cmp table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .lui-cmp th {
   text-align: left;
-  padding: 8px 10px;
+  padding: 9px 11px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 650;
   color: var(--muted);
   background: var(--panel-2);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
   vertical-align: top;
 }
-.lui-cmp th .y { display: block; font-weight: 400; font-size: 10.5px; margin-top: 2px; }
+.lui-cmp th .y { display: block; font-weight: 400; font-size: 10.5px; margin-top: 2px; font-family: var(--mono); }
 .lui-cmp td {
-  padding: 9px 10px;
+  padding: 10px 11px;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
-  line-height: 1.6;
+  line-height: 1.65;
 }
 .lui-cmp tr:last-child td { border-bottom: none; }
-.lui-cmp td.dim { font-weight: 600; color: var(--text-2); white-space: nowrap; width: 96px; }
+.lui-cmp tbody tr:hover { background: var(--panel-2); }
+.lui-cmp td.dim { font-weight: 600; color: var(--text-2); white-space: nowrap; width: 96px; background: var(--bg); }
 
 /* ---------------- concept-list ---------------- */
 .lui-concepts table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.lui-concepts td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.65; }
+.lui-concepts td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.65; }
 .lui-concepts tr:last-child td { border-bottom: none; }
-.lui-concepts td.term { font-weight: 600; width: 34%; }
+.lui-concepts tr:hover td { background: var(--panel-2); }
+.lui-concepts td.term { font-weight: 600; width: 34%; color: var(--text); }
 
 /* ---------------- citation-list ---------------- */
 .lui-cites .lui-cite {
   border-bottom: 1px solid var(--border);
   padding: 10px 12px;
+  transition: background-color .12s ease;
 }
+.lui-cites .lui-cite:hover { background: var(--bg); }
 .lui-cites .lui-cite:last-child { border-bottom: none; }
 .lui-cite-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
   cursor: pointer;
+  user-select: none;
 }
 .lui-cite-head .pg {
   font-family: var(--mono);
   font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
+  font-weight: 600;
+  padding: 1.5px 7px;
+  border-radius: 5px;
   background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
   color: var(--accent);
 }
-.lui-cite-head .sec { color: var(--text-2); }
-.lui-cite-head .toggle { margin-left: auto; opacity: .6; }
+.lui-cite-head .sec { color: var(--text-2); font-weight: 550; }
+.lui-cite-head .toggle { margin-left: auto; opacity: .65; font-size: 11px; }
 .lui-cite-text {
-  margin-top: 7px;
-  padding: 8px 10px;
-  background: var(--panel-2);
-  border-left: 2px solid var(--accent-line);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  font-size: 12px;
-  line-height: 1.7;
+  margin-top: 8px;
+  padding: 9px 11px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.72;
   color: var(--text-2);
   white-space: pre-wrap;
 }
@@ -185,15 +212,16 @@
 /* ---------------- callout ---------------- */
 .lui-callout {
   display: flex;
-  gap: 9px;
-  padding: 10px 13px;
+  gap: 10px;
+  padding: 11px 14px;
   border-radius: var(--radius-sm);
-  border-left: 3px solid var(--neutral);
+  border: 1px solid var(--border-strong);
   background: var(--panel-2);
   font-size: 12.5px;
   line-height: 1.7;
+  margin: 10px 0;
 }
-.lui-callout .lui-co-ico { flex: none; font-size: 13px; opacity: .8; }
+.lui-callout .lui-co-ico { flex: none; font-size: 13.5px; opacity: .85; }
 .lui-callout .lui-co-body { flex: 1; min-width: 0; white-space: pre-wrap; }
 .lui-callout .lui-co-tag {
   display: block;
@@ -201,25 +229,26 @@
   font-weight: 650;
   letter-spacing: .05em;
   text-transform: uppercase;
-  opacity: .75;
+  opacity: .8;
   margin-bottom: 3px;
 }
-.lui-callout.fact      { border-left-color: var(--ok);     background: var(--ok-soft); }
-.lui-callout.claim     { border-left-color: var(--manual); background: var(--manual-soft); }
-.lui-callout.inference { border-left-color: var(--warn);   background: var(--warn-soft); }
-.lui-callout.warn      { border-left-color: var(--danger); background: var(--danger-soft); }
-.lui-callout.note      { border-left-color: var(--neutral);background: var(--panel-2); }
+/* 变体靠整圈边框 + 底色区分，不用左侧色条 */
+.lui-callout.fact      { border-color: var(--ok);           background: var(--ok-soft); }
+.lui-callout.claim     { border-color: var(--manual);       background: var(--manual-soft); }
+.lui-callout.inference { border-color: var(--warn);         background: var(--warn-soft); }
+.lui-callout.warn      { border-color: var(--danger);       background: var(--danger-soft); }
+.lui-callout.note      { border-color: var(--border-strong);background: var(--panel-2); }
 
 /* ---------------- 降级提示 ---------------- */
 .lui-degraded {
   margin: 10px 0;
-  padding: 8px 11px;
+  padding: 9px 12px;
   border: 1px dashed var(--warn);
   border-radius: var(--radius-sm);
   background: var(--warn-soft);
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--warn);
-  line-height: 1.6;
+  line-height: 1.65;
 }
 
 /* ---------------- 流式光标 ---------------- */

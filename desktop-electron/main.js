@@ -247,16 +247,16 @@ async function selfTest() {
 
 async function createWindow() {
   const windowState = createWindowState({ statePath: path.join(userDataRoot, 'window-state.json'), screen, log: trace });
-  // 叠层控件与页面顶栏同色，避免出现一条突兀的浅/深色带
+  // 叠层控件与页面顶栏（--panel）同色，避免出现突兀的浅/深色差带
   const TITLEBAR_COLORS = {
-    light: { color: '#ffffff', symbol: '#55504a' },
-    dark: { color: '#1c1b19', symbol: '#d9d4cc' },
+    light: { color: '#ffffff', symbol: '#4a4640' },
+    dark: { color: '#1c1c1a', symbol: '#c7c2b8' },
   };
 
   win = new BrowserWindow({
     ...windowState.options,
     title: '文献棱镜 LitPrism',
-    backgroundColor: '#fcfcfa',
+    backgroundColor: '#f8f7f4',
     autoHideMenuBar: true,
     show: false,
     // 页面里已经有自绘的工具栏；再叠一条系统标题栏就是两层边框。
@@ -279,7 +279,7 @@ async function createWindow() {
     const palette = TITLEBAR_COLORS[theme] || TITLEBAR_COLORS.light;
     try {
       win.setTitleBarOverlay({ color: palette.color, symbolColor: palette.symbol, height: 44 });
-      win.setBackgroundColor(theme === 'dark' ? '#171614' : '#fcfcfa');
+      win.setBackgroundColor(theme === 'dark' ? '#141413' : '#f8f7f4');
     } catch {
       // 老版本 Electron 不支持动态更换叠层颜色：保持初始配色即可
     }
@@ -306,9 +306,9 @@ async function createWindow() {
     await mainWindow.loadURL(
       'data:text/html;charset=utf-8,' +
         encodeURIComponent(
-          `<body style="margin:0;background:#0b1120;color:#f87171;font:14px/1.7 -apple-system,'Segoe UI','Microsoft YaHei',sans-serif;padding:32px">
+          `<body style="margin:0;background:#141413;color:#f07171;font:14px/1.7 -apple-system,'Segoe UI','Microsoft YaHei',sans-serif;padding:32px">
              <h3 style="margin:0 0 12px">后台服务启动失败</h3>
-             <pre style="white-space:pre-wrap;color:#cbd5e1">${String(err.message)}</pre>
+             <pre style="white-space:pre-wrap;color:#c7c2b8">${String(err.message)}</pre>
            </body>`
         )
     );
