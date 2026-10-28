@@ -28,6 +28,16 @@ G01全库可达性已收口；G02/G03将Web论文初读/重读统一为N01持久
 
 关联工作树应用数据使用 `LITPRISM_HOME=E:/codex-litprism-data`。测试使用临时库并清除测试进程的 `LITPRISM_HOME`；不能为检查配置而打开用户主库触发迁移。Key 只走 SecretStore，不进源码、文档、日志、测试夹具或提交。
 
+## 前端约定（2026-10-28）
+
+- **主题只有一个属性** `data-theme="paper|paper-dark|minimal|glass"`；按明暗批量命中写
+  `:is([data-theme="paper-dark"], [data-theme="minimal"])`。不要再引入 `data-skin` 之类的第二维度，
+  `tests/test_theme_attribute.py` 会拦。改主题走 `setTheme(id)`，入口在设置 → 通用。
+- **空态不许只写文字指路**：用 `emptyCta(action, label)` 生成按钮，`data-empty-action` 委托到原控件
+  （`view:<name>` 前缀表示跳转）。`tests/test_empty_states.py` 拦"点某某按钮"这类写法。
+- UI 端到端验收 `tools/check_workflows.py --suite workflows`（需 playwright + 本机 Chrome）；
+  主题步骤断言的是主题 id，之前点 `#btnTheme` 的脚本早已失效。
+
 ## 验证命令
 
 必须使用指定 Python；系统 python 缺 pytest。只修改当前进程环境。

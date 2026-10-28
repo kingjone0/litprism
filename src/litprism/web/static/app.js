@@ -5,13 +5,13 @@
 
 /* 主题注册表必须在 S 之前：S.theme 初始化时会调用 readTheme() */
 const THEMES = [
-  { id: 'paper',      label: '纸张',      palette: 'light', skin: 'paper',
+  { id: 'paper',      label: '纸张',
     desc: '暖中性底 + 深林绿，长时间阅读不刺眼', swatch: ['#f8f7f4', '#ffffff', '#236347'] },
-  { id: 'paper-dark', label: '纸张深色',  palette: 'dark',  skin: 'paper',
+  { id: 'paper-dark', label: '纸张深色',
     desc: '同一配色的夜间版本', swatch: ['#141413', '#1c1c1a', '#5ec293'] },
-  { id: 'minimal',    label: '极简深色',  palette: 'dark',  skin: 'minimal',
+  { id: 'minimal',    label: '极简深色',
     desc: '近黑中性灰 + 冷色强调，Linear / VS Code 风格', swatch: ['#0b0c0f', '#16181c', '#7c8cf8'] },
-  { id: 'glass',      label: '毛玻璃',    palette: 'light', skin: 'glass',
+  { id: 'glass',      label: '毛玻璃',
     desc: '半透明面板 + 背景模糊，macOS / Fluent 风格', swatch: ['#eef2f8', '#ffffff', '#0f6b4f'] },
 ];
 const THEME_IDS = THEMES.map(t => t.id);
@@ -88,6 +88,37 @@ function icon(name) {
  *
  * ``bare`` 用于已经处在卡片内部的场景 —— 卡片里再套卡片是错的。
  */
+/**
+ * 空态里的"下一步"按钮。空态说明如果只说"点右上角某个按钮"，用户得自己找；
+ * 这里直接把同一个动作做成按钮，点击时触发原按钮，逻辑只有一份。
+ */
+const EMPTY_ACTION_TARGETS = {
+  import: '#btnImport',
+  analyze: '#btnReanalyze',
+  compare: '#btnCompareSelected',
+  'fetch-models': '[data-pv-fetch]',
+  'use-selection': '#btnUseSelection',
+};
+
+function emptyCta(action, label, { primary = true } = {}) {
+  return `<button class="btn sm${primary ? ' primary' : ''}" data-empty-action="${esc(action)}">${esc(label)}</button>`;
+}
+
+document.addEventListener('click', event => {
+  const trigger = event.target.closest('[data-empty-action]');
+  if (!trigger) return;
+  const action = trigger.dataset.emptyAction || '';
+  if (action.startsWith('view:')) { openView(action.slice(5)); return; }
+  const selector = EMPTY_ACTION_TARGETS[action];
+  const target = selector ? document.querySelector(selector) : null;
+  if (!target) return;
+  if (target.disabled) {
+    toast('先在列表里完成选择，再执行这个操作。', true);
+    return;
+  }
+  target.click();
+});
+
 function emptyState({ icon: name = 'document', title = '', desc = '', action = '', bare = false }) {
   const inner = `<div class="empty-mark">${icon(name)}</div>
     ${title ? `<p class="empty-state-title">${esc(title)}</p>` : ''}
@@ -238,15 +269,13 @@ function badgeOf(level) {
 
 /* ---------------------------------------------------------------- 主题 */
 /**
- * 主题 = 明暗调色板（palette）+ 风格皮肤（skin），分别落到两个属性上：
- *   data-theme="light|dark"  供已有的 [data-theme="dark"] 选择器继续生效
- *   data-skin="paper|minimal|glass"  只覆盖令牌和少数结构
- * 拆开而不是把四套主题写成一个属性，是为了不重写几百处 dark 选择器。
+ * 主题只有一个标识：`data-theme="paper|paper-dark|minimal|glass"`。
+ * 明暗不是第二个维度 —— 需要按明暗批量命中时，CSS 用
+ * `:is([data-theme="paper-dark"], [data-theme="minimal"])` 显式列出，避免两套属性各说一半。
  */
 function applyTheme() {
   const t = themeOf(S.theme);
-  document.documentElement.dataset.theme = t.palette;
-  document.documentElement.dataset.skin = t.skin;
+  document.documentElement.dataset.theme = t.id;
   // 外壳的窗口控件（最小化/最大化/关闭）叠在顶栏右上角，颜色必须跟着主题走
   window.litShell?.setTitleBarTheme?.(t.id);
   document.body.classList.toggle('is-electron', Boolean(window.litShell));
@@ -650,7 +679,8 @@ async function loadLibrary(offset = 0) {
         title: q ? '没有匹配的论文' : group ? '此分组暂无文献' : '知识库还是空的',
         desc: q ? '换个标题或作者关键词试试。'
           : group ? '切换到全部分组，或将已有文献移入此分组。'
-          : '点击「导入文献」或拖入 PDF，完成核验后开始阅读。核验未通过时可查看原因并人工确认。',
+          : '导入 PDF 或补一条题录，完成核验后开始阅读。核验未通过时可查看原因并人工确认。',
+        action: q || group ? '' : emptyCta('import', '导入文献'),
       });
       return;
     }
@@ -795,7 +825,8 @@ async function loadPaperDetail(versionId = null) {
           <div class="card"><div class="card-body">
             <div class="empty"><div class="ico">🧩</div>
               <div class="title">${candidateView._candidates?.length ? '正式解读尚未发布' : '尚未解读'}</div>
-              <div class="desc">${candidateView._candidates?.length ? '候选已保留，可在上方直接核对原文并人工审核。未经核实的候选不会显示为正式结论。' : '点「解读论文」开始，先查看本次材料范围。'}</div>
+              <div class="desc">${candidateView._candidates?.length ? '候选已保留，可在上方直接核对原文并人工审核。未经核实的候选不会显示为正式结论。' : '先确认本次材料范围，再开始解读。'}</div>
+              <div class="empty-actions">${candidateView._candidates?.length ? '' : emptyCta('analyze', '解读这篇论文')}</div>
             </div>
           </div></div>`}
       </div>
@@ -1582,7 +1613,7 @@ async function loadDeliverables() {
     box.innerHTML = emptyState({
       icon: 'note',
       title: '还没有交付物',
-      desc: '综述草稿、对比报告与 Skill 产出会出现在这里，导出时一并带出来源。',
+      desc: '在论文页生成综述或对比、或运行 Skill 后，产出会出现在这里；导出时一并带出来源。',
     });
     return;
   }
@@ -1667,7 +1698,7 @@ async function loadSkills() {
       icon: 'skills',
       title: q ? '没有匹配的 Skill' : '尚未添加 Skill',
       desc: q ? '换个关键词试试。'
-        : 'Skill 是声明式的提示词扩展，不含可执行代码。在下方目录新建子目录，放入 skill.yaml 与 prompt.md 即可。',
+        : 'Skill 是声明式的提示词扩展，不含可执行代码。在下方「Skill 目录」里新建子目录，放入 skill.yaml 与 prompt.md 即可。',
     });
     return;
   }
@@ -2351,7 +2382,7 @@ function providerEditor(p) {
     <div class="hint" style="margin:-4px 0 8px;font-size:11px">
       ◉ 表示该模型会出现在对话的模型选择器里，点击圆圈切换。
     </div>
-    <div data-pv-models>${modelRows || '<div class="pm-empty">尚未配置模型。点「获取可用模型」从提供商拉取，或手动添加。</div>'}</div>
+    <div data-pv-models>${modelRows || `<div class="pm-empty">尚未配置模型。可从提供商拉取，或手动添加。${emptyCta('fetch-models', '获取可用模型', { primary: false })}</div>`}</div>
     <div class="row" style="margin-top:10px;gap:8px">
       <button class="btn sm" data-pv-addmodel>＋ 添加一行</button>
       <span style="flex:1"></span>

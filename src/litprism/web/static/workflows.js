@@ -455,7 +455,12 @@ async function loadComparison() {
   const box = $('#comparisonResult');
   const request = S.compareRequest = (S.compareRequest || 0) + 1;
   const ids = [...S.selectedPapers];
-  if (ids.length < 2) { box.innerHTML = '<div class="empty">请先在知识库勾选至少两篇文献，然后点击「对比所选」。</div>'; return; }
+  if (ids.length < 2) {
+    box.innerHTML = `<div class="empty"><div class="title">还没有可对比的文献</div>
+      <div class="desc">在知识库勾选至少两篇，再回到这里对比。</div>
+      <div class="empty-actions"><button class="btn sm primary" data-empty-action="view:library">去知识库勾选</button></div></div>`;
+    return;
+  }
   box.innerHTML = '<div class="insp-note">正在读取原文并对比，完成后检查引用…</div>';
   const key = [...ids].sort().join(',');
   if (S.compareKey !== key) {
@@ -1174,7 +1179,7 @@ async function loadTrash() {
   const data = await readPanel($('#trashList'), '/api/trash', loadTrash, () => S.activeView === 'trash');
   if (!data) return false;
   $('#trashList').innerHTML = (data.items || []).map(p => `<div class="list-item"><div class="list-main">${esc(p.display_title || p.title)}<p class="muted">${esc(p.deleted_at)}</p></div><button class="btn" data-restore-paper="${esc(p.id)}">恢复文献</button></div>`).join('')
-    || emptyState({ icon: 'trash', title: '回收站为空', desc: '删除的文献会在这里保留至少 30 天，恢复前不参与检索。' });
+    || emptyState({ icon: 'trash', title: '回收站为空', desc: '删除的文献会出现在这里，恢复前不参与检索。' });
   $$('[data-restore-paper]').forEach(b => b.onclick = async () => {
     try { await api('/api/trash/' + b.dataset.restorePaper + '/restore', { method: 'POST' }); await loadTrash(); await refreshLibrary(); }
     catch (error) { toast(error.message, true); }
@@ -1378,8 +1383,11 @@ async function loadCandidates() {
         icon: 'search',
         title: filter === 'library' ? '还没有已入库的候选' : '候选池为空',
         desc: filter === 'library'
-          ? '导入论文后点「与知识库核对」，这里会自动更新。'
+          ? '导入论文后与知识库核对，这里会自动更新。'
           : '用上方检索获取候选，或手动补充一条题录。',
+        action: filter === 'library'
+          ? emptyCta('view:library', '去知识库导入')
+          : emptyCta('view:recommend', '去发现文献'),
       });
   box.innerHTML = `<div class="pool-head">
       <h2>候选池<span class="pool-count">${items.length}</span></h2>

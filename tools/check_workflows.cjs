@@ -506,8 +506,12 @@ const path = require('node:path');
 
     // 新工作流在深色主题与桌面最小窗口内保持可操作。
     await page.setViewportSize({ width: 1000, height: 660 });
-    await page.locator('#btnTheme').click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    // 主题切换已从顶部按钮改为「设置 → 通用 → 主题卡片」；旧脚本点的 #btnTheme 早已删除
+    await page.evaluate(() => window.openSettings('general'));
+    await page.locator('[data-theme-id="paper-dark"]').click();
+    // 主题只有一个标识，直接断言主题 id
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'paper-dark');
+    await page.evaluate(() => window.closeSettings());
     await page.locator(`[data-resume-run="${budgetRun}"]`).click();
     await expect(page.locator('#researchTask')).toBeVisible();
     if (output) await page.screenshot({ path: path.join(output, 'analysis-run-dark-narrow.png') });

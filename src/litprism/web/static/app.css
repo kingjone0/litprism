@@ -1,7 +1,7 @@
 /* ==========================================================================
    文献棱镜 LitPrism · 界面样式（旗舰学术工作台视觉体系）
    设计取向：现代学术研究工作台 —— 暖纸张中性底 + 深林绿主色 + 精致层次感，长时间深度阅读舒适不刺眼。
-   主题：默认浅色，data-theme="dark" 切换深色。
+   主题：data-theme 取 paper / paper-dark / minimal / glass 之一。
    ========================================================================== */
 
 :root {
@@ -48,7 +48,7 @@
   --serif: "Source Han Serif SC", "Songti SC", Georgia, serif;
 }
 
-[data-theme="dark"] {
+:is([data-theme="paper-dark"], [data-theme="minimal"]) {
   --bg:            #141413;
   --panel:         #1c1c1a;
   --panel-2:       #242421;
@@ -677,7 +677,7 @@ details.card > summary::before,
   font-weight: 550;
   box-shadow: 0 1px 2px rgba(0, 0, 0, .12), inset 0 1px 0 rgba(255, 255, 255, .14);
 }
-[data-theme="dark"] .btn.primary {
+:is([data-theme="paper-dark"], [data-theme="minimal"]) .btn.primary {
   color: #0e1712;
   font-weight: 600;
 }
@@ -687,7 +687,7 @@ details.card > summary::before,
   /* 必须重申文字色：.btn:hover 把 color 设成了 --text，深绿底上会看不见 */
   color: #ffffff;
 }
-[data-theme="dark"] .btn.primary:hover:not(:disabled) { color: #0e1712; }
+:is([data-theme="paper-dark"], [data-theme="minimal"]) .btn.primary:hover:not(:disabled) { color: #0e1712; }
 .btn.ghost { border-color: transparent; background: transparent; box-shadow: none; }
 .btn.ghost:hover:not(:disabled) { background: var(--panel-2); }
 .btn.sm { padding: 4.5px 10px; font-size: 11.5px; border-radius: 7px; }
@@ -886,6 +886,9 @@ details.card > summary::before,
 .tool-group .btn { background: var(--panel); padding: 5px 10px; font-size: 12px; border-radius: 7px; }
 
 /* 统一空状态 */
+.empty-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.empty-actions:empty { display: none; }
+
 .empty-state { padding: 48px 24px; text-align: center; }
 .empty-state .empty-mark { margin: 0 auto 16px; }
 .empty-state-title { margin: 0 0 6px; font-size: 14.5px; font-weight: 600; color: var(--text); }
@@ -1535,7 +1538,7 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
   box-shadow: 0 2px 6px rgba(35, 99, 71, .22), inset 0 1px 0 rgba(255, 255, 255, .22);
   flex: none;
 }
-[data-theme="dark"] .brand-mark {
+:is([data-theme="paper-dark"], [data-theme="minimal"]) .brand-mark {
   color: #0e1712;
   box-shadow: 0 2px 8px rgba(0, 0, 0, .35), inset 0 1px 0 rgba(255, 255, 255, .25);
 }
@@ -1561,7 +1564,7 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
   box-shadow: 0 2px 5px rgba(35, 99, 71, .18), inset 0 1px 0 rgba(255, 255, 255, .16);
   transition: background-color .14s ease, border-color .14s ease, transform .12s ease;
 }
-[data-theme="dark"] .side-launch .side-new { color: #0e1712; }
+:is([data-theme="paper-dark"], [data-theme="minimal"]) .side-launch .side-new { color: #0e1712; }
 .side-launch .side-new:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 
 .workspace-nav { padding: 0 8px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 1px; }
@@ -1750,7 +1753,7 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
   box-shadow: var(--shadow-xs);
   transition: background-color .15s ease, opacity .15s ease;
 }
-[data-theme="dark"] .composer-send { color: #0e1712; }
+:is([data-theme="paper-dark"], [data-theme="minimal"]) .composer-send { color: #0e1712; }
 .composer-send .icon { width: 16px; height: 16px; }
 .composer-send:hover:not(:disabled) { background: var(--accent-hover); }
 .composer-send:disabled { background: var(--panel-3); color: var(--muted); cursor: not-allowed; box-shadow: none; }
@@ -1770,7 +1773,7 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
 .chat-turn.from-user { flex-direction: row-reverse; }
 .chat-turn.from-user .chat-message { flex: 0 1 auto; max-width: 82%; }
 .chat-turn.from-user .chat-avatar { background: var(--accent); border-color: var(--accent); color: #fff; }
-[data-theme="dark"] .chat-turn.from-user .chat-avatar { color: #0e1712; }
+:is([data-theme="paper-dark"], [data-theme="minimal"]) .chat-turn.from-user .chat-avatar { color: #0e1712; }
 .chat-turn.from-assistant .chat-bubble {
   padding: 14px 18px;
   background: var(--panel);
@@ -2182,7 +2185,7 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
    细节微调：原生暗色表单配色方案、论文页头自适应并排与聊天气泡首元素间距
    -------------------------------------------------------------------------- */
 :root { color-scheme: light; }
-[data-theme="dark"] { color-scheme: dark; }
+:is([data-theme="paper-dark"], [data-theme="minimal"]) { color-scheme: dark; }
 
 #paperDetail .page-head > .row {
   justify-content: space-between;
@@ -2220,15 +2223,15 @@ details.card .card-body > details > summary {
 }
 
 /* ==========================================================================
-   皮肤（data-skin）
-   data-theme 只管明暗（light / dark），data-skin 管风格（paper / minimal / glass）。
-   两者分开是为了让已有的 [data-theme="dark"] 选择器继续有效，
-   皮肤只覆盖令牌和少数结构，不重写组件。
+   主题（data-theme）
+   唯一标识：paper / paper-dark / minimal / glass。
+   需要"所有深色主题"时写成 :is([data-theme="paper-dark"], [data-theme="minimal"])，
+   不再用第二个属性表达明暗。
    ========================================================================== */
 
 /* ---------------- 极简深色：Linear / VS Code ----------------
    近黑中性灰 + 单一冷色强调，去掉阴影改用 1px 描边分层，圆角收小。 */
-[data-skin="minimal"] {
+[data-theme="minimal"] {
   --bg:            #0b0c0f;
   --panel:         #121419;
   --panel-2:       #171a20;
@@ -2265,15 +2268,15 @@ details.card .card-body > details > summary {
   --shadow-3:  0 28px 70px rgba(0, 0, 0, .70);
 }
 /* 深色下主按钮文字用深底反色，与 paper 深色保持一致 */
-[data-skin="minimal"] .btn.primary { color: #0b0c0f; box-shadow: none; }
-[data-skin="minimal"] .btn.primary:hover:not(:disabled) { color: #0b0c0f; }
-[data-skin="minimal"] .card { box-shadow: none; }
-[data-skin="minimal"] .side-item.active { background: var(--panel-3); color: var(--text); }
-[data-skin="minimal"] .side-item.active .ico { color: var(--accent); opacity: 1; }
+[data-theme="minimal"] .btn.primary { color: #0b0c0f; box-shadow: none; }
+[data-theme="minimal"] .btn.primary:hover:not(:disabled) { color: #0b0c0f; }
+[data-theme="minimal"] .card { box-shadow: none; }
+[data-theme="minimal"] .side-item.active { background: var(--panel-3); color: var(--text); }
+[data-theme="minimal"] .side-item.active .ico { color: var(--accent); opacity: 1; }
 
 /* ---------------- 毛玻璃：macOS / Fluent ----------------
    面板半透明 + 背景模糊，底下铺一层柔和色斑提供可模糊的内容。 */
-[data-skin="glass"] {
+[data-theme="glass"] {
   --bg:            #eef2f8;
   --panel:         rgba(255, 255, 255, .68);
   --panel-2:       rgba(255, 255, 255, .46);
@@ -2310,7 +2313,7 @@ details.card .card-body > details > summary {
   --shadow-3:  0 32px 80px rgba(31, 45, 71, .22);
 }
 /* 背景色斑：玻璃需要背后有东西可模糊，纯色底看不出质感 */
-[data-skin="glass"] body {
+[data-theme="glass"] body {
   background:
     radial-gradient(1200px 720px at 10% 6%,  #cfe0ff 0%, transparent 62%),
     radial-gradient(980px 640px at 88% 4%,   #e3d6ff 0%, transparent 64%),
@@ -2320,40 +2323,40 @@ details.card .card-body > details > summary {
   background-attachment: fixed;
 }
 /* 根容器让出底色，否则色斑被盖住 */
-[data-skin="glass"] .app,
-[data-skin="glass"] .work { background: transparent; }
+[data-theme="glass"] .app,
+[data-theme="glass"] .work { background: transparent; }
 /* 需要浮起来的表面才做模糊，全站铺满会掉帧 */
-[data-skin="glass"] .titlebar,
-[data-skin="glass"] .sidebar,
-[data-skin="glass"] .inspector,
-[data-skin="glass"] .card,
-[data-skin="glass"] .modal,
-[data-skin="glass"] #chatCompose,
-[data-skin="glass"] .pool-head {
+[data-theme="glass"] .titlebar,
+[data-theme="glass"] .sidebar,
+[data-theme="glass"] .inspector,
+[data-theme="glass"] .card,
+[data-theme="glass"] .modal,
+[data-theme="glass"] #chatCompose,
+[data-theme="glass"] .pool-head {
   -webkit-backdrop-filter: blur(24px) saturate(180%);
   backdrop-filter: blur(24px) saturate(180%);
 }
-[data-skin="glass"] .card { border-color: rgba(255, 255, 255, .70); }
-[data-skin="glass"] .btn { background: rgba(255, 255, 255, .62); }
-[data-skin="glass"] .btn:hover:not(:disabled) { background: rgba(255, 255, 255, .85); }
-[data-skin="glass"] .btn.primary { background: var(--accent); color: #fff; }
-[data-skin="glass"] .btn.primary:hover:not(:disabled) { background: var(--accent-hover); color: #fff; }
-[data-skin="glass"] .titlebar { border-bottom: 1px solid rgba(22, 32, 46, .08); }
+[data-theme="glass"] .card { border-color: rgba(255, 255, 255, .70); }
+[data-theme="glass"] .btn { background: rgba(255, 255, 255, .62); }
+[data-theme="glass"] .btn:hover:not(:disabled) { background: rgba(255, 255, 255, .85); }
+[data-theme="glass"] .btn.primary { background: var(--accent); color: #fff; }
+[data-theme="glass"] .btn.primary:hover:not(:disabled) { background: var(--accent-hover); color: #fff; }
+[data-theme="glass"] .titlebar { border-bottom: 1px solid rgba(22, 32, 46, .08); }
 
 /* 系统设置里减弱透明效果时退回不透明，避免低性能设备卡顿 */
 @media (prefers-reduced-transparency: reduce) {
-  [data-skin="glass"] {
+  [data-theme="glass"] {
     --panel:   #ffffff;
     --panel-2: #f7f9fc;
     --panel-3: #eef2f8;
   }
-  [data-skin="glass"] .titlebar,
-  [data-skin="glass"] .sidebar,
-  [data-skin="glass"] .inspector,
-  [data-skin="glass"] .card,
-  [data-skin="glass"] .modal,
-  [data-skin="glass"] #chatCompose,
-  [data-skin="glass"] .pool-head { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  [data-theme="glass"] .titlebar,
+  [data-theme="glass"] .sidebar,
+  [data-theme="glass"] .inspector,
+  [data-theme="glass"] .card,
+  [data-theme="glass"] .modal,
+  [data-theme="glass"] #chatCompose,
+  [data-theme="glass"] .pool-head { backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 
 /* ---------------- 设置页主题卡 ----------------
