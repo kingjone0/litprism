@@ -247,14 +247,11 @@ function applyTheme() {
   const t = themeOf(S.theme);
   document.documentElement.dataset.theme = t.palette;
   document.documentElement.dataset.skin = t.skin;
-  const next = themeOf(THEME_IDS[(THEME_IDS.indexOf(t.id) + 1) % THEME_IDS.length]);
-  const btn = $('#btnTheme');
-  if (btn) btn.title = `当前：${t.label}。点击切换为${next.label}`;
   // 外壳的窗口控件（最小化/最大化/关闭）叠在顶栏右上角，颜色必须跟着主题走
   window.litShell?.setTitleBarTheme?.(t.id);
   document.body.classList.toggle('is-electron', Boolean(window.litShell));
 }
-/** 设置页与顶栏共用：写存储 → 应用 → 就地刷新设置页 */
+/** 设置页调用：写存储 → 应用 → 就地刷新设置页 */
 function setTheme(id) {
   if (!THEME_IDS.includes(id)) return;
   S.theme = id;
@@ -1981,7 +1978,7 @@ function settingsBody(key, c) {
     case 'general':
       return row('数据目录', '知识库、缓存、导出笔记的存放位置。迁移时请先备份。',
           `<div class="mono" style="font-size:11.5px;word-break:break-all">${esc(c.app?.data_dir || '—')}</div>`) +
-        row('主题', '四套外观。也可点标题栏右上角的按钮循环切换。',
+        row('主题', '四套外观。切换后立即生效，下次启动沿用。',
           `<div class="theme-grid">${THEMES.map(t => `
             <button class="theme-card${t.id === S.theme ? ' active' : ''}" data-theme-id="${t.id}" type="button" aria-pressed="${t.id === S.theme}">
               <span class="theme-swatch" aria-hidden="true">${t.swatch.map(c => `<i style="background:${c}"></i>`).join('')}</span>
@@ -2905,10 +2902,7 @@ function bindGlobal() {
   $('#btnNewConv').onclick = newConversation;
   $('#btnSearch').onclick = () => { if (openView('library')) $('#libSearch').focus(); };
   $('#btnCloseInspector').onclick = () => toggleInspector(false);
-  // 主题：按注册表顺序循环（四套，见 THEMES）
-  $('#btnTheme').onclick = () => {
-    setTheme(THEME_IDS[(THEME_IDS.indexOf(S.theme) + 1) % THEME_IDS.length]);
-  };
+  // 主题切换只在设置里：四套主题用循环按钮要连点才能到位，已移除标题栏按钮
 
   // 右侧面板开关
   $('#btnInspector').onclick = () => toggleInspector();
