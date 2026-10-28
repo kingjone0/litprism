@@ -555,6 +555,11 @@ details.card > summary::before,
 .list-item:hover { background: var(--panel-2); }
 .list-item.active { background: var(--accent-soft); }
 .list-main { flex: 1; min-width: 0; }
+#delivList [hidden], #modelSaveFeedback[hidden] { display: none; }
+#delivList [data-dfeedback], #modelSaveFeedback { padding: 0; }
+#delivList .deliverable-actions { gap: 6px; flex: none; }
+.read-error { padding-block: 12px; }
+.read-error .task-error { padding: 0; }
 .list-title { font-size: 15px; font-weight: 550; line-height: 1.6; overflow-wrap: anywhere; }
 .list-sub { margin-top: 8px; font-size: 12px; color: var(--text-2); display: flex; gap: 10px; flex-wrap: wrap; }
 
@@ -908,12 +913,15 @@ details.card > summary::before,
 }
 .modal-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);
 }
 .modal-title { font-size: 15px; font-weight: 650; }
+.config-location { flex-basis: 100%; margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere; user-select: text; }
+.config-location[role="alert"] { color: var(--danger); }
 .modal-close {
   width: 28px; height: 28px;
   border-radius: 6px;
@@ -1245,6 +1253,9 @@ kbd { font: 11px var(--sans); color: var(--muted); white-space: nowrap; }
   .modal-content { padding: 16px; }
   .setting-row { flex-wrap: wrap; }
   .setting-row > * { min-width: 0; max-width: 100%; }
+  #delivList .list-item { flex-direction: column; }
+  #delivList .list-main { width: 100%; }
+  #delivList .deliverable-actions { flex-wrap: wrap; max-width: 100%; }
 }
 
 @media (max-width: 480px) {

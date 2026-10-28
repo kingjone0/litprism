@@ -111,6 +111,7 @@ def create_app(cfg: Config) -> FastAPI:
             "sources": verifier.enabled_sources(),
             "window": window_info,
             "config": config_to_dict(cfg),
+            "config_path": str(Path(cfg.config_path).resolve()) if cfg.config_path else None,
             'schema_version': kb._con.execute('PRAGMA user_version').fetchone()[0],
         }
 

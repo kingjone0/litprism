@@ -154,6 +154,53 @@ function toast(msg, isErr = false) {
   setTimeout(() => node.remove(), 3200);
 }
 
+function showReadError(box, error, retry, retained = false) {
+  if (!retained) box.replaceChildren();
+  box.querySelector('[data-read-error]')?.remove();
+  const notice = document.createElement('div');
+  notice.className = 'read-error'; notice.dataset.readError = ''; notice.setAttribute('role','alert');
+  notice.innerHTML = `<p class="task-error">读取失败：${esc(error.message)}</p>${retained ? '<p class="source-intro">以下为上次读取的内容，尚未刷新。</p>' : ''}<button type="button" class="btn sm" data-read-retry>重新读取</button>`;
+  box.prepend(notice);
+  $('[data-read-retry]', notice).onclick = async event => {
+    const restore = document.activeElement === event.currentTarget, revision = S.viewRevision;
+    event.currentTarget.disabled = true;
+    try { await retry(); }
+    catch (failure) { if (notice.isConnected) { $('.task-error',notice).textContent='读取失败：'+failure.message; $('[data-read-retry]',notice).disabled=false; } }
+    if (restore && box.isConnected && box.getClientRects().length && S.viewRevision === revision && document.activeElement === document.body) {
+      const target = $('[data-read-retry]',box) || box;
+      if (target === box) box.tabIndex=-1;
+      target.focus();
+    }
+  };
+}
+
+const panelReads = new WeakMap();
+async function readPanel(box, url, retry, guard = () => true) {
+  if (!box || !guard()) return null;
+  const request = {}, revision = S.viewRevision;
+  panelReads.set(box, request);
+  const current = () => panelReads.get(box) === request && box.isConnected && S.viewRevision === revision && guard() && (!box.closest('dialog') || box.closest('dialog').open);
+  const retained = box.dataset.readLoaded === 'true';
+  box.querySelector('[data-read-error]')?.remove();
+  box.querySelector('[data-read-loading]')?.remove();
+  if (!retained) box.replaceChildren();
+  const loading=document.createElement('p'); loading.dataset.readLoading=''; loading.setAttribute('role','status');
+  loading.className='source-intro'; loading.textContent=retained ? '正在重新读取；以下为上次内容。' : '正在读取…';
+  box.prepend(loading); box.setAttribute('aria-busy','true');
+  try {
+    const data=await api(url);
+    if (!current()) return null;
+    box.dataset.readLoaded='true';
+    return data;
+  } catch (error) {
+    if (current()) showReadError(box,error,retry,retained);
+    return null;
+  } finally {
+    loading.remove();
+    if (panelReads.get(box)===request) box.setAttribute('aria-busy','false');
+  }
+}
+
 function badgeOf(level) {
   const map = {
     verified:        ['ok', '已核验'],
@@ -241,6 +288,10 @@ const VIEW_TITLES = {
 };
 
 function openView(view, opts = {}) {
+  const changed = view !== S.activeView ||
+    (view === 'paper' && opts.paperId && opts.paperId !== S.activePaper) ||
+    (view === 'chat' && opts.convId && opts.convId !== S.activeConv);
+  if (changed && !opts.discardReview && !confirmReviewLeave()) return false;
   rememberChatDraft();
   if (S.inspector && window.matchMedia('(max-width: 760px)').matches) toggleInspector(false, { restoreFocus: false });
   if (S.sidebar && window.matchMedia('(max-width: 760px)').matches) {
@@ -249,6 +300,13 @@ function openView(view, opts = {}) {
     $('#btnSidebar').focus();
   }
   S.evidenceRef = null;
+  if (changed) {
+    S.semanticRef = null;
+    S.semanticSources = {};
+    S.evidenceLoadSeq = (S.evidenceLoadSeq || 0) + 1;
+    S.viewRevision = (S.viewRevision || 0) + 1;
+    $('#inspSources').replaceChildren();
+  }
   S.activeView = view;
   $('#tbTitle').textContent = VIEW_TITLES[view] || view;
   $$('.pane').forEach(p => p.classList.toggle('active', p.dataset.pane === view));
@@ -275,6 +333,7 @@ function openView(view, opts = {}) {
   }[view];
   if (loader) loader().catch(e => toast(e.message, true));
   refreshInspector();
+  return true;
 }
 
 /* 侧边栏入口：设置走弹窗，其余切工作区视图 */
@@ -310,7 +369,7 @@ function parseScope(raw) {
   const prefix = scope.mode === 'strict' ? '仅限：' : '原重点：';
   if (scope.collection_id) {
     const group = (S.collections || []).find(c => c.id === scope.collection_id);
-    return { kind: 'group', label: `${prefix}${group?.name || '已删除分组'}`, raw: scope };
+    return { kind: 'group', label: `${prefix}${group ? collectionLabel(group.id) : '已删除分组'}`, raw: scope };
   }
   const ids = Array.isArray(scope.paper_ids) ? scope.paper_ids : [];
   if (!ids.length) return {kind:'all', label:scope.mode === 'strict' ? '原设置：仅本地' : '全库知识与联网', raw:scope};
@@ -330,51 +389,83 @@ function setLocation(label) {
 /** 修改当前对话的文献范围（不重建会话，历史保留）。 */
 function editConversationScope() {
   if (!S.activeConv) return;
-  const current = S.convScope?.raw || {};
+  const convId = S.activeConv;
+  const current = structuredClone(S.convScope?.raw || {});
+  const selectedIds = [...(S.selectedPapers || [])];
   const options = [
-    `<option value=""${!current.paper_ids?.length && !current.collection_id ? ' selected' : ''}>全库知识与联网（默认）</option>`,
-    ...(S.selectedPapers?.size
-      ? [`<option value="selected"${current.paper_ids && current.paper_ids.length === S.selectedPapers.size ? ' selected' : ''}>知识库中勾选的文献（${S.selectedPapers.size} 篇）</option>`] : []),
-    ...(S.papers || []).map(p => {
-      const picked = current.paper_ids?.length === 1 && current.paper_ids[0] === p.id;
-      return `<option value="p:${esc(p.id)}"${picked ? ' selected' : ''}>${esc(short(p.display_title || p.title, 42))}</option>`;
-    }),
+    `<option value="current" selected>保持当前范围：${esc(S.convScope?.label || '全库知识与联网')}</option>`,
+    '<option value="">全库知识与联网（默认）</option>',
+    ...(selectedIds.length
+      ? [`<option value="selected">知识库中勾选的文献（${selectedIds.length} 篇）</option>`] : []),
+    ...(S.papers || []).map(p =>
+      `<option value="p:${esc(p.id)}">${esc(short(p.display_title || p.title, 42))}</option>`),
     ...(S.collections || []).map(c =>
-      `<option value="g:${esc(c.id)}"${current.collection_id === c.id ? ' selected' : ''}>分组：${esc(c.name)}</option>`),
+      `<option value="g:${esc(c.id)}">分组：${esc(collectionLabel(c.id))}</option>`),
   ].join('');
   workflowDialog('修改文献范围', `<label>文献范围<select class="select" name="scope">${options}</select></label>
     <p class="source-intro">默认综合全库可信知识与联网来源。选择文献或分组后，仅使用该范围，不额外联网。只影响之后的问题；历史保留。</p>`, async values => {
     let scope = {};
-    if (values.scope === 'selected') scope = { paper_ids: [...S.selectedPapers] };
+    if (values.scope === 'current') scope = current;
+    else if (values.scope === 'selected') scope = { paper_ids: selectedIds, mode: 'strict' };
     else if (values.scope.startsWith('p:')) scope = { paper_ids: [values.scope.slice(2)] };
     else if (values.scope.startsWith('g:')) scope = { collection_id: values.scope.slice(2) };
-    if (values.scope) scope.mode = 'strict';
-    await api(`/api/conversations/${encodeURIComponent(S.activeConv)}`, { method: 'PATCH', body: { scope } });
+    if (values.scope && values.scope !== 'current') scope.mode = 'strict';
+    await api(`/api/conversations/${encodeURIComponent(convId)}`, { method: 'PATCH', body: { scope } });
     toast('范围已更新');
-    await loadChat();
+    if (S.activeConv === convId && S.activeView === 'chat') await loadChat();
   }, '保存');
 }
 
 /* ==========================================================================
    左侧栏
    ========================================================================== */
+let sidebarRequest = 0;
 async function loadSidebar() {
-  const [papers, convs, skills] = await Promise.all([
-    api('/api/papers').catch(() => ({ items: [] })),
-    api('/api/conversations?q='+encodeURIComponent($('#convSearch')?.value || '')).catch(() => ({ items: [] })),
-    api('/api/skills').catch(() => ({ items: [], stats: {} })),
+  const request = ++sidebarRequest;
+  const query = $('#convSearch')?.value || '';
+  const retry = $('#btnRetrySidebar');
+  if (retry) retry.disabled = true;
+  const [papers, convs, skills] = await Promise.allSettled([
+    api('/api/papers'),
+    api('/api/conversations?q='+encodeURIComponent(query)),
+    api('/api/skills'),
   ]);
-  S.papers = papers.items || [];
-  if (S.selectedPapers) {
-    S.selectedPapers = new Set([...S.selectedPapers].filter(id => S.papers.some(p => p.id === id)));
-    syncBatchActions();
+  if (request !== sidebarRequest || query !== ($('#convSearch')?.value || '')) return;
+  S.sidebarLoaded ||= {};
+  const failures = [];
+  for (const [key, label, result] of [['papers', '文献', papers], ['conversations', '会话', convs], ['skills', '技能', skills]]) {
+    if (result.status === 'fulfilled') {
+      S[key] = result.value.items || [];
+      S.sidebarLoaded[key] = true;
+    } else {
+      failures.push(`${label}读取失败。${S.sidebarLoaded[key] ? '显示上次成功内容。' : ''} ${result.reason?.message || result.reason}`);
+    }
   }
-  S.compareKey = null;
-  S.conversations = convs.items || [];
-  S.skills = skills.items || [];
+  if (papers.status === 'fulfilled') {
+    if (S.selectedPapers) S.selectedPapers = new Set([...S.selectedPapers].filter(id => S.papers.some(p => p.id === id)));
+    S.compareKey = null;
+  }
+  syncBatchActions();
+  let error = $('#sidebarReadError');
+  if (!error) {
+    error = document.createElement('div');
+    error.id = 'sidebarReadError'; error.className = 'side-empty'; error.setAttribute('role', 'alert');
+    $('.side-scroll').prepend(error);
+  }
+  error.hidden = !failures.length;
+  error.innerHTML = failures.length ? failures.map(message => `<p>${esc(message)}</p>`).join('')
+    + '<button type="button" class="btn sm" id="btnRetrySidebar">重新读取导航</button>' : '';
+  if (failures.length) $('#btnRetrySidebar').onclick = async event => {
+    const restoreFocus = document.activeElement === event.currentTarget;
+    try { await loadSidebar(); }
+    catch (e) { toast(e.message, true); }
+    if (restoreFocus && document.activeElement === document.body) {
+      ($('#btnRetrySidebar') || $('#sidebar [data-view=library]')).focus();
+    }
+  };
 
-  $('#libCount').textContent = S.papers.length || '';
-  $('#convCount').textContent = S.conversations.length || '';
+  $('#libCount').textContent = S.sidebarLoaded.papers ? S.papers.length || '' : '—';
+  $('#convCount').textContent = S.sidebarLoaded.conversations ? S.conversations.length || '' : '—';
 
   // ---- 对话 ----
   const convBox = $('#convList');
@@ -387,7 +478,7 @@ async function loadSidebar() {
         </button>
         <button class="conv-del" data-conv-del="${esc(c.id)}" title="删除会话">✕</button>
         <button class="btn sm" data-conv-manage="${esc(c.id)}" title="会话名称与置顶">⋯</button>
-      </div>`).join('') : '<div class="side-empty">新建对话，开始一次有据可查的研究。</div>';
+      </div>`).join('') : `<div class="side-empty">${convs.status === 'rejected' ? '会话尚未读取。' : '新建对话，开始一次有据可查的研究。'}</div>`;
   $('#btnNewConv').onclick = newConversation;
   $$('[data-conv-manage]', convBox).forEach(b => b.onclick = () => editConversation(S.conversations.find(c => c.id === b.dataset.convManage)));
   $$('[data-conv]', convBox).forEach(b => b.onclick = () => openView('chat', { convId: b.dataset.conv }));
@@ -398,7 +489,7 @@ async function loadSidebar() {
     if (!confirm(`删除会话「${item?.title || cid}」？\n全部消息与压缩记录会一并删除，不可恢复。`)) return;
     try {
       await api(`/api/conversations/${encodeURIComponent(cid)}`, { method: 'DELETE' });
-      if (S.activeConv === cid) { S.activeConv = null; openView('library'); }
+      if (S.activeConv === cid) { S.activeConv = null; openView('library', {discardReview:true}); }
       S.chatDrafts.delete(cid);
       S.chatRunViews.delete(cid);
       toast('已删除');
@@ -409,7 +500,8 @@ async function loadSidebar() {
   // ---- 知识库 ----
   const lib = $('#libList');
   if (!S.papers.length) {
-    lib.innerHTML = `<div class="side-empty">知识库为空。<br>用 <code class="mono">litprism add &lt;pdf&gt;</code> 导入。</div>`;
+    lib.innerHTML = papers.status === 'rejected' ? '<div class="side-empty">文献尚未读取。</div>'
+      : `<div class="side-empty">知识库为空。<br>用 <code class="mono">litprism add &lt;pdf&gt;</code> 导入。</div>`;
   } else {
     lib.innerHTML = S.papers.map(p => `
       <button class="side-item" data-paper="${esc(p.id)}">
@@ -420,8 +512,9 @@ async function loadSidebar() {
   }
 
   // 技能统一从底部进入管理页，不在主导航重复展开。
-  $('#skillCount').textContent = S.skills.length || '';
+  $('#skillCount').textContent = S.sidebarLoaded.skills ? S.skills.length || '' : '—';
   $$('.side-item[data-view]').forEach(b => b.onclick = () => enterView(b.dataset.view));
+  if (S.activeView === 'library') await loadLibrary();
 }
 
 async function newConversation() {
@@ -432,6 +525,10 @@ async function newConversation() {
    知识库
    ========================================================================== */
 async function loadLibrary() {
+  if (!S.sidebarLoaded?.papers) {
+    $('#paperList').innerHTML = emptyState({ bare: true, icon: 'library', title: '文献尚未读取', desc: '请在导航中的错误提示处重新读取。' });
+    return;
+  }
   const q = ($('#libSearch').value || '').toLowerCase();
   let items = q
     ? S.papers.filter(p =>
@@ -513,7 +610,7 @@ async function loadPaperDetail(versionId = null) {
 
   try {
     const d = await api(`/api/paper/${encodeURIComponent(requestedPaper)}` + (versionId ? '?version_id='+encodeURIComponent(versionId) : ''));
-    if (S.activePaper !== requestedPaper || request !== paperDetailRequest) return;
+    if (S.activeView !== 'paper' || S.activePaper !== requestedPaper || request !== paperDetailRequest) return;
     const p = d.paper || d;
     const a = d.analysis || {};
     const candidateView = d.candidate_analysis || a;
@@ -648,7 +745,7 @@ async function loadPaperDetail(versionId = null) {
     $('#btnDelete').onclick = () => {
       if (!confirm('移入回收站？该论文将不再出现在检索与问答中。')) return;
       api(`/api/paper/${encodeURIComponent(S.activePaper)}`, { method: 'DELETE' })
-        .then(async () => { toast('已移入回收站'); S.activePaper = null; await refreshLibrary(); openView('library'); })
+        .then(async () => { toast('已移入回收站'); S.activePaper = null; await refreshLibrary(); openView('library', {discardReview:true}); })
         .catch(e => toast(e.message, true));
     };
 
@@ -688,7 +785,7 @@ async function loadPaperDetail(versionId = null) {
     const addBtn = $('#btnAddClaim');
     if (addBtn) addBtn.onclick = () => openClaimForm(p.id);
   } catch (e) {
-    if (S.activePaper !== requestedPaper || request !== paperDetailRequest) return;
+    if (S.activeView !== 'paper' || S.activePaper !== requestedPaper || request !== paperDetailRequest) return;
     box.innerHTML = `<div class="empty"><div class="title">加载失败</div><div class="desc">${esc(e.message)}</div></div>`;
   }
 }
@@ -1167,7 +1264,7 @@ async function loadChat() {
 async function askQuestion() {
   const input = $('#chatInput');
   const q = (input?.value || '').trim();
-  if (!q || !S.activeConv || S.sending || S.chatActiveRunning) return;
+  if (!q || !S.activeConv || S.sending || S.chatActiveRunning || S.modelSwitch || modelReadBlocksSend()) return;
   S.sending = true;
   const convId = S.activeConv;
   const sendButton = $('#btnSend');
@@ -1220,7 +1317,7 @@ async function askQuestion() {
   } finally {
     S.sending = false;
     sendButton.disabled = false;
-    if ($('#btnSend')) $('#btnSend').disabled = false;
+    if ($('#btnSend')) $('#btnSend').disabled = !!S.modelSwitch || S.chatActiveRunning || modelReadBlocksSend();
     if (S.activeConv === convId && S.activeView === 'chat') await refreshChatRuns(convId);
     if (stream.isConnected) $('#chatInput')?.focus();
   }
@@ -1321,8 +1418,57 @@ function renderMessage(m, fresh = false) {
 /* ==========================================================================
    交付物
    ========================================================================== */
+let deliverablesRequest = 0;
+const deliverableSaves = new Map();
+function paintDeliverableSave(id) {
+  const state = deliverableSaves.get(id);
+  const item = S.deliverables.find(x => x.id === id);
+  const select = $(`[data-dstat="${CSS.escape(id)}"]`);
+  if (!item || !select) return;
+  select.disabled = !!state?.pending;
+  select.value = state?.pending ? state.target : item.status;
+  select.setAttribute('aria-busy', String(!!state?.pending));
+  const badge = $(`[data-dbadge="${CSS.escape(id)}"]`);
+  badge.textContent = item.status_label;
+  badge.className = 'badge '+(item.status === 'draft' ? 'neutral' : item.status === 'final' ? 'ok' : 'accent');
+  const feedback = $(`[data-dfeedback="${CSS.escape(id)}"]`);
+  feedback.textContent = state?.message || '';
+  feedback.hidden = !state?.message;
+  feedback.className = state?.error ? 'task-error' : 'source-intro';
+  feedback.setAttribute('role', state?.error ? 'alert' : 'status');
+  const retry = $(`[data-dretry="${CSS.escape(id)}"]`);
+  retry.hidden = !state?.error || state?.pending;
+  retry.disabled = !!state?.pending;
+}
+async function saveDeliverableStatus(id, target) {
+  if (deliverableSaves.get(id)?.pending) return;
+  ++deliverablesRequest;
+  const state = {target, pending:true, message:'正在保存状态…', error:false};
+  deliverableSaves.set(id, state);
+  paintDeliverableSave(id);
+  const accept = saved => {
+    if (!['draft','final','exported'].includes(saved.status)) throw new Error('服务未返回有效状态');
+    const current = S.deliverables.find(x => x.id === id);
+    if (current) Object.assign(current, saved);
+  };
+  try {
+    accept(await api('/api/deliverables/'+encodeURIComponent(id), {method:'PUT', body:{status:target}}));
+    state.message = '状态已保存';
+  } catch (error) {
+    state.error = true;
+    state.message = '保存未完成：'+error.message;
+    try {
+      const actual = await api('/api/deliverables/'+encodeURIComponent(id));
+      accept(actual);
+      if (actual.status === target) { state.error=false; state.message='已读取并确认当前状态'; }
+    } catch (_) { state.message += '；未能读取当前状态，显示上次确认值。'; }
+  } finally { ++deliverablesRequest; state.pending=false; paintDeliverableSave(id); }
+}
 async function loadDeliverables() {
-  const d = await api('/api/deliverables');
+  const request = ++deliverablesRequest, revision = S.viewRevision;
+  const current = () => S.activeView === 'deliverables' && revision === S.viewRevision && request === deliverablesRequest;
+  const d = await readPanel($('#delivList'), '/api/deliverables', loadDeliverables, current);
+  if (!d || !current()) return false;
   S.deliverables = d.items || [];
   const box = $('#delivList');
 
@@ -1340,15 +1486,17 @@ async function loadDeliverables() {
       <div class="list-main">
         <div class="list-title">${esc(x.title)}</div>
         <div class="list-sub">
-          <span class="badge ${x.status === 'draft' ? 'neutral' : x.status === 'final' ? 'ok' : 'accent'}">${esc(x.status_label)}</span>
+          <span data-dbadge="${esc(x.id)}" class="badge ${x.status === 'draft' ? 'neutral' : x.status === 'final' ? 'ok' : 'accent'}">${esc(x.status_label)}</span>
           <span>${esc(x.type_label)}</span>
           <span>${x.word_count} 字</span>
           ${x.citation_count ? `<span>${x.citation_count} 条引用</span>` : ''}
           ${x.skill_id ? `<span class="mono">${esc(x.skill_id)}</span>` : ''}
         </div>
+        <p data-dfeedback="${esc(x.id)}" hidden></p><button type="button" class="btn sm" data-dretry="${esc(x.id)}" hidden>重试保存</button>
       </div>
-      <div class="row" style="gap:6px;flex:none">
+      <div class="row deliverable-actions">
         <select class="select" data-dstat="${esc(x.id)}"
+          aria-label="${esc(x.title)}的状态"
           style="font-size:11.5px;padding:4px 7px;width:auto">
           ${['draft', 'final', 'exported'].map(s =>
             `<option value="${s}"${s === x.status ? ' selected' : ''}>${({ draft: '草稿', final: '定稿', exported: '已导出' })[s]}</option>`).join('')}
@@ -1367,16 +1515,9 @@ async function loadDeliverables() {
     try { await api('/api/deliverables/'+b.dataset.ddelete, { method: 'DELETE' }); await loadDeliverables(); }
     catch (e) { toast(e.message, true); }
   });
-  $$('[data-dstat]', box).forEach(s => s.onchange = async () => {
-    try {
-      await api(`/api/deliverables/${encodeURIComponent(s.dataset.dstat)}`, {
-        method: 'PUT',
-        body: { status: s.value },
-      });
-      toast('状态已更新');
-      loadDeliverables();
-    } catch (e) { toast(e.message, true); }
-  });
+  $$('[data-dstat]', box).forEach(s => s.onchange = () => saveDeliverableStatus(s.dataset.dstat, s.value));
+  $$('[data-dretry]', box).forEach(b => b.onclick = () => saveDeliverableStatus(b.dataset.dretry, deliverableSaves.get(b.dataset.dretry).target));
+  S.deliverables.forEach(x => paintDeliverableSave(x.id));
   $$('[data-dexport]', box).forEach(b => b.onclick = async () => {
     const item = S.deliverables.find(x => x.id === b.dataset.dexport);
     const name = item?.title || 'deliverable';
@@ -1401,7 +1542,8 @@ async function showDeliverable(id) {
    Skill
    ========================================================================== */
 async function loadSkills() {
-  const d = await api('/api/skills');
+  const d = await readPanel($('#skillCards'), '/api/skills', loadSkills, () => S.activeView === 'skills');
+  if (!d) return false;
   S.skills = d.items || [];
   $('#skillDir').textContent = d.dir || '—';
   $('#skillCount').textContent = S.skills.length || '';
@@ -1454,12 +1596,12 @@ function showNewSkill() {
     <div class="card" id="newSkillCard" style="margin-bottom:12px;border-color:var(--accent)">
       <div class="card-body">
         <div style="font-size:13px;font-weight:600;margin-bottom:10px">新建 Skill</div>
-        <div class="field"><label>标识（id）</label>
+        <div class="field"><label for="nsId">标识（id）</label>
           <input class="input" id="nsId" placeholder="小写字母、数字、连字符，如 literature-review">
           <div class="hint">同时也是目录名，创建后不可改。</div></div>
-        <div class="field"><label>显示名称</label>
+        <div class="field"><label for="nsName">显示名称</label>
           <input class="input" id="nsName" placeholder="如：文献综述草稿"></div>
-        <div class="field"><label>用途说明</label>
+        <div class="field"><label for="nsDesc">用途说明</label>
           <input class="input" id="nsDesc" placeholder="一句话说明它做什么"></div>
         <div class="row" style="gap:8px">
           <span class="muted" style="font-size:11.5px">会生成 skill.yaml / prompt.md / README.md 三个声明式文件。</span>
@@ -1496,7 +1638,8 @@ async function loadVerify() {
 }
 
 async function loadWhitelist() {
-  const d = await api('/api/whitelist');
+  const d = await readPanel($('#wlList'), '/api/whitelist', loadWhitelist, () => S.activeView === 'verify');
+  if (!d) return false;
   S.whitelist = d.items || [];
   $('#wlCount').textContent = S.whitelist.length;
   const box = $('#wlList');
@@ -1530,13 +1673,23 @@ async function loadWhitelist() {
   });
 }
 
+let verifyRequest = 0;
+function invalidateVerification() {
+  verifyRequest++;
+  const box = $('#verifyResult');
+  if (box.hasChildNodes()) box.innerHTML = '<p role="status">标题已更改，请重新核验。</p>';
+}
+
 async function doVerify() {
+  const request = ++verifyRequest;
   const input = $('#verifyInput');
   const q = input.value.trim();
+  const current = () => request === verifyRequest && input.value.trim() === q && S.activeView === 'verify';
   const error = $('#verifyInputError');
   error.textContent = q ? '' : '请输入论文标题或 DOI。';
   input.toggleAttribute('aria-invalid', !q);
   if (!q) {
+    $('#verifyResult').replaceChildren();
     input.setAttribute('aria-invalid', 'true');
     input.focus();
     return;
@@ -1546,9 +1699,11 @@ async function doVerify() {
     <div class="skeleton" style="width:50%"></div></div></div>`;
   try {
     const r = await api('/api/verify', { method: 'POST', body: { title: q } });
+    if (!current()) return;
     const citable = r.level === 'verified' || r.level === 'manual_confirmed';
 
     box.innerHTML = `<div class="card" style="margin-top:12px"><div class="card-body">
+      <p>核验对象：<strong id="verifyTarget">${esc(q)}</strong></p>
       <div class="row" style="margin-bottom:10px">
         ${badgeOf(r.level)}
         <span style="font-size:12.5px">${esc(r.message || '')}</span>
@@ -1572,6 +1727,7 @@ async function doVerify() {
           如果你确认这篇文献真实存在，可以人工放行。<strong>确认依据必填</strong>，
           且会保留确认当时的自动判定 —— 将来复核时能分清哪些是机器判的、哪些是人拍的板。
         </div>
+        <label for="wlReason">人工确认依据</label>
         <textarea class="textarea" id="wlReason" rows="2"
           placeholder="例如：在 NeurIPS 2024 会议论文集里见过这篇，且作者组有相关前期工作"></textarea>
         <div class="row" style="margin-top:9px;gap:8px">
@@ -1585,19 +1741,27 @@ async function doVerify() {
 
     const btn = $('#btnWlConfirm');
     if (btn) btn.onclick = async () => {
+      if (!current() || !btn.isConnected || btn.disabled) return;
       const reason = $('#wlReason').value.trim();
       if (reason.length < 4) { toast('请填写确认依据（至少 4 个字）', true); return; }
+      btn.disabled = true;
+      let confirmed = false;
       try {
         await api('/api/whitelist', {
           method: 'POST',
           body: { title: q, level_at_confirm: r.level, reason },
         });
-        toast('已加入白名单');
-        await loadWhitelist();
-        doVerify();
-      } catch (e) { toast(e.message, true); }
+        confirmed = true;
+        btn.textContent = '已确认放行';
+        toast(`已确认「${q}」并加入白名单`);
+        if (await loadWhitelist() === false) throw new Error('白名单列表读取失败');
+        if (current()) await doVerify();
+      } catch (e) {
+        toast(confirmed ? `已确认「${q}」，但结果刷新失败：${e.message}` : `「${q}」的人工确认未完成：${e.message}`, true);
+      } finally { if (btn.isConnected) btn.disabled = confirmed; }
     };
   } catch (e) {
+    if (!current()) return;
     box.innerHTML = `<div class="card" style="margin-top:12px"><div class="card-body">
       <div class="badge danger">核验失败</div>
       <div style="margin-top:8px;font-size:12.5px">${esc(e.message)}</div></div></div>`;
@@ -1894,12 +2058,21 @@ async function saveSettingsPane(key) {
    模型提供商
    ========================================================================== */
 async function loadProviders() {
-  const d = await api('/api/providers');
+  const area=$('#pvArea');
+  if (area && S.providersLoaded && area.dataset.readLoaded !== 'true') {renderProviders();area.dataset.readLoaded='true';}
+  const controls=area ? $$('button, input, textarea, select',area) : [];
+  const disabled=controls.map(control=>control.disabled);
+  controls.forEach(control=>{control.disabled=true;});
+  let d;
+  try {d=await readPanel(area, '/api/providers', loadProviders);}
+  finally {controls.forEach((control,i)=>{control.disabled=disabled[i];});}
+  if (!d) return false;
   S.providers = d.items || [];
   S.presets = d.presets || [];
   S.protocols = d.protocols || [];
   S.activeModel = d.active || { provider_id: null, model: null };
   S.secretsInfo = d.secrets || {};
+  S.providersLoaded = true;
   renderProviders();
 }
 
@@ -2340,24 +2513,52 @@ function showAddProvider() {
 /* ==========================================================================
    对话的模型选择器
    ========================================================================== */
+let modelsRequest = 0;
+function modelReadBlocksSend() { return !S.modelsLoaded && (S.modelsLoading || !!S.modelsReadError); }
 async function loadModels() {
+  if (S.modelSwitch) { renderModelSelector(); return; }
+  const request = ++modelsRequest;
+  const conv = S.activeConv, revision = S.viewRevision;
+  const current = () => request === modelsRequest && !S.modelSwitch && S.activeConv === conv && S.viewRevision === revision;
+  S.modelsLoading=true; S.modelsReadError=null; renderModelSelector();
   try {
     const d = await api('/api/models');
+    if (!current()) return false;
     S.models = d.items || [];
     S.activeModel = d.active || S.activeModel;
-  } catch { S.models = []; }
-  renderModelSelector();
+    S.modelsLoaded=true;
+  } catch (error) { if (current()) S.modelsReadError=error.message; return false; }
+  finally {if (request===modelsRequest) {S.modelsLoading=false;if(current())renderModelSelector();}}
 }
 
 function renderModelSelector() {
   const sel = $('#chatModel');
   if (!sel) return;
-  if (!S.models.length) {
-    sel.innerHTML = `<option value="">未配置模型（使用默认）</option>`;
+  sel.disabled = !!S.modelSwitch || S.modelsLoading || modelReadBlocksSend();
+  sel.setAttribute('aria-busy',String(!!S.modelSwitch || !!S.modelsLoading));
+  if ($('#btnSend')) $('#btnSend').disabled = !!S.modelSwitch || S.sending || S.chatActiveRunning || modelReadBlocksSend();
+  let readError=$('#modelReadError');
+  if (!readError) {readError=document.createElement('div');readError.id='modelReadError';readError.className='read-error';readError.setAttribute('role','alert');$('#chatCompose').append(readError);}
+  readError.hidden=!S.modelsReadError;
+  if (S.modelsReadError) {
+    readError.innerHTML=`<p class="task-error">模型目录读取失败：${esc(S.modelsReadError)}</p>${S.modelsLoaded?'<p class="source-intro">保留上次读取的模型与选择，目录尚未刷新。</p>':''}<button type="button" class="btn sm" id="btnRetryModels">重新读取模型</button>`;
+    $('#btnRetryModels').onclick=async()=>{await loadModels();if(document.activeElement===document.body)($('#btnRetryModels')||$('#chatModel'))?.focus();};
+  }
+  let feedback = $('#modelSaveFeedback');
+  if (!feedback) { feedback=document.createElement('p'); feedback.id='modelSaveFeedback'; $('#chatCompose').append(feedback); }
+  feedback.hidden = !S.modelSwitch && !S.modelFeedback?.message;
+  feedback.textContent = S.modelSwitch ? '正在切换模型…' : S.modelFeedback?.message || '';
+  feedback.className = S.modelFeedback?.error && !S.modelSwitch ? 'task-error' : 'source-intro';
+  feedback.setAttribute('role', S.modelFeedback?.error && !S.modelSwitch ? 'alert' : 'status');
+  const selection = S.modelSwitch?.target || S.activeModel;
+  if (!S.models.length && !selection.model) {
+    sel.innerHTML = `<option value="">${S.modelsLoading ? '正在读取模型…' : S.modelsReadError ? '模型目录读取失败' : '未配置模型（使用默认）'}</option>`;
     return;
   }
-  sel.innerHTML = S.models.map(m => {
-    const isActive = m.provider_id === S.activeModel.provider_id && m.model_id === S.activeModel.model;
+  const choices = [...S.models];
+  if (selection.provider_id && selection.model && !choices.some(m=>m.provider_id===selection.provider_id && m.model_id===selection.model)) choices.push({provider_id:selection.provider_id,model_id:selection.model});
+  sel.innerHTML = choices.map(m => {
+    const isActive = m.provider_id === selection.provider_id && m.model_id === selection.model;
     // 下拉只显示模型名：输入区一行里「提供商 · 模型」太长会被截断，
     // 而提供商在选择之后并不是关键信息。完整标签留在 title 上。
     const full = String(m.label || m.model_id || '');
@@ -2366,26 +2567,56 @@ function renderModelSelector() {
   }).join('');
   sel.onchange = async () => {
     const [pid, mid] = sel.value.split('::');
-    if (!pid || !mid) return;
+    if (!pid || !mid || S.modelSwitch) return;
+    ++modelsRequest;
+    S.modelsLoading=false;
+    const previous = {...S.activeModel};
+    S.modelSwitch = {target:{provider_id:pid,model:mid}};
+    S.modelFeedback = null;
+    renderModelSelector();
+    let switched = false;
     try {
-      const switched = await api(`/api/providers/${encodeURIComponent(pid)}/active`, {
+      const result = await api(`/api/providers/${encodeURIComponent(pid)}/active`, {
         method: 'POST', body: { model_id: mid },
       });
+      if (!result.ok) throw new Error('模型未能切换');
+      switched = true;
       S.activeModel = { provider_id: pid, model: mid };
       S.compareKey = null;
-      S.status = await api('/api/status');
+      S.modelFeedback = {message:`已切换到 ${mid}`,error:false};
+    } catch (error) {
+      S.activeModel = previous;
+      S.modelFeedback = {message:'切换未完成：'+error.message,error:true};
+    }
+    try {
+      const actual = await api('/api/models');
+      S.models = actual.items || [];
+      S.activeModel = actual.active || previous;
+      S.modelsLoaded=true;S.modelsReadError=null;
+      if (!switched && S.activeModel.provider_id===pid && S.activeModel.model===mid) {
+        switched=true; S.modelFeedback={message:`已核实当前模型为 ${mid}`,error:false};
+      } else if (switched) S.modelFeedback.message=`已切换；当前模型为 ${S.activeModel.model || '默认模型'}`;
+    } catch (_) { S.modelFeedback.message += switched ? '；模型目录暂未刷新。' : '；未能读取当前模型，显示上次确认值。'; }
+    if (switched) {
+      S.compareKey = null;
+      try { S.status = await api('/api/status'); }
+      catch (_) { S.modelFeedback.message += '；运行状态暂未刷新。'; }
       if (S.activeConv) await loadInspectorContext();
-      toast(switched?.capability_refreshed === false
-        ? `已切换到 ${mid}，但没能读取模型能力目录；本次会按固定额度运行`
-        : `已切换到 ${mid}`);
-    } catch (e) { toast(e.message, true); }
+    }
+    S.modelSwitch = null;
+    ++modelsRequest;
+    renderModelSelector();
   };
 }
 
 /* ==========================================================================
    右侧检视面板
    ========================================================================== */
+let inspectorContextRequest = 0;
 async function loadInspectorContext() {
+  const request = ++inspectorContextRequest;
+  const convId = S.activeConv, view = S.activeView, revision = S.viewRevision;
+  const current = () => request === inspectorContextRequest && S.activeConv === convId && S.activeView === view && S.viewRevision === revision;
   const box = $('#inspContext');
   if (!S.activeConv) {
     box.innerHTML = `<div class="empty" style="padding:28px 8px">
@@ -2395,8 +2626,10 @@ async function loadInspectorContext() {
     </div>`;
     return;
   }
+  box.innerHTML = '<p role="status">正在读取会话上下文…</p>';
   try {
-    const d = await api(`/api/context/${encodeURIComponent(S.activeConv)}`);
+    const d = await api(`/api/context/${encodeURIComponent(convId)}`);
+    if (!current()) return;
     const cp = d.context_pressure || {};
     const occ = d.two_kinds_of_occupancy || {};
     const bd = d.context_breakdown || {};
@@ -2457,19 +2690,24 @@ async function loadInspectorContext() {
       ${d.note ? `<div class="insp-note">${esc(d.note)}</div>` : ''}
     `;
     $('#btnTurnReads').onclick = async () => {
+      if (!current()) return;
       try {
-        const views = await api('/api/turns/' + encodeURIComponent(S.activeConv));
+        const views = await api('/api/turns/' + encodeURIComponent(convId));
+        if (!current()) return;
         workflowDialog('每轮上下文快照', (views.items || []).map(v => `<details><summary>轮次 ${v.turn_seq} · ${esc(v.bar || '')}</summary><pre class="reading-text">${esc(JSON.stringify(v.read_refs, null, 2))}</pre></details>`).join('') || '<p>尚无读取记录。</p>', null);
-      } catch (error) { toast(error.message, true); }
+      } catch (error) { if (current()) toast(error.message, true); }
     };
     $$('[data-restore-block]', box).forEach(b => b.onclick = async () => {
+      if (!current()) return;
       try {
         const r = await api('/api/restore/' + encodeURIComponent(b.dataset.restoreBlock));
+        if (!current()) return;
         workflowDialog('压缩前的历史与原文', `<p class="source-intro">只读恢复查看，不重新注入模型上下文。</p>${r.messages.map(m => `<details><summary>${esc(m.ref)} · ${esc(m.role)}</summary><div class="reading-text">${esc(m.content)}</div></details>`).join('')}
           ${r.citations.map(c => `<div class="source-excerpt"><strong>${esc(c.paper_title || c.paper_id)} · ${c.page == null ? '无页码' : 'p.'+esc(c.page)}</strong><p>${esc(c.text)}</p></div>`).join('')}`, null);
-      } catch (error) { toast(error.message, true); }
+      } catch (error) { if (current()) toast(error.message, true); }
     });
   } catch (e) {
+    if (!current()) return;
     box.innerHTML = `<div class="empty" style="padding:24px 8px"><div class="desc">${esc(e.message)}</div></div>`;
   }
 }
@@ -2477,6 +2715,7 @@ async function loadInspectorContext() {
 async function loadInspectorSources() {
   if (S.semanticRef) return loadSemanticDetail(S.semanticRef);
   if (S.evidenceRef) return loadEvidenceDetail(S.evidenceRef);
+  const seq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0) + 1;
   const box = $('#inspSources');
   const view = S.activeView;
   const paperId = S.activePaper;
@@ -2493,8 +2732,11 @@ async function loadInspectorSources() {
     return;
   }
   box.innerHTML = '<div class="skeleton"></div>';
-  const d = await api(`/api/paper/${encodeURIComponent(paperId)}/text`);
-  if (S.activeView !== view || S.activePaper !== paperId) return;
+  const current = () => S.activeView === view && S.activePaper === paperId && seq === S.evidenceLoadSeq;
+  let d;
+  try { d = await api(`/api/paper/${encodeURIComponent(paperId)}/text`); }
+  catch (error) { if (current()) showReadError(box,error,loadInspectorSources); return; }
+  if (!current()) return;
   box.innerHTML = '<p class="source-intro">当前文献的原文摘录，按页码排列。</p>' + (d.pages || []).map(pg => `
     <details class="source-page"><summary>${pg.page == null ? '无页码' : '第 ' + esc(pg.page) + ' 页'}</summary>
       ${pg.chunks.map(c => `<div class="source-excerpt">${c.section ? `<strong>${esc(c.section)}</strong>` : ''}<p>${esc(c.text)}</p></div>`).join('')}
@@ -2560,7 +2802,7 @@ function bindGlobal() {
   $$('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
   $('#btnSidebar').onclick = toggleSidebar;
   $('#btnNewConv').onclick = newConversation;
-  $('#btnSearch').onclick = () => { openView('library'); $('#libSearch').focus(); };
+  $('#btnSearch').onclick = () => { if (openView('library')) $('#libSearch').focus(); };
   $('#btnCloseInspector').onclick = () => toggleInspector(false);
   // 主题
   $('#btnTheme').onclick = () => {
@@ -2591,7 +2833,11 @@ function bindGlobal() {
 
   // Skill 搜索与刷新
   $('#skillSearch').oninput = () => { if (S.activeView === 'skills') loadSkills(); };
-  $('#btnSkillRefresh').onclick = () => loadSkills().then(() => toast('已刷新'));
+  $('#btnSkillRefresh').onclick = async event => {
+    const button=event.currentTarget;if(button.disabled)return;button.disabled=true;
+    try {if(await loadSkills()!==false)toast('已刷新');}
+    finally {button.disabled=false;}
+  };
   const skillNewBtn = $('#btnSkillNew');
   if (skillNewBtn) skillNewBtn.onclick = showNewSkill;
 
@@ -2599,6 +2845,7 @@ function bindGlobal() {
   $('#btnVerify').onclick = doVerify;
   $('#verifyInput').onkeydown = e => { if (e.key === 'Enter') doVerify(); };
   $('#verifyInput').oninput = () => {
+    invalidateVerification();
     $('#verifyInput').removeAttribute('aria-invalid');
     $('#verifyInputError').textContent = '';
   };
@@ -2622,9 +2869,20 @@ function bindGlobal() {
     S.sidebar = e.matches ? false : localStorage.getItem('litprism-sidebar') !== '0';
     applySidebar();
   });
-  $('#btnOpenConfig').onclick = () => {
-    const p = S.status?.config?.app?.data_dir;
-    toast(p ? `配置文件位于 ${p}/../config/config.yaml` : '配置文件位于项目 config/ 目录');
+  $('#btnOpenConfig').onclick = async event => {
+    const button=event.currentTarget, notice=$('#configLocation');
+    if (button.disabled) return;
+    button.disabled=true;button.setAttribute('aria-expanded','true');
+    notice.hidden=false;notice.setAttribute('role','status');notice.textContent='正在读取配置位置…';
+    try {
+      const status=await api('/api/status');
+      if (!$('#settingsModal').open) return;
+      if (typeof status.config_path==='string' && status.config_path.trim()) notice.textContent='配置文件：'+status.config_path;
+      else if (status.config_path===null) notice.textContent='当前使用内置默认配置，没有独立配置文件。';
+      else throw new Error('服务未返回配置位置');
+    } catch (error) {
+      if ($('#settingsModal').open) {notice.setAttribute('role','alert');notice.textContent='无法读取配置位置：'+error.message;}
+    } finally {button.disabled=false;}
   };
 
   // 快捷键
@@ -2663,8 +2921,7 @@ function bindGlobal() {
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
-      openView('library');
-      setTimeout(() => $('#libSearch')?.focus(), 60);
+      if (openView('library')) setTimeout(() => $('#libSearch')?.focus(), 60);
     }
   });
 }

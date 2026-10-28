@@ -34,6 +34,23 @@ const path = require('node:path');
     try { await reset(); await fn(); results.push({ name, passed: true }); }
     catch (e) { results.push({ name, passed: false, error: e.message }); }
   };
+  const delayed = async (url, match = () => true, failure = null) => {
+    let release, started, used = false;
+    const gate = new Promise(resolve => { release = resolve; });
+    const ready = new Promise(resolve => { started = resolve; });
+    const handler = async route => {
+      if (used || !match(route.request())) return route.continue();
+      used = true;
+      const response = failure ? null : await route.fetch();
+      started(); await gate;
+      await route.fulfill(failure ? { status: 503, contentType: 'application/json', body: JSON.stringify({ detail: failure }) } : { response });
+    };
+    await page.route(url, handler);
+    return { get ready() { return new Promise((resolve,reject) => {
+      const timer=setTimeout(()=>reject(new Error('Expected delayed request did not start: '+url)),10000);
+      ready.then(()=>{clearTimeout(timer);resolve();});
+    }); }, release, close: async () => { release(); await page.unroute(url, handler); } };
+  };
   try {
     await check('settings-keyboard-modal-and-return-focus', async () => {
       await page.locator('[data-view=settings]').click();
@@ -259,6 +276,7 @@ const path = require('node:path');
         await oneLine('#btnVerify');
         await page.screenshot({ path: path.join(output, `short-actions-verify-${theme}.png`) });
         await page.evaluate(() => openSettings('model'));
+        await expect(page.locator('#pvArea')).toHaveAttribute('aria-busy','false');
         await expect(page.locator('#btnAddProvider')).toBeVisible();
         await oneLine('#btnAddProvider');
         await page.screenshot({ path: path.join(output, `short-actions-model-${theme}.png`) });
@@ -587,6 +605,194 @@ const path = require('node:path');
         await expect(page.locator('#inspector')).not.toHaveAttribute('aria-modal');
       } finally { await page.unroute(endpoint); }
     });
+    await check('verification-keeps-current-target-and-rejects-stale-results', async () => {
+      await page.locator('[data-view=verify]').click();
+      const titleA = 'N10 核验旧对象 A', titleB = 'N10 核验当前对象 B';
+      const held = await delayed(base + '/api/verify', r => r.postDataJSON().title === titleA);
+      try {
+        await page.locator('#verifyInput').fill(titleA); await page.locator('#btnVerify').click(); await held.ready;
+        await page.locator('#verifyInput').fill(titleB); await page.locator('#btnVerify').click();
+        await expect(page.locator('#wlReason')).toBeVisible();
+        const late = page.waitForResponse(r => r.url() === base + '/api/verify' && r.request().postDataJSON().title === titleA);
+        held.release(); await late; await page.waitForTimeout(50);
+        await page.locator('#wlReason').fill('隔离回归：人工确认当前显示的对象。');
+        const request = page.waitForRequest(r => r.url() === base + '/api/whitelist' && r.method() === 'POST');
+        await page.locator('#btnWlConfirm').click();
+        assert.equal((await request).postDataJSON().title, titleB, 'Confirmed the stale verification target');
+        await expect(page.locator('#wlList')).toContainText(titleB);
+        const titles = (await call('/api/whitelist')).items.map(x => x.title);
+        assert(!titles.includes(titleA) && titles.includes(titleB));
+        await expect(page.locator('#verifyTarget')).toHaveText(titleB);
+        await page.screenshot({ path: path.join(output, 'p1-verification-bound-result.png') });
+      } finally { await held.close(); }
+      await page.locator('#verifyInput').fill('N10 输入更改前'); await page.locator('#btnVerify').click();
+      await expect(page.locator('#btnWlConfirm')).toBeVisible();
+      await page.locator('#verifyInput').fill('N10 输入更改后');
+      await expect(page.locator('#btnWlConfirm')).toHaveCount(0);
+      await expect(page.locator('#verifyResult')).toContainText('重新核验');
+      const failed = await delayed(base + '/api/verify', r => r.postDataJSON().title === 'N10 迟到失败', '旧对象读取失败');
+      try {
+        await page.locator('#verifyInput').fill('N10 迟到失败'); await page.locator('#btnVerify').click(); await failed.ready;
+        await page.locator('#verifyInput').fill('N10 最新成功'); await page.locator('#btnVerify').click();
+        await expect(page.locator('#verifyTarget')).toHaveText('N10 最新成功');
+        const late = page.waitForResponse(r => r.url() === base + '/api/verify' && r.status() === 503);
+        failed.release(); await late; await page.waitForTimeout(50);
+        await expect(page.locator('#verifyTarget')).toHaveText('N10 最新成功');
+        await expect(page.locator('#verifyResult')).not.toContainText('旧对象读取失败');
+      } finally { await failed.close(); }
+      const confirming = await delayed(base + '/api/whitelist', r => r.method() === 'POST');
+      try {
+        await page.locator('#wlReason').fill('隔离回归：确认按钮等待时防止重复。');
+        await page.locator('#btnWlConfirm').click(); await confirming.ready;
+        await expect(page.locator('#btnWlConfirm')).toBeDisabled();
+        await page.locator('#verifyInput').fill('N10 确认提交中改输入');
+        confirming.release();
+        await expect(page.locator('#wlList')).toContainText('N10 最新成功');
+        await expect(page.locator('#btnWlConfirm')).toHaveCount(0);
+        await expect(page.locator('#verifyResult')).toContainText('重新核验');
+      } finally { await confirming.close(); }
+      await page.locator('#verifyInput').fill('N10 确认提交失败对象');await page.locator('#btnVerify').click();
+      await expect(page.locator('#wlReason')).toBeVisible();await page.locator('#wlReason').fill('隔离回归：旧对象的提交失败也需明确反馈。');
+      const rejected = await delayed(base+'/api/whitelist',r=>r.method()==='POST','确认写入失败');
+      try {
+        await page.locator('#btnWlConfirm').click();await rejected.ready;
+        await page.locator('#verifyInput').fill('N10 提交失败后当前输入');rejected.release();
+        await expect(page.locator('#toasts')).toContainText('「N10 确认提交失败对象」的人工确认未完成');
+        await expect(page.locator('#verifyResult')).toContainText('重新核验');
+        assert(!(await call('/api/whitelist')).items.some(x=>x.title==='N10 确认提交失败对象'));
+      } finally {await rejected.close();}
+      await page.locator('#verifyInput').fill('N10 已确认但刷新失败');await page.locator('#btnVerify').click();
+      await expect(page.locator('#wlReason')).toBeVisible();await page.locator('#wlReason').fill('隔离回归：区分确认成功和随后列表读取失败。');
+      const listFailure = r=>r.request().method()==='GET'?r.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'确认后列表读取失败'})}):r.continue();
+      await page.route(base+'/api/whitelist',listFailure);
+      try {
+        await page.locator('#btnWlConfirm').click();await expect(page.locator('#toasts')).toContainText('已确认「N10 已确认但刷新失败」，但结果刷新失败');
+        await expect(page.locator('#btnWlConfirm')).toBeDisabled();await expect(page.locator('#btnWlConfirm')).toHaveText('已确认放行');
+      } finally {await page.unroute(base+'/api/whitelist',listFailure);}
+      assert((await call('/api/whitelist')).items.some(x=>x.title==='N10 已确认但刷新失败'));
+      await page.screenshot({ path: path.join(output, 'p1-verification-current-target.png') });
+    });
+    await check('scope-editor-preserves-current-scope-and-snapshots-explicit-selection', async () => {
+      const a = process.env.LITPRISM_ACCEPTANCE_SEED;
+      const b = (await call('/api/acceptance/material', 'POST', { unanalysed: true })).paper_id;
+      const c = (await call('/api/acceptance/material', 'POST', {})).paper_id;
+      assert.equal(new Set([a,b,c]).size, 3);
+      await page.evaluate(() => refreshLibrary());
+      const original = { paper_ids: [a,b], mode: 'strict' };
+      const id = (await call('/api/conversations', 'POST', { title: 'N10 多篇范围保留', scope: original })).id;
+      const saved = async cid => { const s = (await call('/api/conversations/'+cid+'/messages')).conversation.scope; return typeof s === 'string' ? JSON.parse(s) : s; };
+      const open = async () => { await page.evaluate(() => loadSidebar()); await page.locator(`[data-conv="${id}"]`).click(); await expect(page.locator('#scopeChip')).toBeVisible(); await page.locator('#scopeChip').click(); };
+      const save = async () => { await page.locator('#researchTask [type=submit]').click(); await expect(page.locator('#researchTask')).toHaveCount(0); };
+      await open(); await page.screenshot({path:path.join(output,'p1-scope-current-dialog.png')}); await save(); assert.deepEqual(await saved(id), original);
+      await page.locator('[data-view=library]').first().click();
+      await page.locator(`[data-select-paper="${b}"]`).check(); await page.locator(`[data-select-paper="${c}"]`).check();
+      await open(); await save(); assert.deepEqual(await saved(id), original, 'Same count changed current paper IDs');
+      await open(); await page.locator('#researchTask [name=scope]').selectOption('selected');
+      // A background refresh must not replace the dialog's explicit selection or target conversation.
+      const other = (await call('/api/conversations', 'POST', { title: 'N10 范围目标隔离' })).id;
+      await page.evaluate(other => { S.selectedPapers.clear(); S.activeConv = other; }, other);
+      await save(); assert.deepEqual(await saved(id), { paper_ids: [b,c], mode: 'strict' }); assert.equal(await saved(other), null);
+      const group = (await call('/api/collections', 'POST', { name: 'N10 范围分组' })).id;
+      for (const value of [{paper_ids:[a],mode:'strict'},{collection_id:group,mode:'strict'},{}]) {
+        await call('/api/conversations/'+id,'PATCH',{scope:value});
+        await open(); await page.locator('#researchTask').getByRole('button',{name:'取消',exact:true}).click();
+        assert.deepEqual(await saved(id), Object.keys(value).length ? value : null);
+        await open(); await save(); assert.deepEqual(await saved(id), Object.keys(value).length ? value : null);
+      }
+      await open(); await page.locator('#researchTask [name=scope]').selectOption(''); await save(); assert.equal(await saved(id), null);
+      await page.screenshot({ path: path.join(output, 'p1-scope-retained.png') });
+    });
+    await check('sidebar-errors-keep-data-selection-and-distinguish-unread-from-empty', async () => {
+      const seed = process.env.LITPRISM_ACCEPTANCE_SEED;
+      await page.locator(`[data-select-paper="${seed}"]`).check();
+      const initialCount = await page.locator('#paperList [data-paper]').count();
+      const papersUrl = base + '/api/papers';
+      const fail = r => r.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'N10 导航暂不可读'})});
+      await page.route(papersUrl, fail);
+      try {
+        await page.locator('#convSearch').fill('N10 导航');
+        await expect(page.locator('#sidebarReadError')).toContainText('文献读取失败');
+        await expect(page.locator('#libList [data-paper]')).toHaveCount(initialCount);
+        await expect(page.locator(`[data-select-paper="${seed}"]`)).toBeChecked();
+        assert(await page.evaluate(seed => S.selectedPapers.has(seed), seed));
+        await expect(page.locator('#btnPaperExport')).toBeEnabled();
+        await page.screenshot({path:path.join(output,'p1-sidebar-error-retains-selection.png')});
+        await page.locator('#btnRetrySidebar').click();
+        await expect(page.locator('#btnRetrySidebar')).toBeEnabled();
+        await expect(page.locator('#btnRetrySidebar')).toBeFocused();
+      } finally { await page.unroute(papersUrl, fail); }
+      await page.locator('#btnRetrySidebar').click(); await expect(page.locator('#sidebarReadError')).toBeHidden();
+      await expect(page.locator('#sidebar [data-view=library]')).toBeFocused();
+      await expect(page.locator(`[data-select-paper="${seed}"]`)).toBeChecked();
+      await call('/api/conversations','POST',{title:'N10 导航会话'}); await page.evaluate(() => loadSidebar());
+      const oldIds = await page.locator('#convList [data-conv]').evaluateAll(ns=>ns.map(n=>n.dataset.conv));
+      const convUrl=base+'/api/conversations?*'; await page.route(convUrl, fail);
+      try {
+        await page.locator('#convSearch').fill('N10 导航会话');
+        await expect(page.locator('#sidebarReadError')).toContainText('会话读取失败');
+        assert.deepEqual(await page.locator('#convList [data-conv]').evaluateAll(ns=>ns.map(n=>n.dataset.conv)),oldIds);
+      } finally { await page.unroute(convUrl, fail); }
+      await page.locator('#btnRetrySidebar').click(); await expect(page.locator('#sidebarReadError')).toBeHidden();
+      await expect(page.locator('#convList')).toContainText('N10 导航会话');
+      const held = await delayed(base+'/api/conversations?q='+encodeURIComponent('N10'));
+      try {
+        await page.locator('#convSearch').fill('N10'); await held.ready;
+        await page.locator('#convSearch').fill('N10 没有这个会话');
+        await expect(page.locator('#convList [data-conv]')).toHaveCount(0);
+        const late=page.waitForResponse(r=>r.url()===base+'/api/conversations?q='+encodeURIComponent('N10'));
+        held.release();await late;await page.waitForTimeout(50);
+        await expect(page.locator('#convList [data-conv]')).toHaveCount(0);
+      } finally {await held.close();}
+      const oldError = await delayed(base+'/api/conversations?q='+encodeURIComponent('N10 旧导航错误'),()=>true,'旧导航读取失败');
+      try {
+        await page.locator('#convSearch').fill('N10 旧导航错误');await oldError.ready;
+        await page.locator('#convSearch').fill('N10 导航会话');await expect(page.locator('#convList')).toContainText('N10 导航会话');
+        const late=page.waitForResponse(r=>r.url()===base+'/api/conversations?q='+encodeURIComponent('N10 旧导航错误'));
+        oldError.release();await late;await page.waitForTimeout(50);
+        await expect(page.locator('#sidebarReadError')).toBeHidden();
+      } finally {await oldError.close();}
+      await call('/api/skills/scaffold','POST',{id:'n10-navigation-read',name:'N10 导航技能'});await page.evaluate(()=>loadSidebar());
+      const skillsCount=await page.locator('#skillCount').innerText();
+      await page.route(base+'/api/skills',fail);
+      try {
+        await page.locator('#convSearch').fill('N10 导航');await expect(page.locator('#sidebarReadError')).toContainText('技能读取失败');
+        await expect(page.locator('#skillCount')).toHaveText(skillsCount);
+      } finally {await page.unroute(base+'/api/skills',fail);}
+      await page.locator('#btnRetrySidebar').click();await expect(page.locator('#sidebarReadError')).toBeHidden();
+      await page.route(papersUrl, fail);
+      try {
+        await page.reload(); await expect(page.locator('#sidebarReadError')).toContainText('文献读取失败');
+        await expect(page.locator('#paperList')).toContainText('文献尚未读取');
+        await expect(page.locator('#paperList')).not.toContainText('知识库还是空');
+      } finally { await page.unroute(papersUrl, fail); }
+      await page.locator('#btnRetrySidebar').click(); await expect(page.locator('#paperList [data-paper]')).toHaveCount(initialCount);
+      const empty = r => r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({items:[]})});
+      await page.route(papersUrl, empty);
+      try { await page.evaluate(() => loadSidebar()); await expect(page.locator('#paperList')).toContainText('知识库还是空'); await expect(page.locator('#sidebarReadError')).toBeHidden(); }
+      finally { await page.unroute(papersUrl, empty); }
+    });
+    await check('secondary-controls-have-associated-accessible-names', async () => {
+      const seed = process.env.LITPRISM_ACCEPTANCE_SEED;
+      const text = await call('/api/paper/'+seed+'/text');
+      const title = 'N10 状态 <&> 名称';
+      const d = await call('/api/deliverables','POST',{title,type:'notes',content:'原文描述 [P1 p.1]',citations:[{tag:'P1',paper_id:seed,chunk_id:text.pages[0].chunks[0].chunk_id}]});
+      await page.locator('[data-view=deliverables]').click(); await expect(page.locator(`[data-dstat="${d.id}"]`)).toHaveAccessibleName(title+'的状态');
+      await page.locator('[data-view=library]').first().click(); await page.locator(`[data-select-paper="${seed}"]`).check();
+      await page.locator('#btnMovePapers').click(); await expect(page.locator('#researchTask [name=collection_id]')).toHaveAccessibleName('目标分组');
+      await page.locator('#researchTask').getByRole('button',{name:'取消',exact:true}).click();
+      await page.locator('#btnPaperExport').click(); await expect(page.locator('#researchTask [name=format]')).toHaveAccessibleName('导出格式');
+      await page.locator('#researchTask').getByRole('button',{name:'取消',exact:true}).click();
+      const group=(await call('/api/collections','POST',{name:'N10 名称分组'})).id;
+      await page.locator('#btnCollection').click(); await page.locator(`[data-rename-group="${group}"]`).click();
+      await expect(page.locator('#researchTask [name=name]')).toHaveAccessibleName('分组名称');
+      await page.locator('#researchTask').getByRole('button',{name:'取消',exact:true}).click();
+      await page.locator('[data-view=skills]').click(); await expect(page.locator('#skillCards')).not.toBeEmpty(); await page.locator('#btnSkillNew').click();
+      await expect(page.locator('#nsId')).toHaveAccessibleName(/标识.*id/); await expect(page.locator('#nsName')).toHaveAccessibleName('显示名称'); await expect(page.locator('#nsDesc')).toHaveAccessibleName('用途说明');
+      await page.locator('#nsCancel').click(); await page.locator('[data-view=verify]').click();
+      await page.locator('#verifyInput').fill('N10 确认依据名称'); await page.locator('#btnVerify').click(); await expect(page.locator('#wlReason')).toHaveAccessibleName('人工确认依据');
+      await page.setViewportSize({width:390,height:844}); await page.waitForTimeout(80);
+      await page.screenshot({path:path.join(output,'p1-secondary-control-names-narrow.png')});
+    });
     await check('viewport-theme-settings-matrix', async () => {
       const measurements = [];
       for (const width of [1360, 1000, 720, 390]) {
@@ -652,6 +858,477 @@ const path = require('node:path');
       });
       fs.writeFileSync(path.join(output, 'contrast.json'), JSON.stringify(ratios, null, 2));
       assert(ratios.every(r => r.ratio >= 4.5), 'Muted text contrast below 4.5:1');
+    });
+    await check('deliverable-late-list-cannot-resurrect-deleted-items', async () => {
+      const seed = process.env.LITPRISM_ACCEPTANCE_SEED;
+      const text = await call('/api/paper/'+seed+'/text');
+      const item = await call('/api/deliverables','POST',{title:'N10 旧列表删除反例',type:'notes',content:'原文描述 [P1 p.1]',citations:[{tag:'P1',paper_id:seed,chunk_id:text.pages[0].chunks[0].chunk_id}]});
+      const held = await delayed(base+'/api/deliverables', r=>r.method()==='GET');
+      try {
+        await page.locator('[data-view=deliverables]').click(); await held.ready;
+        await page.locator('[data-view=library]').first().click();
+        await page.locator('[data-view=deliverables]').click();
+        await page.locator(`[data-ddelete="${item.id}"]`).click();
+        await expect(page.locator(`[data-ddelete="${item.id}"]`)).toHaveCount(0);
+        const response = page.waitForResponse(r=>r.url()===base+'/api/deliverables' && r.request().method()==='GET');
+        held.release(); await response; await page.waitForTimeout(80);
+        await expect(page.locator(`[data-ddelete="${item.id}"]`)).toHaveCount(0);
+        assert(!(await page.evaluate(()=>S.deliverables)).some(x=>x.id===item.id));
+        assert(!(await call('/api/deliverables')).items.some(x=>x.id===item.id));
+      } finally {await held.close();}
+      const failed = await delayed(base+'/api/deliverables',()=>true,'迟到的产出列表失败');
+      try {
+        await page.locator('[data-view=library]').first().click(); await page.locator('[data-view=deliverables]').click(); await failed.ready;
+        await page.locator('[data-view=library]').first().click(); await page.locator('[data-view=deliverables]').click();
+        await expect(page.locator('#delivList [data-dstat]').first()).toBeVisible();
+        const response=page.waitForResponse(r=>r.url()===base+'/api/deliverables' && r.status()===503);
+        failed.release(); await response; await page.waitForTimeout(80);
+        await expect(page.locator('#toasts')).not.toContainText('迟到的产出列表失败');
+      } finally {await failed.close();}
+      await page.screenshot({path:path.join(output,'p2-deliverables-current.png')});
+    });
+    await check('context-and-history-dialog-stay-with-current-conversation', async () => {
+      const a=(await call('/api/acceptance/compact-history','POST',{})).conversation_id;
+      const b=(await call('/api/conversations','POST',{title:'N10 当前空会话'})).id;
+      await page.evaluate(()=>loadSidebar());
+      await page.locator(`[data-conv="${b}"]`).click(); await expect(page.locator('#tbTitle')).toHaveText('N10 当前空会话');
+      await page.locator('#btnInspector').click(); await page.locator('[data-insp=context]').click();
+      for (const failure of [null,'迟到的会话读取失败']) {
+        const held=await delayed(base+'/api/context/'+a,()=>true,failure);
+        try {
+          await page.locator(`[data-conv="${a}"]`).click(); await held.ready;
+          const current=page.waitForResponse(r=>r.url()===base+'/api/context/'+b);
+          await page.locator(`[data-conv="${b}"]`).click(); await current;
+          await expect(page.locator('#chatInput')).toHaveAttribute('data-conv-id',b);
+          await page.waitForTimeout(100);
+          await expect(page.locator('#inspContext .metric .v').first()).toHaveText('0');
+          const response=page.waitForResponse(r=>r.url()===base+'/api/context/'+a);
+          held.release(); await response; await page.waitForTimeout(80);
+          await expect(page.locator('#inspContext .metric .v').first()).toHaveText('0');
+          await expect(page.locator('#inspContext [data-restore-block]')).toHaveCount(0);
+          await expect(page.locator('#inspContext')).not.toContainText('迟到的会话读取失败');
+        } finally {await held.close();}
+      }
+      await page.locator(`[data-conv="${a}"]`).click(); await expect(page.locator('#inspContext [data-restore-block]')).toBeVisible();
+      const held=await delayed(base+'/api/turns/'+a);
+      try {
+        await page.locator('#btnTurnReads').click(); await held.ready;
+        await page.locator(`[data-conv="${b}"]`).click(); await expect(page.locator('#tbTitle')).toHaveText('N10 当前空会话');
+        const response=page.waitForResponse(r=>r.url()===base+'/api/turns/'+a);
+        held.release(); await response; await page.waitForTimeout(80);
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+      } finally {await held.close();}
+      await page.screenshot({path:path.join(output,'p2-context-current.png')});
+    });
+    await check('paper-late-response-and-conversation-rename-keep-location', async () => {
+      const paper=(await call('/api/acceptance/material','POST',{unanalysed:true})).paper_id;
+      const conv=(await call('/api/conversations','POST',{title:'N10 跨页当前会话'})).id;
+      await page.evaluate(()=>refreshLibrary());
+      for (const failure of [null,'迟到的旧论文失败']) {
+        const held=await delayed(base+'/api/paper/'+paper,()=>true,failure);
+        try {
+          await page.locator(`#sidebar [data-paper="${paper}"]`).click(); await held.ready;
+          await page.locator(`[data-conv="${conv}"]`).click(); await expect(page.locator('#tabbar')).toContainText('N10 跨页当前会话');
+          const response=page.waitForResponse(r=>r.url()===base+'/api/paper/'+paper);
+          held.release(); await response; await page.waitForTimeout(80);
+          await expect(page.locator('#tabbar')).toContainText('N10 跨页当前会话');
+          await expect(page.locator('#tabbar')).not.toContainText('未解读质量验收');
+          await expect(page.locator('#toasts')).not.toContainText('迟到的旧论文失败');
+        } finally {await held.close();}
+      }
+      const manage=async()=>{await page.locator(`[data-conv="${conv}"]`).hover(); await page.locator(`[data-conv-manage="${conv}"]`).click();};
+      await manage(); await page.locator('#researchTask [name=title]').fill('N10 会话新名称');
+      await page.locator('#researchTask [type=submit]').click(); await expect(page.locator('#researchTask')).toHaveCount(0);
+      await expect(page.locator('#tbTitle')).toHaveText('N10 会话新名称'); await expect(page.locator('#tabbar')).toContainText('N10 会话新名称');
+      await page.locator('[data-view=library]').first().click();
+      await manage(); await page.locator('#researchTask [name=title]').fill('N10 后台改名');
+      await page.locator('#researchTask [type=submit]').click(); await expect(page.locator('#researchTask')).toHaveCount(0);
+      await expect(page.locator('#tbTitle')).toHaveText('知识库'); await expect(page.locator('#tabbar')).toContainText('知识库');
+    });
+    await check('review-navigation-discards-only-after-confirmation-and-ignores-late-work', async () => {
+      const a=process.env.LITPRISM_ACCEPTANCE_SEED;
+      const b=(await call('/api/acceptance/material','POST',{})).paper_id;
+      await page.evaluate(()=>refreshLibrary());
+      const open=async()=>{await page.locator(`#sidebar [data-paper="${b}"]`).click(); await page.locator('[data-semantic-claim="materialclaim"]').first().click(); await expect(page.locator('#semanticReview')).toBeVisible();};
+      await open(); await page.locator(`#sidebar [data-paper="${a}"]`).click();
+      await expect(page.locator('#semanticReview')).toHaveCount(0); assert.equal(await page.evaluate(()=>S.semanticRef),null);
+      await open(); await page.locator('[data-view=library]').first().click(); await expect(page.locator('#semanticReview')).toHaveCount(0);
+      const conv=(await call('/api/conversations','POST',{title:'N10 离开论文审核的会话'})).id; await page.evaluate(()=>loadSidebar());
+      await open(); await page.locator(`[data-conv="${conv}"]`).click(); await expect(page.locator('#chatInput')).toBeVisible();
+      await expect(page.locator('#semanticReview')).toHaveCount(0); assert.equal(await page.evaluate(()=>S.semanticRef),null);
+      await open(); await page.locator('#semanticReview [name=note]').fill('N10 保留未提交的核对依据');
+      const handlers=page.listeners('dialog'); page.removeAllListeners('dialog'); page.once('dialog',d=>d.dismiss());
+      try {await page.locator(`#sidebar [data-paper="${a}"]`).click(); await expect(page.locator('#semanticReview [name=note]')).toHaveValue('N10 保留未提交的核对依据'); assert.equal(await page.evaluate(()=>S.activePaper),b);}
+      finally {page.removeAllListeners('dialog'); handlers.forEach(h=>page.on('dialog',h));}
+      const dismiss=async action=>{
+        page.removeAllListeners('dialog'); page.once('dialog',d=>d.dismiss());
+        try {await action(); await expect(page.locator('#semanticReview [name=note]')).toHaveValue('N10 保留未提交的核对依据'); assert.equal(await page.evaluate(()=>S.activePaper),b); assert.equal(await page.evaluate(()=>S.activeView),'paper');}
+        finally {page.removeAllListeners('dialog'); handlers.forEach(h=>page.on('dialog',h));}
+      };
+      await page.locator('#semanticReview [name=note]').focus();
+      await dismiss(()=>page.keyboard.press('Control+k'));
+      await expect(page.locator('#semanticReview [name=note]')).toBeFocused();
+      await dismiss(()=>page.locator('#btnSearch').click());
+      assert(!await page.locator('#libSearch').evaluate(el=>document.activeElement===el));
+      await page.locator(`#sidebar [data-paper="${a}"]`).click(); await expect(page.locator('#semanticReview')).toHaveCount(0);
+      for (const failure of [null,'迟到的旧审核读取失败']) {
+        await page.locator(`#sidebar [data-paper="${b}"]`).click();
+        const held=await delayed(base+'/api/paper/'+b+'/semantic',r=>r.method()==='GET',failure);
+        try {
+          await page.locator('[data-semantic-claim="materialclaim"]').first().click(); await held.ready;
+          await page.locator(`#sidebar [data-paper="${a}"]`).click(); await expect(page.locator('#paperDetail')).toContainText('验收文献 A');
+          const response=page.waitForResponse(r=>r.url()===base+'/api/paper/'+b+'/semantic');
+          held.release(); await response; await page.waitForTimeout(80);
+          await expect(page.locator('#semanticReview')).toHaveCount(0);
+          await expect(page.locator('#inspSources')).not.toContainText('迟到的旧审核读取失败');
+        } finally {await held.close();}
+      }
+      await page.locator(`#sidebar [data-paper="${b}"]`).click();
+      const oldText=await delayed(base+'/api/paper/'+b+'/text');
+      try {
+        // Return from the review to ordinary text, then open the same paper's review during that read.
+        await page.locator('[data-semantic-claim="materialclaim"]').first().click(); await expect(page.locator('#semanticReview')).toBeVisible();
+        await page.locator('#btnSemanticBack').click(); await oldText.ready;
+        await page.locator('[data-semantic-claim="materialclaim"]').first().click(); await expect(page.locator('#semanticReview')).toBeVisible();
+        const response=page.waitForResponse(r=>r.url()===base+'/api/paper/'+b+'/text');
+        oldText.release(); await response; await page.waitForTimeout(80);
+        await expect(page.locator('#semanticReview')).toBeVisible();
+      } finally {await oldText.close();}
+      await open(); await page.locator('#semanticReview [name=note]').fill('N10 提交的裁决只归属于原论文');
+      const held=await delayed(base+'/api/paper/'+b+'/semantic/materialclaim/review',r=>r.method()==='POST');
+      try {
+        await page.locator('#semanticReview [value=confirm]').click(); await held.ready;
+        await page.locator(`#sidebar [data-paper="${a}"]`).click(); await expect(page.locator('#paperDetail')).toContainText('验收文献 A');
+        const response=page.waitForResponse(r=>r.url()===base+'/api/paper/'+b+'/semantic/materialclaim/review');
+        held.release(); await response; await page.waitForTimeout(80);
+        await expect(page.locator('#semanticReview')).toHaveCount(0); await expect(page.locator('#inspSources')).not.toContainText('正在读取陈述');
+        const saved=await call('/api/paper/'+b+'/semantic'); assert(saved.reviews.some(r=>r.note==='N10 提交的裁决只归属于原论文'));
+      } finally {await held.close();}
+      await page.screenshot({path:path.join(output,'p2-review-current-paper.png')});
+      await page.setViewportSize({width:390,height:844});
+      await page.screenshot({path:path.join(output,'p2-review-current-paper-narrow.png')});
+    });
+    await check('deliverable-status-failure-rolls-back-and-retry-agrees-with-storage', async () => {
+      const seed=process.env.LITPRISM_ACCEPTANCE_SEED, text=await call('/api/paper/'+seed+'/text');
+      const item=await call('/api/deliverables','POST',{title:'N10 保存状态回退',type:'notes',content:'原文描述 [P1 p.1]',citations:[{tag:'P1',paper_id:seed,chunk_id:text.pages[0].chunks[0].chunk_id}]});
+      await page.locator('[data-view=deliverables]').click();
+      const endpoint=base+'/api/deliverables/'+item.id;
+      const held=await delayed(endpoint,r=>r.method()==='PUT','状态写入失败');
+      try {
+        await page.locator(`[data-dstat="${item.id}"]`).selectOption('final'); await held.ready;
+        await expect(page.locator(`[data-dstat="${item.id}"]`)).toBeDisabled();
+        held.release(); await expect(page.locator(`[data-dfeedback="${item.id}"]`)).toContainText('状态写入失败');
+        await expect(page.locator(`[data-dstat="${item.id}"]`)).toHaveValue('draft');
+        assert.equal((await call('/api/deliverables/'+item.id)).status,'draft');
+        await page.screenshot({path:path.join(output,'p2-status-save-failure.png')});
+      } finally {await held.close();}
+      await page.locator(`[data-dretry="${item.id}"]`).click();
+      await expect(page.locator(`[data-dstat="${item.id}"]`)).toHaveValue('final');
+      await expect(page.locator(`[data-dbadge="${item.id}"]`)).toHaveText('定稿');
+      assert.equal((await call('/api/deliverables/'+item.id)).status,'final');
+      const oldList=await delayed(base+'/api/deliverables',r=>r.method()==='GET');
+      try {
+        await page.locator('[data-view=library]').first().click();await page.locator('[data-view=deliverables]').click();await oldList.ready;
+        await page.locator(`[data-dstat="${item.id}"]`).selectOption('exported');
+        await expect(page.locator(`[data-dfeedback="${item.id}"]`)).toContainText('已保存');
+        const response=page.waitForResponse(r=>r.url()===base+'/api/deliverables');oldList.release();await response;await page.waitForTimeout(80);
+        await expect(page.locator(`[data-dstat="${item.id}"]`)).toHaveValue('exported');
+      } finally {await oldList.close();}
+      const uncertain=async route=>{if(route.request().method()!=='PUT')return route.continue();await route.fetch();await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'写入后响应丢失'})});};
+      await page.route(endpoint,uncertain);
+      try {
+        await page.locator(`[data-dstat="${item.id}"]`).selectOption('draft');
+        await expect(page.locator(`[data-dfeedback="${item.id}"]`)).toContainText('确认当前状态');
+        await expect(page.locator(`[data-dstat="${item.id}"]`)).toHaveValue('draft');
+        await expect(page.locator(`[data-dretry="${item.id}"]`)).not.toBeVisible();
+        assert.equal((await call('/api/deliverables/'+item.id)).status,'draft');
+      } finally {await page.unroute(endpoint,uncertain);}
+    });
+    await check('model-save-failure-and-refresh-failure-preserve-actual-selection', async () => {
+      const provider=await call('/api/providers','POST',{name:'N10 回退模型',base_url:'http://127.0.0.1:9/v1',protocol:'openai'});
+      await call('/api/providers/'+provider.id+'/models','PUT',{models:[{model_id:'ux-one'},{model_id:'ux-two'}]});
+      await call('/api/providers/'+provider.id+'/active','POST',{model_id:'ux-one'});
+      const conv=(await call('/api/conversations','POST',{title:'N10 模型持久值'})).id;
+      await page.evaluate(()=>loadSidebar()); await page.locator(`[data-conv="${conv}"]`).click();
+      const one=provider.id+'::ux-one', two=provider.id+'::ux-two';
+      await expect(page.locator('#chatModel')).toHaveValue(one);
+      const endpoint=base+'/api/providers/'+provider.id+'/active';
+      const held=await delayed(endpoint,r=>r.method()==='POST','切换模型失败');
+      try {
+        await page.locator('#chatModel').selectOption(two); await held.ready;
+        await expect(page.locator('#chatModel')).toBeDisabled(); await expect(page.locator('#btnSend')).toBeDisabled();
+        await page.locator('[data-view=library]').first().click(); await page.locator(`[data-conv="${conv}"]`).click();
+        await expect(page.locator('#chatModel')).toBeDisabled();
+        held.release(); await expect(page.locator('#modelSaveFeedback')).toContainText('切换模型失败');
+        await expect(page.locator('#chatModel')).toHaveValue(one); await expect(page.locator('#chatModel')).toBeEnabled();
+        assert.equal((await call('/api/models')).active.model,'ux-one');
+        await page.screenshot({path:path.join(output,'p2-model-save-failure.png')});
+      } finally {await held.close();}
+      const failedStatus=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'模型已保存后的状态刷新失败'})});
+      await page.route(base+'/api/status',failedStatus);
+      try {
+        await page.locator('#chatModel').selectOption(two);
+        await expect(page.locator('#modelSaveFeedback')).toContainText('已切换');
+        await expect(page.locator('#chatModel')).toHaveValue(two); await expect(page.locator('#chatModel')).toBeEnabled();
+        assert.equal((await call('/api/models')).active.model,'ux-two');
+        await expect(page.locator('#modelSaveFeedback')).toContainText('刷新');
+      } finally {await page.unroute(base+'/api/status',failedStatus);}
+    });
+    await check('batch-move-first-middle-last-failures-report-and-retry-only-unfinished', async () => {
+      const ids=[process.env.LITPRISM_ACCEPTANCE_SEED,(await call('/api/acceptance/material','POST',{unanalysed:true})).paper_id,(await call('/api/acceptance/material','POST',{})).paper_id];
+      const group=(await call('/api/collections','POST',{name:'N10 部分移动目标'})).id;
+      for (const index of [0,1,2]) {
+        for (const id of ids) await call('/api/paper/'+id,'PATCH',{collection_id:null});
+        await page.evaluate(async()=>{await refreshCollections();await refreshLibrary();});
+        for (const id of ids) await page.locator(`[data-select-paper="${id}"]`).check();
+        const requests=[]; let failed=false;
+        const handler=route=>{if(route.request().method()!=='PATCH')return route.continue();const id=new URL(route.request().url()).pathname.split('/').at(-1);requests.push(id);if(id===ids[index]&&!failed){failed=true;return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'离线移动失败'})});}return route.continue();};
+        await page.route(base+'/api/paper/*',handler);
+        try {
+          await page.locator('#btnMovePapers').click(); await page.locator('#researchTask [name=collection_id]').selectOption(group);
+          await page.locator('#researchTask [type=submit]').click();
+          await expect(page.locator('[data-move-result]')).toContainText('已移动 2 / 3');
+          for (const [i,id] of ids.entries()) {
+            const expected=i===index?null:group;
+            assert.equal((await call('/api/paper/'+id)).paper.collection_id,expected);
+            assert.equal((await page.evaluate(()=>S.papers)).find(p=>p.id===id).collection_id,expected);
+          }
+          if(index===1){await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(output,'p2-batch-partial-narrow.png')});await page.setViewportSize({width:1360,height:880});}
+          await page.locator('#researchTask [type=submit]').click(); await expect(page.locator('#researchTask')).toHaveCount(0);
+          for (const [i,id] of ids.entries()) {assert.equal(requests.filter(x=>x===id).length,i===index?2:1);assert.equal((await call('/api/paper/'+id)).paper.collection_id,group);}
+        } finally {await page.unroute(base+'/api/paper/*',handler);}
+      }
+      for(const id of ids)await call('/api/paper/'+id,'PATCH',{collection_id:null});
+      await page.evaluate(()=>refreshLibrary());
+      let writes=0;
+      const count=route=>{if(route.request().method()==='PATCH')writes++;return route.continue();};
+      const failStatus=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'移动后的列表刷新失败'})});
+      await page.route(base+'/api/paper/*',count); await page.route(base+'/api/status',failStatus);
+      try {
+        await page.locator('#btnMovePapers').click();await page.locator('#researchTask [name=collection_id]').selectOption(group);await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('[data-move-result]')).toContainText('已移动 3 / 3');
+        await expect(page.locator('[data-move-result]')).toContainText('刷新未完成');
+        await page.unroute(base+'/api/status',failStatus);
+        await page.locator('#researchTask [type=submit]').click();await expect(page.locator('#researchTask')).toHaveCount(0);
+        assert.equal(writes,3,'Refreshing saved results must not repeat PATCH');
+        for(const id of ids)assert.equal((await page.evaluate(()=>S.papers)).find(p=>p.id===id).collection_id,group);
+      } finally {await page.unroute(base+'/api/status',failStatus);await page.unroute(base+'/api/paper/*',count);}
+    });
+    await check('batch-move-stop-preserves-completed-items-and-dialog-selection-snapshot', async () => {
+      const ids=[process.env.LITPRISM_ACCEPTANCE_SEED,(await call('/api/acceptance/material','POST',{unanalysed:true})).paper_id,(await call('/api/acceptance/material','POST',{})).paper_id];
+      const group=(await call('/api/collections','POST',{name:'N10 停止移动目标'})).id;
+      for(const id of ids)await call('/api/paper/'+id,'PATCH',{collection_id:null});
+      await page.evaluate(async()=>{await refreshCollections();await refreshLibrary();});
+      for(const id of ids)await page.locator(`[data-select-paper="${id}"]`).check();
+      await page.locator('#btnMovePapers').click(); await page.locator('#researchTask [name=collection_id]').selectOption(group);
+      // A background refresh may alter the live selection while the dialog owns its original target set.
+      await page.evaluate(()=>S.selectedPapers.clear());
+      const held=await delayed(base+'/api/paper/'+ids[0],r=>r.method()==='PATCH');
+      const writes=[];
+      const record=r=>{if(r.method()==='PATCH'&&ids.some(id=>r.url()===base+'/api/paper/'+id))writes.push(r.url().split('/').at(-1));};
+      page.on('request',record);
+      try {
+        await page.locator('#researchTask [type=submit]').click(); await held.ready;
+        await expect(page.locator('#researchTask [type=submit]')).toBeDisabled();
+        await page.locator('#researchTask footer [data-cancel]').click();
+        held.release(); await expect(page.locator('[data-move-result]')).toContainText('已移动 1 / 3');
+        await expect(page.locator('[data-move-result]')).toContainText('未处理 2');
+        await expect(page.locator('[data-move-result]')).toContainText('不会撤销');
+        for(const [i,id]of ids.entries())assert.equal((await call('/api/paper/'+id)).paper.collection_id,i?null:group);
+        await page.screenshot({path:path.join(output,'p2-batch-stopped.png')});
+        await page.locator('#researchTask [type=submit]').click(); await expect(page.locator('#researchTask')).toHaveCount(0);
+        for(const id of ids){assert.equal(writes.filter(x=>x===id).length,1);assert.equal((await call('/api/paper/'+id)).paper.collection_id,group);}
+        await page.locator(`[data-select-paper="${ids[0]}"]`).check();await page.locator('#btnMovePapers').click();
+        await page.locator('#researchTask footer [data-cancel]').click();await expect(page.locator('#researchTask')).toHaveCount(0);assert.equal(writes.length,3);
+      } finally {page.off('request',record);await held.close();}
+    });
+    await check('collection-selectors-show-full-paths-and-keep-real-ids', async () => {
+      const a=(await call('/api/collections','POST',{name:'N10 路径父A'})).id;
+      const b=(await call('/api/collections','POST',{name:'N10 路径父B'})).id;
+      const x=(await call('/api/collections','POST',{name:'共同子组',parent_id:a})).id;
+      const y=(await call('/api/collections','POST',{name:'共同子组',parent_id:b})).id;
+      await page.evaluate(()=>refreshCollections());
+      await expect(page.locator(`#collectionFilter option[value="${x}"]`)).toHaveText('N10 路径父A / 共同子组');
+      await expect(page.locator(`#collectionFilter option[value="${y}"]`)).toHaveText('N10 路径父B / 共同子组');
+      const seed=process.env.LITPRISM_ACCEPTANCE_SEED;await page.locator(`[data-select-paper="${seed}"]`).check();
+      await page.locator('#btnMovePapers').click();await expect(page.locator(`#researchTask option[value="${x}"]`)).toHaveText('N10 路径父A / 共同子组');await page.keyboard.press('Escape');
+      await page.locator('#btnNewConv').click();await expect(page.locator(`#researchTask option[value="g:${y}"]`)).toHaveText('分组：N10 路径父B / 共同子组');await page.keyboard.press('Escape');
+      const conv=(await call('/api/conversations','POST',{title:'N10 分组路径范围',scope:{collection_id:x,mode:'strict'}})).id;
+      await page.evaluate(()=>loadSidebar());await page.locator(`[data-conv="${conv}"]`).click();await page.locator('#scopeChip').click();
+      await expect(page.locator(`#researchTask option[value="g:${x}"]`)).toHaveText('分组：N10 路径父A / 共同子组');await page.keyboard.press('Escape');
+      await call('/api/collections/'+a,'PATCH',{parent_id:b});await page.evaluate(()=>refreshCollections());
+      await expect(page.locator(`#collectionFilter option[value="${x}"]`)).toHaveText('N10 路径父B / N10 路径父A / 共同子组');
+      await expect(page.locator('#scopeChip')).toContainText('N10 路径父B / N10 路径父A / 共同子组');
+      await page.locator('[data-view=library]').first().click();await page.locator('#collectionFilter').selectOption(x);
+      await call('/api/collections/'+x,'DELETE');await page.evaluate(()=>refreshCollections());
+      await expect(page.locator('#collectionFilter')).toHaveValue('');await expect(page.locator(`#collectionFilter option[value="${x}"]`)).toHaveCount(0);
+      const saved=(await call('/api/conversations/'+conv+'/messages')).conversation.scope;
+      assert.equal((typeof saved==='string'?JSON.parse(saved):saved).collection_id,x,'Deleted group must not silently widen saved conversation scope');
+    });
+    await check('provider-read-failure-ends-loading-and-retries-without-stale-errors', async () => {
+      const endpoint=base+'/api/providers';const fail=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'提供商读取失败'})});
+      await page.route(endpoint,fail);
+      try {
+        await page.locator('[data-view=settings]').click();await page.locator('[data-set=model]').click();
+        await expect(page.locator('#pvArea [data-read-error]')).toContainText('提供商读取失败');await expect(page.locator('#pvArea .skeleton')).toHaveCount(0);
+      } finally {await page.unroute(endpoint,fail);}
+      await page.locator('#pvArea [data-read-retry]').click();await expect(page.locator('#pvArea .pv-card').first()).toBeVisible();
+      await page.route(endpoint,fail);
+      try {await page.locator('[data-set=general]').click();await page.locator('[data-set=model]').click();await expect(page.locator('#pvArea [data-read-error]')).toContainText('上次');await expect(page.locator('#pvArea .pv-card').first()).toBeVisible();await page.screenshot({path:path.join(output,'p2-provider-read-error.png')});}
+      finally {await page.unroute(endpoint,fail);}
+      const held=await delayed(endpoint,()=>true,'迟到的提供商错误');
+      try {
+        await page.locator('#pvArea [data-read-retry]').click();await held.ready;
+        await expect(page.locator('#btnAddProvider')).toBeDisabled();
+        await page.locator('[data-set=general]').click();const response=page.waitForResponse(r=>r.url()===endpoint&&r.status()===503);held.release();await response;await page.waitForTimeout(60);
+        await expect(page.locator('#settingsPanes')).not.toContainText('迟到的提供商错误');
+      } finally {await held.close();}
+      await page.locator('[data-set=model]').click();await expect(page.locator('#pvArea .pv-card').first()).toBeVisible();await expect(page.locator('#pvArea [data-read-error]')).toHaveCount(0);
+    });
+    await check('model-directory-read-failure-is-not-unconfigured-and-keeps-known-selection', async () => {
+      const provider=await call('/api/providers','POST',{name:'N10 读取目录',base_url:'http://127.0.0.1:9/v1',protocol:'openai'});
+      await call('/api/providers/'+provider.id+'/models','PUT',{models:[{model_id:'read-one'},{model_id:'read-two'}]});await call('/api/providers/'+provider.id+'/active','POST',{model_id:'read-two'});
+      const conv=(await call('/api/conversations','POST',{title:'N10 目录读取恢复'})).id;
+      await page.reload();await expect(page.locator(`[data-conv="${conv}"]`)).toBeVisible();
+      const endpoint=base+'/api/models', fail=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'目录读取失败'})});
+      await page.route(endpoint,fail);
+      try {
+        await page.locator(`[data-conv="${conv}"]`).click();await expect(page.locator('#modelReadError')).toContainText('目录读取失败');
+        await expect(page.locator('#chatModel')).not.toContainText('未配置');await expect(page.locator('#chatModel')).toBeDisabled();await expect(page.locator('#btnSend')).toBeDisabled();
+      } finally {await page.unroute(endpoint,fail);}
+      await page.locator('#btnRetryModels').click();await expect(page.locator('#chatModel')).toHaveValue(provider.id+'::read-two');await expect(page.locator('#chatModel')).toBeEnabled();
+      await page.route(endpoint,fail);
+      try {await page.locator('[data-view=library]').first().click();await page.locator(`[data-conv="${conv}"]`).click();await expect(page.locator('#modelReadError')).toContainText('上次');await expect(page.locator('#chatModel')).toHaveValue(provider.id+'::read-two');await page.screenshot({path:path.join(output,'p2-model-directory-error.png')});}
+      finally {await page.unroute(endpoint,fail);}
+      await page.locator('#btnRetryModels').click();await expect(page.locator('#modelReadError')).not.toBeVisible();
+    });
+    await check('paper-source-read-failure-clears-skeleton-and-cannot-follow-navigation', async () => {
+      const seed=process.env.LITPRISM_ACCEPTANCE_SEED, endpoint=base+'/api/paper/'+seed+'/text';
+      const fail=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'原文读取失败'})});
+      await page.locator(`#sidebar [data-paper="${seed}"]`).click();await page.locator('#btnInspector').click();
+      await page.route(endpoint,fail);
+      try {await page.locator('[data-insp=sources]').click();await expect(page.locator('#inspSources [data-read-error]')).toContainText('原文读取失败');await expect(page.locator('#inspSources .skeleton')).toHaveCount(0);await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(output,'p2-source-read-error-narrow.png')});await page.setViewportSize({width:1360,height:880});}
+      finally {await page.unroute(endpoint,fail);}
+      await page.locator('#inspSources [data-read-retry]').click();await expect(page.locator('#inspSources .source-page')).toBeVisible();
+      const held=await delayed(endpoint,()=>true,'迟到的原文错误');
+      try {
+        await page.locator('[data-insp=sources]').click();await held.ready;await page.locator('[data-view=library]').first().click();
+        const response=page.waitForResponse(r=>r.url()===endpoint&&r.status()===503);held.release();await response;await page.waitForTimeout(60);
+        await expect(page.locator('#inspSources')).not.toContainText('迟到的原文错误');
+      } finally {await held.close();}
+    });
+    await check('six-list-read-failures-distinguish-first-failure-from-stale-content', async () => {
+      await call('/api/memories','POST',{kind:'style_preference',value:'请使用简洁的表达。'});
+      const trashed=(await call('/api/acceptance/material','POST',{unanalysed:true})).paper_id;await call('/api/paper/'+trashed,'DELETE');
+      for(const [view,url,box]of [['knowledge','/api/evidence','#knowledgeList'],['memories','/api/memories','#memoryList'],['trash','/api/trash','#trashList'],['deliverables','/api/deliverables','#delivList'],['skills','/api/skills','#skillCards'],['verify','/api/whitelist','#wlList']]) {
+        await page.reload();await expect(page.locator('#paperList [data-paper]').first()).toBeVisible();
+        const endpoint=base+url, fail=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:view+'列表读取失败'})});
+        await page.route(endpoint,fail);
+        try {await page.locator(`[data-view="${view}"]`).first().click();await expect(page.locator(box+' [data-read-error]')).toContainText(view+'列表读取失败');await expect(page.locator(box+' .skeleton')).toHaveCount(0);}
+        finally {await page.unroute(endpoint,fail);}
+        await page.locator(box+' [data-read-retry]').click();await expect(page.locator(box)).toHaveAttribute('aria-busy','false');await expect(page.locator(box+' [data-read-error]')).toHaveCount(0);
+        const content=()=>page.locator(box).evaluate(el=>{const copy=el.cloneNode(true);copy.querySelectorAll('[data-read-error],[data-read-loading]').forEach(node=>node.remove());return copy.innerHTML;});
+        const before=await content();assert(before.trim(),'Expected real list content');
+        await page.route(endpoint,fail);
+        try {await page.locator(`[data-view="${view}"]`).first().click();await expect(page.locator(box+' [data-read-error]')).toContainText('上次');assert.equal(await content(),before,'Last successful list content changed after failed read');if(view==='knowledge')await page.screenshot({path:path.join(output,'p2-list-stale-error.png')});}
+        finally {await page.unroute(endpoint,fail);}
+        await page.locator(box+' [data-read-retry]').click();await expect(page.locator(box)).toHaveAttribute('aria-busy','false');await expect(page.locator(box+' [data-read-error]')).toHaveCount(0);
+      }
+      await page.locator('[data-view=knowledge]').first().click();await expect(page.locator('#knowledgeList')).toHaveAttribute('aria-busy','false');
+      const held=await delayed(base+'/api/evidence',()=>true,'迟到的知识列表错误');
+      try {
+        await page.locator('[data-view=knowledge]').first().click();await held.ready;
+        await page.locator('[data-view=trash]').first().click();await page.locator('[data-view=knowledge]').first().click();
+        await expect(page.locator('#knowledgeList')).toHaveAttribute('aria-busy','false');
+        const response=page.waitForResponse(r=>r.url()===base+'/api/evidence'&&r.status()===503);held.release();await response;await page.waitForTimeout(60);
+        await expect(page.locator('#knowledgeList [data-read-error]')).toHaveCount(0);
+      } finally {await held.close();}
+    });
+    await check('memory-restore-and-skill-refresh-failures-recover-without-unhandled-promises', async () => {
+      const memory=await call('/api/memories','POST',{kind:'style_preference',value:'回答请使用短段落并保留必要依据。'});
+      await page.locator('[data-view=memories]').first().click();await page.locator(`[data-delete-memory="${memory.id}"]`).click();await expect(page.locator('#btnUndoMemory')).toBeVisible();
+      const endpoint=base+'/api/memories/'+memory.id+'/restore', fail=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'恢复偏好失败'})});
+      await page.route(endpoint,fail);
+      try {await page.locator('#btnUndoMemory').click();await expect(page.locator('[data-memory-action-error]')).toContainText('恢复偏好失败');await expect(page.locator('#btnUndoMemory')).toBeEnabled();}
+      finally {await page.unroute(endpoint,fail);}
+      await page.locator('#btnUndoMemory').click();await expect(page.locator(`[data-delete-memory="${memory.id}"]`)).toBeVisible();await expect(page.locator('#btnUndoMemory')).toHaveCount(0);
+      await page.locator('[data-view=skills]').first().click();await expect(page.locator('#skillCards .skill-card').first()).toBeVisible();
+      const failSkill=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'刷新Skill失败'})});await page.route(base+'/api/skills',failSkill);
+      try {await page.locator('#btnSkillRefresh').click();await expect(page.locator('#skillCards [data-read-error]')).toContainText('刷新Skill失败');await expect(page.locator('#btnSkillRefresh')).toBeEnabled();}
+      finally {await page.unroute(base+'/api/skills',failSkill);}
+      await page.locator('#btnSkillRefresh').click();await expect(page.locator('#skillCards [data-read-error]')).toHaveCount(0);
+    });
+    await check('deliverable-titles-and-actions-reflow-without-losing-existing-actions', async () => {
+      const seed=process.env.LITPRISM_ACCEPTANCE_SEED, text=await call('/api/paper/'+seed+'/text');
+      const title='Transformer 基本架构的直接原文与多来源核对笔记';
+      const ids=[];
+      for(const name of [title,'非常长的研究产出标题与来源核验记录'.repeat(8)]) ids.push((await call('/api/deliverables','POST',{title:name,type:'notes',content:'原文描述 [P1 p.1]',citations:[{tag:'P1',paper_id:seed,chunk_id:text.pages[0].chunks[0].chunk_id}]})).id);
+      await page.locator('[data-view=deliverables]').click();await expect(page.locator('#delivList')).toHaveAttribute('aria-busy','false');
+      const measurements=[];
+      for(const theme of ['light','dark']) {
+        await page.evaluate(theme=>{S.theme=theme;applyTheme();},theme);
+        for(const width of [320,390,760,1360]) {
+          await page.setViewportSize({width,height:880});await page.evaluate(()=>{S.sidebar=false;applySidebar();});
+          for(const id of ids) {
+            const row=page.locator(`[data-dstat="${id}"]`).locator('xpath=../..');
+            const geometry=await row.evaluate(el=>{const main=el.querySelector('.list-main'),title=el.querySelector('.list-title'),actions=el.querySelector('[data-dstat]').parentElement;const r=e=>{const b=e.getBoundingClientRect();return {x:b.x,y:b.y,width:b.width,height:b.height,right:b.right,bottom:b.bottom};};return{row:r(el),main:r(main),title:r(title),actions:r(actions),controls:[...actions.children].map(r),scroll:document.documentElement.scrollWidth,viewport:innerWidth};});
+            measurements.push({theme,width,id,...geometry});
+            assert(geometry.scroll<=width+1,'Page overflows');
+            if(width<=760){assert(geometry.main.width>=geometry.row.width-40,'Title remains squeezed by actions');assert(geometry.actions.y>=geometry.main.bottom-1,'Actions must follow content on narrow screens');}
+            else {assert(geometry.actions.x>=geometry.main.right-1,'Desktop actions must remain alongside title');}
+            assert(geometry.controls.every(c=>c.width>0&&c.x>=geometry.row.x&&c.right<=geometry.row.right+1),'An action exceeds its row');
+            await expect(row.getByRole('button',{name:'导出',exact:true})).toBeVisible();await expect(row.getByRole('button',{name:'查看',exact:true})).toBeVisible();await expect(row.getByRole('button',{name:'编辑',exact:true})).toBeVisible();await expect(row.getByRole('button',{name:'删除',exact:true})).toBeVisible();
+          }
+          if(width===390||width===1360)await page.screenshot({path:path.join(output,`p2-deliverable-layout-${width}-${theme}.png`)});
+        }
+      }
+      fs.writeFileSync(path.join(output,'deliverable-layout.json'),JSON.stringify(measurements,null,2));
+      await page.locator(`[data-deliv="${ids[0]}"]`).click();await expect(page.locator('#researchTask')).toContainText('原文描述');await page.keyboard.press('Escape');
+      await page.locator(`[data-dedit="${ids[0]}"]`).click();await expect(page.locator('#researchTask [name=title]')).toHaveValue(title);await page.keyboard.press('Escape');
+    });
+    await check('configuration-location-names-actual-action-and-never-guesses-path', async () => {
+      const status=await call('/api/status');assert(status.config_path,'Backend must report the actual active config path');
+      await page.locator('[data-view=settings]').click();await expect(page.locator('#btnOpenConfig')).toHaveAccessibleName('查看配置位置');
+      await page.locator('#btnOpenConfig').click();await expect(page.locator('#configLocation')).toContainText(status.config_path);await expect(page.locator('#settingsModal')).toBeVisible();
+      await expect(page.locator('#configLocation')).not.toContainText('已打开');
+      for(const width of [390,1360]){await page.setViewportSize({width,height:880});assert(await page.locator('#configLocation').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'Configuration path overflows');await page.screenshot({path:path.join(output,`p2-config-location-${width}.png`)});}
+      const endpoint=base+'/api/status';
+      const absent=route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({...status,config_path:null})});
+      await page.route(endpoint,absent);
+      try {await page.locator('#btnOpenConfig').click();await expect(page.locator('#configLocation')).toContainText('内置默认配置');await expect(page.locator('#configLocation')).not.toContainText('config.yaml');}
+      finally {await page.unroute(endpoint,absent);}
+      const missing=route=>{const data={...status};delete data.config_path;return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(data)});};
+      await page.route(endpoint,missing);
+      try {await page.locator('#btnOpenConfig').click();await expect(page.locator('#configLocation')).toContainText('服务未返回配置位置');await expect(page.locator('#configLocation')).not.toContainText('config.yaml');}
+      finally {await page.unroute(endpoint,missing);}
+      const failure=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'配置位置读取失败'})});await page.route(endpoint,failure);
+      try {await page.locator('#btnOpenConfig').click();await expect(page.locator('#configLocation')).toHaveAttribute('role','alert');await expect(page.locator('#configLocation')).toContainText('配置位置读取失败');await expect(page.locator('#btnOpenConfig')).toBeEnabled();await expect(page.locator('#configLocation')).not.toContainText('config.yaml');}
+      finally {await page.unroute(endpoint,failure);}
+      await page.locator('#btnOpenConfig').click();await expect(page.locator('#configLocation')).toContainText(status.config_path);
+    });
+    await check('preference-types-use-product-labels-and-skill-copy-keeps-execution-boundary', async () => {
+      const records=[];
+      for(const [kind,label,value]of [['style_preference','表达偏好','回答时优先使用简洁段落，必要处列出依据。'],['term_preference','术语偏好','术语首次出现时附上英文名称。'],['research_interest','研究方向','关注可追溯的学术证据检索。'],['misc','其他偏好','默认用中文进行说明。']]) {
+        const result=await call('/api/memories','POST',{kind,value});assert(result.id,result.reason);records.push({id:result.id,kind,label});
+      }
+      const custom=await call('/api/memories','POST',{kind:'style_preference',key:'自定义展示名称',value:'回答结尾列出必要的下一步。'});assert(custom.id,custom.reason);
+      await page.locator('[data-view=memories]').first().click();await expect(page.locator('#memoryList')).toHaveAttribute('aria-busy','false');
+      for(const record of records)await expect(page.locator(`[data-edit-memory="${record.id}"]`).locator('..').locator('strong')).toHaveText(record.label);
+      await expect(page.locator(`[data-edit-memory="${custom.id}"]`).locator('..').locator('strong')).toHaveText('自定义展示名称');
+      await page.locator(`[data-edit-memory="${records[0].id}"]`).click();await expect(page.locator('#researchTask [name=kind]')).toHaveValue('style_preference');await expect(page.locator('#researchTask [name=kind] option:checked')).toHaveText('表达偏好');await page.keyboard.press('Escape');
+      const go=async view=>{if(!await page.evaluate(()=>S.sidebar))await page.locator('#btnSidebar').click();await page.locator(`[data-view="${view}"]`).first().click();};
+      for(const theme of ['light','dark'])for(const width of [390,1360]) {
+        await page.setViewportSize({width,height:880});await page.evaluate(async({theme,width})=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));S.theme=theme;applyTheme();S.sidebar=width>760;applySidebar();},{theme,width});
+        await go('memories');await expect(page.locator('#memoryList')).toHaveAttribute('aria-busy','false');await page.screenshot({path:path.join(output,`p3-preferences-${width}-${theme}.png`)});
+        await go('skills');await expect(page.locator('#skillCards')).toHaveAttribute('aria-busy','false');
+        await expect(page.locator('.inline-note')).not.toContainText('一期');await expect(page.locator('.inline-note')).toContainText('声明式');await expect(page.locator('.inline-note')).toContainText('不会被加载或执行');
+        assert(await page.locator('.inline-note > span').evaluate(el=>el.getBoundingClientRect().width>200),'Skill boundary sentence must wrap as one readable text block');
+        await page.locator('.inline-note').scrollIntoViewIfNeeded();
+        await page.screenshot({path:path.join(output,`p3-skills-${width}-${theme}.png`)});
+      }
+      const stored=(await call('/api/memories')).items;
+      for(const record of records)assert.equal(stored.find(m=>m.id===record.id).kind,record.kind);
+      assert.equal(stored.find(m=>m.id===custom.id).key,'自定义展示名称');
     });
     results.push({ name: 'no-browser-errors-or-external-requests', passed: !errors.length && !external.length, errors, external });
     fs.writeFileSync(path.join(output, 'summary.json'), JSON.stringify({ results }, null, 2));

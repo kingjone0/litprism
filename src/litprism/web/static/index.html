@@ -237,7 +237,7 @@
             <div style="font-size:12px;color:var(--muted);line-height:1.7">
               每个 Skill 是一个子目录，内含 <code class="mono">skill.yaml</code> 与
               <code class="mono">prompt.md</code>。<br>
-              <span class="inline-note"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 2.5 20h19L12 4Z"/><path d="M12 10v4.5M12 17.4v.1"/></svg>一期只支持<strong>声明式</strong> Skill —— 目录内的可执行文件不会被加载或执行。</span>
+              <span class="inline-note"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 2.5 20h19L12 4Z"/><path d="M12 10v4.5M12 17.4v.1"/></svg><span>Skill 仅支持<strong>声明式配置</strong>，目录内的可执行文件不会被加载或执行。</span></span>
             </div>
           </div></div>
         </section>
@@ -281,8 +281,9 @@
     <header class="modal-head">
       <div class="modal-title" id="settingsTitle">设置</div>
       <div class="spacer" style="flex:1"></div>
-      <button class="btn sm" id="btnOpenConfig">打开配置文件</button>
+      <button class="btn sm" id="btnOpenConfig" aria-controls="configLocation" aria-expanded="false">查看配置位置</button>
       <button class="modal-close" id="btnCloseSettings" title="关闭" aria-label="关闭设置" autofocus><span data-icon="close"></span></button>
+      <p class="config-location" id="configLocation" role="status" hidden></p>
     </header>
     <div class="modal-body">
       <nav class="modal-nav" id="settingsNav"></nav>

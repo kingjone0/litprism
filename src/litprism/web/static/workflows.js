@@ -101,7 +101,7 @@ async function refreshChatRuns(convId) {
       needs_retry:'需确认重试', failed:'调用或发布失败', cancelled:'已停止', stale:'依据已变化'};
     const incomplete = d.items.filter(r => r.status !== 'completed');
     S.chatActiveRunning = d.items.some(r => r.active);
-    if ($('#btnSend')) $('#btnSend').disabled = S.sending || S.chatActiveRunning;
+    if ($('#btnSend')) $('#btnSend').disabled = S.sending || S.chatActiveRunning || !!S.modelSwitch || modelReadBlocksSend();
     panel.innerHTML = `<summary>本轮请求记录 · ${incomplete.length ? incomplete.length+' 项未发布' : '结果已保存'}</summary>
       <div class="chat-run-list">${d.items.map(r => `<section class="chat-run-item"><strong>${esc(r.question)}</strong>
         <p class="source-intro">${esc(labels[r.status] || r.status)} · ${r.usage.calls} 次模型调用 · ${fmtNum(r.usage.input+r.usage.output)} 已报告 token${r.usage.unknown_usage_calls ? ' · '+r.usage.unknown_usage_calls+' 次用量未知' : ''}</p>
@@ -184,7 +184,7 @@ function workflowDialog(title, body, submit, action = '确定') {
       const data = new FormData(e.target);
       const values = Object.fromEntries(data);
       $$('select[multiple][name]', dialog).forEach(s => { values[s.name] = data.getAll(s.name); });
-      await submit(values, dialog); dialog.close();
+      if (await submit(values, dialog) !== false) dialog.close();
     }
     catch (error) {
       const message = $('.task-error', dialog);
@@ -295,8 +295,9 @@ async function refreshCollections() {
   S.collections = d.items || [];
   const filter = $('#collectionFilter');
   const value = filter.value;
-  filter.innerHTML = '<option value="">全部分组</option>' + S.collections.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  filter.innerHTML = '<option value="">全部分组</option>' + S.collections.map(c => `<option value="${esc(c.id)}">${esc(collectionLabel(c.id))}</option>`).join('');
   filter.value = S.collections.some(c => c.id === value) ? value : '';
+  if (S.activeView === 'chat' && S.convScope?.raw) {S.convScope=parseScope(S.convScope.raw);renderLocation();}
   $('#collectionChips').innerHTML = S.collections.map(c => `<button class="btn sm" draggable="true" data-group-chip="${esc(c.id)}">${esc(collectionLabel(c.id))}</button>`).join('');
   $$('[data-group-chip]').forEach(chip => {
     chip.onclick = () => { filter.value = chip.dataset.groupChip; loadLibrary(); };
@@ -336,7 +337,10 @@ function editConversation(c) {
   workflowDialog('管理会话', `<label>名称<input class="input" name="title" value="${esc(c.title)}" required></label><label><input type="checkbox" name="pinned" ${c.pinned ? 'checked' : ''}>置顶</label>`, async v => {
     await api('/api/conversations/'+c.id, { method: 'PATCH', body: { title: v.title, pinned: v.pinned === 'on' } });
     await loadSidebar();
-    if (S.activeConv === c.id) $('#tbTitle').textContent = v.title;
+    if (S.activeView === 'chat' && S.activeConv === c.id) {
+      $('#tbTitle').textContent = v.title;
+      setLocation(v.title);
+    }
   });
 }
 
@@ -351,7 +355,7 @@ async function editDeliverable(id) {
 
 function showConversationDialog() {
   const options = S.papers.map(p => `<option value="p:${esc(p.id)}">${esc(short(p.display_title || p.title, 42))}</option>`).join('') +
-    S.collections.map(c => `<option value="g:${esc(c.id)}">分组：${esc(c.name)}</option>`).join('');
+    S.collections.map(c => `<option value="g:${esc(c.id)}">分组：${esc(collectionLabel(c.id))}</option>`).join('');
   workflowDialog('新建研究对话', `<label>对话名称<input class="input" name="title" value="新研究对话" required></label>
     <label>回答范围<select class="select" name="scope"><option value="">全库知识与联网（默认）</option>${S.selectedPapers.size ? '<option value="selected">知识库中勾选的文献</option>' : ''}${options}</select></label>
     <p class="source-intro">通常直接开始即可。主动选择文献或分组时，仅使用该范围，不额外联网。</p>`, async values => {
@@ -386,7 +390,7 @@ async function importFiles(files) {
     $('#importResults').innerHTML = (data.results || []).map(r => `<div class="${r.ok ? 'insp-note' : 'lui-degraded'}">
       <strong>${esc(r.file)}</strong>：${esc(r.ok ? '核验通过，已导入；打开文献可生成解读。' : r.error)}
       ${!r.ok && r.title ? `<button class="btn sm" data-import-verify="${esc(r.title)}">查看核验 / 人工确认</button>` : ''}</div>`).join('');
-    $$('[data-import-verify]').forEach(b => b.onclick = () => { openView('verify'); $('#verifyInput').value = b.dataset.importVerify; doVerify(); });
+    $$('[data-import-verify]').forEach(b => b.onclick = () => { if (!openView('verify')) return; $('#verifyInput').value = b.dataset.importVerify; doVerify(); });
     await refreshLibrary();
   } catch (error) { $('#importResults').textContent = error.message; }
   finally { button.disabled = false; $('#importFiles').value = ''; }
@@ -465,7 +469,7 @@ async function recommendPapers(event) {
 function showSkillRun(skill) {
   workflowDialog('运行：' + skill.name, (skill.inputs || []).map(i => `<label>${esc(i.label || i.key)}
     ${i.type === 'papers' ? `<select class="select" multiple name="${esc(i.key)}" ${i.required ? 'required' : ''}>${S.papers.map(p => `<option value="${esc(p.id)}">${esc(p.display_title || p.title)}</option>`).join('')}</select>` :
-      i.type === 'collection' ? `<select class="select" name="${esc(i.key)}" ${i.required ? 'required' : ''}><option value="">请选择分组</option>${S.collections.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>` :
+      i.type === 'collection' ? `<select class="select" name="${esc(i.key)}" ${i.required ? 'required' : ''}><option value="">请选择分组</option>${S.collections.map(c => `<option value="${esc(c.id)}">${esc(collectionLabel(c.id))}</option>`).join('')}</select>` :
       `<input class="input" name="${esc(i.key)}" ${i.required ? 'required' : ''} placeholder="${esc(i.key)}">`}</label>`).join('') +
     '<p class="source-intro">只执行声明式预取和提示词；没有原文依据时拒绝生成。</p>', async values => {
       const r = await runTask('skill', { skill_id: skill.id, request: { inputs: values } });
@@ -643,7 +647,18 @@ function semanticEndpoint(ref) {
   return ref.kind === 'run' ? '/api/semantic-runs/'+encodeURIComponent(ref.id) : '/api/paper/'+encodeURIComponent(ref.id)+'/semantic';
 }
 
+function confirmReviewLeave() {
+  const dirty = $$('#inspSources form').some(form => form.dataset.reviewDirty === 'true' && form.getAttribute('aria-busy') !== 'true');
+  return !dirty || confirm('离开当前审核？尚未提交的修改将被丢弃。');
+}
+
+for (const type of ['input', 'change']) document.addEventListener(type, event => {
+  const form = event.target.closest('#inspSources form');
+  if (event.isTrusted && form) form.dataset.reviewDirty = 'true';
+});
+
 function showSemantic(ref) {
+  if (!confirmReviewLeave()) return;
   S.evidenceRef = null; S.semanticRef = ref; S.inspectorTab = 'sources';
   $$('[data-insp]').forEach(b => b.classList.toggle('active', b.dataset.insp === 'sources'));
   $$('[data-insp-pane]').forEach(p => p.classList.toggle('active', p.dataset.inspPane === 'sources'));
@@ -651,6 +666,7 @@ function showSemantic(ref) {
 }
 
 async function loadSemanticDetail(ref) {
+  if (S.semanticRef !== ref) return;
   if (ref.kind === 'chat') return loadChatReview(ref, ref.unitId);
   const box = $('#inspSources');
   const seq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
@@ -682,22 +698,27 @@ async function loadSemanticDetail(ref) {
       <form id="semanticReview"><label>核对后的知识正文（可修正原陈述）<textarea class="textarea" rows="5" name="reviewed_text" maxlength="20000">${esc(last?.reviewed_text || claim.text)}</textarea></label><label>人工核对依据<textarea class="textarea" name="note" maxlength="5000" required placeholder="核对双方出处、条件、数字与适用范围后填写"></textarea></label><p class="source-intro">确认后单独加入可信知识库，原始解读与论文核验状态保留。</p><div class="row wrap"><button class="btn primary" name="action" value="confirm" ${last?.action === 'confirm' ? 'disabled' : ''}>${last?.action === 'confirm' ? '已人工确认入库' : '确认正文并入库'}</button><button class="btn" name="action" value="reject" ${last?.action === 'reject' ? 'disabled' : ''}>拒绝陈述</button><button class="btn" name="action" value="revoke" ${last?.action !== 'confirm' ? 'disabled' : ''}>撤销入库</button></div><p class="task-error" role="alert"></p></form>
       ${last?.knowledge_id ? `<p><a href="#evidence-${esc(last.knowledge_id)}" data-evidence-ref="${esc(last.knowledge_id)}">查看知识条目与来源快照</a></p>` : ''}
       ${reviews.length ? `<details><summary>人工审核历史</summary>${reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm:'确认入库', reject:'拒绝', revoke:'撤销'})[r.action])}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
-    $('#btnSemanticBack').onclick = () => { S.semanticRef = null; refreshInspector(); };
+    $('#btnSemanticBack').onclick = () => { if (!confirmReviewLeave()) return; S.semanticRef = null; refreshInspector(); };
     $('#semanticReview').addEventListener('submit', async event => {
       event.preventDefault(); const form = event.currentTarget;
+      if (S.semanticRef !== ref || !form.isConnected || form.getAttribute('aria-busy') === 'true') return;
       const buttons = $$('button', form), disabled = buttons.map(b => b.disabled);
       const values = Object.fromEntries(new FormData(form));
       const action = event.submitter?.value;
+      form.setAttribute('aria-busy', 'true');
       buttons.forEach(b => { b.disabled = true; });
       try {
         await api(semanticEndpoint(ref)+'/'+encodeURIComponent(ref.claimId)+'/review', {method:'POST', body:{...values, action, analysis_hash:d.analysis_hash}});
-        toast('人工审核已留档'); await loadSemanticDetail(ref);
+        toast('人工审核已留档');
+        if (S.semanticRef === ref) await loadSemanticDetail(ref);
       } catch (error) { $('.task-error', form).textContent = error.message; buttons.forEach((b,i) => {b.disabled=disabled[i];}); }
+      finally { form.removeAttribute('aria-busy'); }
     });
   } catch (error) { if (S.semanticRef === ref && seq === S.evidenceLoadSeq) box.textContent = error.message; }
 }
 
 async function loadChatReview(ref, openUnitId = null) {
+  if (S.semanticRef !== ref) return;
   delete ref.unitId;
   const box = $('#inspSources');
   const seq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
@@ -751,7 +772,7 @@ async function loadChatReview(ref, openUnitId = null) {
       <button class="btn" name="action" value="revoke" ${!last?.knowledge_id || last?.action === 'revoke' ? 'disabled' : ''}>撤销入库</button></div><p class="task-error" role="alert"></p></form></details>
       ${last?.knowledge_id ? `<p><a href="#evidence-${esc(last.knowledge_id)}" data-evidence-ref="${esc(last.knowledge_id)}">查看知识条目</a> · ${esc(trustLabel(d.knowledge_status))}</p>` : ''}
       ${d.reviews.length ? `<details open><summary>人工审核历史</summary>${d.reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm:'确认入库', reject:'拒绝', revoke:'撤销'})[r.action])}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
-    $('#btnChatReviewBack').onclick = () => { S.semanticRef = null; refreshInspector(); };
+    $('#btnChatReviewBack').onclick = () => { if (!confirmReviewLeave()) return; S.semanticRef = null; refreshInspector(); };
     const rows = $$('.qa-unit-row', box);
     rows.forEach(row => row.addEventListener('toggle', () => {
       const slot = $('[data-unit-slot]', row);
@@ -782,7 +803,9 @@ async function loadChatReview(ref, openUnitId = null) {
     $('#chatReviewForm').addEventListener('submit', async event => {
       event.preventDefault();
       const form = event.currentTarget, values = new FormData(form);
+      if (S.semanticRef !== ref || !form.isConnected || form.getAttribute('aria-busy') === 'true') return;
       const buttons = $$('button', form), disabled = buttons.map(b => b.disabled);
+      form.setAttribute('aria-busy', 'true');
       buttons.forEach(b => { b.disabled = true; });
       try {
         await api(endpoint+'/review', {method:'POST', body:{action:event.submitter?.value,
@@ -796,7 +819,7 @@ async function loadChatReview(ref, openUnitId = null) {
           $('.task-error', form).textContent = error.message;
           buttons.forEach((b,i) => { b.disabled=disabled[i]; });
         }
-      }
+      } finally { form.removeAttribute('aria-busy'); }
     });
     if (openUnitId) {
       const row = rows.find(row => row.dataset.unitId === openUnitId);
@@ -819,7 +842,7 @@ async function refreshReviewedTurn(ref) {
   try {
     const conv = S.activeConv;
     const history = await api('/api/conversations/'+encodeURIComponent(conv)+'/messages');
-    if (S.activeConv !== conv || S.activeView !== 'chat') return;
+    if (S.semanticRef !== ref || S.activeConv !== conv || S.activeView !== 'chat') return;
     for (const message of history.items.filter(m => m.role === 'assistant')) {
       const turn = $$('.chat-turn', $('#chatStream')).find(el => el.dataset.messageRef === message.ref);
       if (turn && (message.qa_review_id === ref.id || turn.dataset.messageStatus !== (message.status || 'answered'))) {
@@ -831,6 +854,7 @@ async function refreshReviewedTurn(ref) {
 }
 
 async function loadChatUnitReview(ref, uid, target = null) {
+  if (S.semanticRef !== ref || target && !target.isConnected) return;
   ref.unitId = uid;
   const box = target || $('#inspSources');
   const seq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
@@ -909,6 +933,7 @@ async function loadChatUnitReview(ref, uid, target = null) {
     if (d.review_mode === 'reply') $$('input, textarea, select, button', form).forEach(el => {el.disabled=true;});
     form.addEventListener('submit', async event => {
       event.preventDefault();
+      if (S.semanticRef !== ref || !form.isConnected || form.getAttribute('aria-busy') === 'true') return;
       const values = new FormData(form), controls = $$('fieldset, button, input, textarea, select', form), disabled = controls.map(el => el.disabled);
       form.setAttribute('aria-busy', 'true');
       controls.forEach(el => {el.disabled=true;});
@@ -925,7 +950,7 @@ async function loadChatUnitReview(ref, uid, target = null) {
         }
       } catch (error) {
         if (form.isConnected) { $('[role=alert]', form).textContent=error.message; controls.forEach((el,i) => {el.disabled=disabled[i];}); form.removeAttribute('aria-busy'); }
-      }
+      } finally { form.removeAttribute('aria-busy'); }
     });
     for (const tag of new Set(d.suggested_evidence.length ? d.suggested_evidence.map(q => q.source) : preferredTags.slice(0,1))) await addContext(tag);
     if (form.isConnected && S.semanticRef === ref && seq === S.evidenceLoadSeq) updateCount();
@@ -965,6 +990,7 @@ function sourceTime(value) {
 }
 
 async function showEvidence(ref) {
+  if (!confirmReviewLeave()) return;
   S.semanticRef = null;
   S.evidenceRef = ref;
   S.inspectorTab = 'sources';
@@ -974,12 +1000,14 @@ async function showEvidence(ref) {
 }
 
 function returnToSourceList() {
+  if (!confirmReviewLeave()) return;
   S.evidenceRef = null;
   if (S.activeView === 'knowledge') toggleInspector(false);
   else refreshInspector();
 }
 
 async function loadEvidenceDetail(ref) {
+  if (S.evidenceRef !== ref) return;
   const loadSeq = S.evidenceLoadSeq = (S.evidenceLoadSeq || 0)+1;
   const box = $('#inspSources');
   box.innerHTML = '<p role="status">正在读取来源快照…</p>';
@@ -1008,15 +1036,19 @@ async function loadEvidenceDetail(ref) {
     $('#evidenceReview')?.addEventListener('submit', async e => {
       e.preventDefault();
       const form = e.currentTarget;
+      if (S.evidenceRef !== ref || !form.isConnected || form.getAttribute('aria-busy') === 'true') return;
       const buttons = $$('button', form);
       const disabled = buttons.map(b => b.disabled);
+      form.setAttribute('aria-busy', 'true');
       buttons.forEach(b => { b.disabled = true; });
       try {
         await api('/api/evidence/'+encodeURIComponent(ref)+'/review', { method: 'POST', body: {
           action: e.submitter.value, note: new FormData(form).get('note'), content_hash: d.content_hash } });
-        toast('审核结果已留档'); await loadEvidenceDetail(ref);
+        toast('审核结果已留档');
+        if (S.evidenceRef === ref) await loadEvidenceDetail(ref);
         if (S.activeView === 'knowledge') await loadKnowledge();
       } catch (error) { $('.task-error', form).textContent = error.message; buttons.forEach((b, i) => { b.disabled = disabled[i]; }); }
+      finally { form.removeAttribute('aria-busy'); }
     });
   } catch (error) {
     if (S.evidenceRef !== ref || loadSeq !== S.evidenceLoadSeq) return;
@@ -1029,7 +1061,8 @@ async function loadEvidenceDetail(ref) {
 }
 
 async function loadKnowledge() {
-  const d = await api('/api/evidence');
+  const d = await readPanel($('#knowledgeList'), '/api/evidence', loadKnowledge, () => S.activeView === 'knowledge');
+  if (!d) return false;
   $('#knowledgeList').innerHTML = d.items.length ? d.items.map(s => `<div class="list-item"><div class="list-main"><a href="#evidence-${esc(s.id)}" data-evidence-ref="${esc(s.id)}">${esc(s.title)}</a><p>${esc(s.kind === 'web' ? '网页' : '知识条目')} · ${esc(trustLabel(s.effective_status || s.status))}</p></div></div>`).join('')
     : emptyState({ icon: 'library', title: '还没有知识条目', desc: '在右栏把可引用的原文片段或网页快照人工确认后，会出现在这里。' });
 }
@@ -1051,9 +1084,11 @@ $('#btnSearchEvidence').onclick = async () => {
   finally { b.disabled = false; }
 };
 
+const memoryKindLabels = {style_preference:'表达偏好', term_preference:'术语偏好', research_interest:'研究方向', misc:'其他偏好'};
 async function loadMemories() {
-  const d = await api('/api/memories');
-  $('#memoryList').innerHTML = (d.items || []).map(m => `<div class="list-item"><div class="list-main"><strong>${esc(m.key || m.kind)}</strong><p>${esc(m.value)}</p></div>
+  const d = await readPanel($('#memoryList'), '/api/memories', loadMemories, () => S.activeView === 'memories');
+  if (!d) return false;
+  $('#memoryList').innerHTML = (d.items || []).map(m => `<div class="list-item"><div class="list-main"><strong>${esc(memoryKindLabels[m.key || m.kind] || m.key || m.kind || '其他偏好')}</strong><p>${esc(m.value)}</p></div>
     <button class="btn sm" data-edit-memory="${esc(m.id)}">编辑</button><button class="btn sm" data-delete-memory="${esc(m.id)}">删除</button></div>`).join('')
     || emptyState({ icon: 'settings', title: '还没有研究偏好', desc: '研究方向、术语与表达习惯记在这里；论文事实仍必须走核验知识库。' });
   $$('[data-edit-memory]').forEach(b => b.onclick = () => editMemory(d.items.find(m => m.id === b.dataset.editMemory)));
@@ -1064,12 +1099,26 @@ async function loadMemories() {
   });
   if (S.deletedMemory) {
     $('#memoryList').insertAdjacentHTML('afterbegin', '<button class="btn" id="btnUndoMemory">恢复最近删除的偏好</button>');
-    $('#btnUndoMemory').onclick = async () => { await api('/api/memories/' + S.deletedMemory + '/restore', { method: 'POST' }); S.deletedMemory = null; loadMemories(); };
+    $('#btnUndoMemory').onclick = async event => {
+      const button=event.currentTarget, id=S.deletedMemory;
+      if (button.disabled) return;
+      button.disabled=true;
+      $('#memoryList [data-memory-action-error]')?.remove();
+      try {
+        await api('/api/memories/'+encodeURIComponent(id)+'/restore',{method:'POST'});
+        if (S.deletedMemory===id) S.deletedMemory=null;
+        if (S.activeView==='memories') await loadMemories();
+      } catch (error) {
+        if (button.isConnected && S.activeView==='memories') {
+          const message=document.createElement('p');message.dataset.memoryActionError='';message.className='task-error';message.setAttribute('role','alert');message.textContent='恢复未完成：'+error.message;button.after(message);
+        } else toast('偏好恢复未完成：'+error.message,true);
+      } finally {if(button.isConnected)button.disabled=false;}
+    };
   }
 }
 
 function editMemory(memory = {}) {
-  workflowDialog(memory.id ? '编辑偏好' : '添加偏好', `<label>类型<select class="select" name="kind">${[['style_preference', '表达偏好'], ['term_preference', '术语偏好'], ['research_interest', '研究方向']].map(([v, label]) => `<option value="${v}" ${memory.kind === v ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+  workflowDialog(memory.id ? '编辑偏好' : '添加偏好', `<label>类型<select class="select" name="kind">${['style_preference','term_preference','research_interest'].map(v => `<option value="${v}" ${memory.kind === v ? 'selected' : ''}>${memoryKindLabels[v]}</option>`).join('')}</select></label>
     <label>内容<textarea class="textarea" name="value" required>${esc(memory.value || '')}</textarea></label>`, async values => {
     const r = await api('/api/memories' + (memory.id ? '/' + memory.id : ''), { method: memory.id ? 'PATCH' : 'POST', body: values });
     if (r.action === 'rejected') throw new Error(r.reason);
@@ -1078,7 +1127,8 @@ function editMemory(memory = {}) {
 }
 
 async function loadTrash() {
-  const data = await api('/api/trash');
+  const data = await readPanel($('#trashList'), '/api/trash', loadTrash, () => S.activeView === 'trash');
+  if (!data) return false;
   $('#trashList').innerHTML = (data.items || []).map(p => `<div class="list-item"><div class="list-main">${esc(p.display_title || p.title)}<p class="muted">${esc(p.deleted_at)}</p></div><button class="btn" data-restore-paper="${esc(p.id)}">恢复文献</button></div>`).join('')
     || emptyState({ icon: 'trash', title: '回收站为空', desc: '删除的文献会在这里保留至少 30 天，恢复前不参与检索。' });
   $$('[data-restore-paper]').forEach(b => b.onclick = async () => {
@@ -1096,7 +1146,7 @@ async function manageCollections() {
   $$('[data-rename-group]', d).forEach(b => b.onclick = () => {
     const c = S.collections.find(x => x.id === b.dataset.renameGroup); d.close();
     const descendants = collectionDescendants(c.id);
-    workflowDialog('编辑分组', `<input class="input" name="name" value="${esc(c.name)}" required><label>父分组<select class="select" name="parent_id"><option value="">顶层</option>${S.collections.filter(v => !descendants.includes(v.id)).map(v => `<option value="${esc(v.id)}" ${v.id === c.parent_id ? 'selected' : ''}>${esc(collectionLabel(v.id))}</option>`).join('')}</select></label>`, async v => { await api('/api/collections/' + c.id, { method: 'PATCH', body: v }); await refreshCollections(); await refreshLibrary(); });
+    workflowDialog('编辑分组', `<label>分组名称<input class="input" name="name" value="${esc(c.name)}" required></label><label>父分组<select class="select" name="parent_id"><option value="">顶层</option>${S.collections.filter(v => !descendants.includes(v.id)).map(v => `<option value="${esc(v.id)}" ${v.id === c.parent_id ? 'selected' : ''}>${esc(collectionLabel(v.id))}</option>`).join('')}</select></label>`, async v => { await api('/api/collections/' + c.id, { method: 'PATCH', body: v }); await refreshCollections(); await refreshLibrary(); });
   });
   $$('[data-delete-group]', d).forEach(b => b.onclick = async () => {
     if (!confirm('删除此分组？文献会保留在未分组中。')) return;
@@ -1125,15 +1175,58 @@ $('#recommendForm').onsubmit = recommendPapers;
 $('#btnExportAll').onclick = () => downloadApi('/api/deliverables-archive', 'litprism-deliverables.zip').catch(e => toast(e.message, true));
 $('#btnMovePapers').onclick = () => {
   if (!S.selectedPapers.size) return toast('请先勾选文献');
-  workflowDialog('移动到分组', `<select class="select" name="collection_id"><option value="">未分组</option>${S.collections.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>`, async values => {
-    for (const pid of S.selectedPapers) await api('/api/paper/' + pid, { method: 'PATCH', body: values });
-    await refreshLibrary();
+  const ids = [...S.selectedPapers];
+  const titles = new Map(ids.map(id => [id, S.papers.find(p=>p.id===id)?.display_title || S.papers.find(p=>p.id===id)?.title || id]));
+  const completed = new Set(), failures = new Map();
+  let running=false, stopped=false, target;
+  const dialog = workflowDialog('移动到分组', `<p>本次选择 ${ids.length} 篇文献。</p><label>目标分组<select class="select" name="collection_id"><option value="">未分组</option>${S.collections.map(c => `<option value="${esc(c.id)}">${esc(collectionLabel(c.id))}</option>`).join('')}</select></label><div data-move-result tabindex="-1" hidden></div>`, async values => {
+    target ??= values.collection_id;
+    running=true; stopped=false; failures.clear();
+    const select = $('[name=collection_id]', dialog), result = $('[data-move-result]', dialog);
+    const cancel = $('footer [data-cancel]', dialog), submit = $('[type=submit]', dialog);
+    select.disabled=true; cancel.textContent='停止后续移动';
+    $$('[data-cancel]', dialog).forEach(b=>{b.disabled=false;});
+    result.hidden=false; result.setAttribute('role','status'); result.textContent='正在移动；停止后续处理不会撤销已完成项。';
+    for (const id of ids.filter(id=>!completed.has(id))) {
+      if (stopped) break;
+      try { await api('/api/paper/'+encodeURIComponent(id),{method:'PATCH',body:{collection_id:target || null}}); completed.add(id); }
+      catch (error) {
+        // A failed response may follow a committed write; reconcile before offering a retry.
+        try {
+          const actual=await api('/api/paper/'+encodeURIComponent(id));
+          if ((actual.paper.collection_id || '')===target) {completed.add(id);continue;}
+        } catch (_) { /* Keep this item unresolved and visible. */ }
+        failures.set(id,error.message);
+      }
+    }
+    let refreshError='';
+    try {
+      await refreshLibrary();
+      if ([...completed].some(id=>(S.papers.find(p=>p.id===id)?.collection_id || '')!==target)) throw new Error('列表尚未同步');
+    } catch (error) { refreshError='移动处理已结束，但列表刷新未完成：'+error.message; }
+    running=false;
+    $$('[data-cancel]', dialog).forEach(b=>{b.disabled=false;}); cancel.textContent='关闭';
+    const pending=ids.filter(id=>!completed.has(id)), unprocessed=pending.filter(id=>!failures.has(id));
+    const summary=`已移动 ${completed.size} / ${ids.length} 篇；未完成 ${pending.length} 篇（失败 ${failures.size}，未处理 ${unprocessed.length}）。`;
+    result.setAttribute('role',pending.length || refreshError ? 'alert' : 'status');
+    result.innerHTML=`<p>${esc(summary)}</p>${stopped ? '<p>已停止后续移动；已完成项不会撤销。</p>' : ''}<ul>${ids.map(id=>`<li>${esc(titles.get(id))}：${completed.has(id)?'已移动':failures.has(id)?'未完成 · '+esc(failures.get(id)):'未处理'}</li>`).join('')}</ul>${refreshError?`<p class="task-error">${esc(refreshError)}</p>`:''}`;
+    submit.textContent=pending.length?'重试未完成项':'刷新列表';
+    if (pending.length || refreshError) {if(dialog.open)result.focus();return false;}
+    toast(summary);
   });
+  const stop = () => {
+    if (!running) {dialog.close();return;}
+    stopped=true;
+    $$('[data-cancel]', dialog).forEach(b=>{b.disabled=true;});
+    $('[data-move-result]', dialog).textContent='正在等待当前移动返回；随后停止，已完成项不会撤销。';
+  };
+  $$('[data-cancel]', dialog).forEach(b=>{b.onclick=stop;});
+  dialog.addEventListener('cancel',event=>{if(running){event.preventDefault();stop();}});
 };
 $('#btnPaperExport').onclick = () => {
   const paperIds = [...S.selectedPapers];
   if (!paperIds.length) return toast('请先勾选文献');
-  workflowDialog('导出文献', `<p class="source-intro">导出本次选择的 ${paperIds.length} 篇文献。仅接受核验可引用的文献。</p><select class="select" name="format"><option value="bibtex">BibTeX</option><option value="ris">RIS</option><option value="json">JSON</option><option value="markdown">Markdown 解读与引用</option></select>`, async values => {
+  workflowDialog('导出文献', `<p class="source-intro">导出本次选择的 ${paperIds.length} 篇文献。仅接受核验可引用的文献。</p><label>导出格式<select class="select" name="format"><option value="bibtex">BibTeX</option><option value="ris">RIS</option><option value="json">JSON</option><option value="markdown">Markdown 解读与引用</option></select></label>`, async values => {
     const extensions = { bibtex: 'bib', ris: 'ris', json: 'json', markdown: 'md' };
     await downloadApi('/api/library/export', 'litprism.' + extensions[values.format], { format: values.format, paper_ids: paperIds });
   }, '下载');
@@ -1141,7 +1234,7 @@ $('#btnPaperExport').onclick = () => {
 document.addEventListener('dragover', e => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });
 document.addEventListener('drop', e => {
   if (!e.dataTransfer?.files.length) return;
-  e.preventDefault(); openView('library'); importFiles([...e.dataTransfer.files]);
+  e.preventDefault(); if (openView('library')) importFiles([...e.dataTransfer.files]);
 });
 refreshCollections().catch(e => toast(e.message, true));
 
