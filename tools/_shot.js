@@ -233,7 +233,22 @@ app.whenReady().then(async () => {
   await sleep(1400);
   await shot('inspector-evidence');
 
-  // 9) 窄屏巡检：390px 下是否有横向溢出、触控目标是否达标
+  // 9) 四套主题：同一页面各出一张，便于横向比较令牌差异
+  await run(`openView('paper', {paperId: ${JSON.stringify(paper)}})`);
+  await sleep(900);
+  for (const id of ['paper', 'paper-dark', 'minimal', 'glass']) {
+    await run(`setTheme(${JSON.stringify(id)})`);
+    await sleep(700);
+    await shot('theme-' + id);
+  }
+  // 主题选择器本身也留一张（设置是弹窗，不是独立页面）
+  await run(`setTheme('paper'); openSettings('general')`);
+  await sleep(900);
+  await shot('theme-picker');
+  await run(`closeSettings()`);
+  await sleep(300);
+
+  // 10) 窄屏巡检：390px 下是否有横向溢出、触控目标是否达标
   await run(`toggleInspector(false)`);
   win.setContentSize(390, 780);
   await sleep(900);

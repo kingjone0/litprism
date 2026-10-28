@@ -3,6 +3,28 @@
    无构建步骤：模板字符串 + 原生 DOM。所有用户内容经 esc() 转义。
    ========================================================================== */
 
+/* 主题注册表必须在 S 之前：S.theme 初始化时会调用 readTheme() */
+const THEMES = [
+  { id: 'paper',      label: '纸张',      palette: 'light', skin: 'paper',
+    desc: '暖中性底 + 深林绿，长时间阅读不刺眼', swatch: ['#f8f7f4', '#ffffff', '#236347'] },
+  { id: 'paper-dark', label: '纸张深色',  palette: 'dark',  skin: 'paper',
+    desc: '同一配色的夜间版本', swatch: ['#141413', '#1c1c1a', '#5ec293'] },
+  { id: 'minimal',    label: '极简深色',  palette: 'dark',  skin: 'minimal',
+    desc: '近黑中性灰 + 冷色强调，Linear / VS Code 风格', swatch: ['#0b0c0f', '#16181c', '#7c8cf8'] },
+  { id: 'glass',      label: '毛玻璃',    palette: 'light', skin: 'glass',
+    desc: '半透明面板 + 背景模糊，macOS / Fluent 风格', swatch: ['#eef2f8', '#ffffff', '#0f6b4f'] },
+];
+const THEME_IDS = THEMES.map(t => t.id);
+function themeOf(id) {
+  return THEMES.find(t => t.id === id) || THEMES[0];
+}
+/** 旧版本只存 light/dark，读到时迁移一次，避免升级后主题丢失 */
+function readTheme() {
+  const stored = localStorage.getItem('litprism-theme');
+  if (stored === 'light') return 'paper';
+  if (stored === 'dark') return 'paper-dark';
+  return THEME_IDS.includes(stored) ? stored : 'paper';
+}
 const S = {
   status: null,
   papers: [],
@@ -17,7 +39,7 @@ const S = {
   // 顶部只显示「当前这一页」：不累积多个标签，也没有关闭按钮。
   locLabel: '',
   convScope: null,
-  theme: localStorage.getItem('litprism-theme') || 'light',
+  theme: readTheme(),
   inspector: localStorage.getItem('litprism-evidence-panel') === '1',
   sidebar: !window.matchMedia('(max-width: 760px)').matches && localStorage.getItem('litprism-sidebar') !== '0',
   inspectorTab: 'sources',
@@ -215,12 +237,30 @@ function badgeOf(level) {
 }
 
 /* ---------------------------------------------------------------- 主题 */
+/**
+ * 主题 = 明暗调色板（palette）+ 风格皮肤（skin），分别落到两个属性上：
+ *   data-theme="light|dark"  供已有的 [data-theme="dark"] 选择器继续生效
+ *   data-skin="paper|minimal|glass"  只覆盖令牌和少数结构
+ * 拆开而不是把四套主题写成一个属性，是为了不重写几百处 dark 选择器。
+ */
 function applyTheme() {
-  document.documentElement.dataset.theme = S.theme;
-  $('#btnTheme').title = S.theme === 'dark' ? '切换为浅色' : '切换为深色';
+  const t = themeOf(S.theme);
+  document.documentElement.dataset.theme = t.palette;
+  document.documentElement.dataset.skin = t.skin;
+  const next = themeOf(THEME_IDS[(THEME_IDS.indexOf(t.id) + 1) % THEME_IDS.length]);
+  const btn = $('#btnTheme');
+  if (btn) btn.title = `当前：${t.label}。点击切换为${next.label}`;
   // 外壳的窗口控件（最小化/最大化/关闭）叠在顶栏右上角，颜色必须跟着主题走
-  window.litShell?.setTitleBarTheme?.(S.theme);
+  window.litShell?.setTitleBarTheme?.(t.id);
   document.body.classList.toggle('is-electron', Boolean(window.litShell));
+}
+/** 设置页与顶栏共用：写存储 → 应用 → 就地刷新设置页 */
+function setTheme(id) {
+  if (!THEME_IDS.includes(id)) return;
+  S.theme = id;
+  localStorage.setItem('litprism-theme', id);
+  applyTheme();
+  if (S.activeView === 'settings') loadSettings();
 }
 function applyInspector() {
   $('#main').classList.toggle('inspector-hidden', !S.inspector);
@@ -1907,12 +1947,9 @@ async function renderSettingsPane(key) {
   if (saveBtn) saveBtn.onclick = () => saveSettingsPane(key);
 
   if (key === 'general') {
-    const sel = $('#setTheme');
-    if (sel) sel.onchange = () => {
-      S.theme = sel.value;
-      localStorage.setItem('litprism-theme', S.theme);
-      applyTheme();
-    };
+    $$('[data-theme-id]').forEach(card => {
+      card.onclick = () => setTheme(card.dataset.themeId);
+    });
   }
   if (key === 'verify') {
     const b = $('#setGoWhitelist');
@@ -1944,11 +1981,13 @@ function settingsBody(key, c) {
     case 'general':
       return row('数据目录', '知识库、缓存、导出笔记的存放位置。迁移时请先备份。',
           `<div class="mono" style="font-size:11.5px;word-break:break-all">${esc(c.app?.data_dir || '—')}</div>`) +
-        row('主题', '浅色 / 深色。也可点标题栏右上角的 ◐ 切换。',
-          `<select class="select" id="setTheme">
-            <option value="light"${S.theme === 'light' ? ' selected' : ''}>浅色</option>
-            <option value="dark"${S.theme === 'dark' ? ' selected' : ''}>深色</option>
-          </select>`) +
+        row('主题', '四套外观。也可点标题栏右上角的按钮循环切换。',
+          `<div class="theme-grid">${THEMES.map(t => `
+            <button class="theme-card${t.id === S.theme ? ' active' : ''}" data-theme-id="${t.id}" type="button" aria-pressed="${t.id === S.theme}">
+              <span class="theme-swatch" aria-hidden="true">${t.swatch.map(c => `<i style="background:${c}"></i>`).join('')}</span>
+              <span class="theme-name">${esc(t.label)}</span>
+              <span class="theme-desc">${esc(t.desc)}</span>
+            </button>`).join('')}</div>`) +
         row('语言', '界面语言（一期仅简体中文）。', `<input class="input" id="setLanguage" value="简体中文" disabled>`) +
         row('面板布局', '右侧检视面板的显示状态会被记住。',
           `<button class="btn sm" id="btnResetLayout">重置布局</button>`);
@@ -2866,12 +2905,9 @@ function bindGlobal() {
   $('#btnNewConv').onclick = newConversation;
   $('#btnSearch').onclick = () => { if (openView('library')) $('#libSearch').focus(); };
   $('#btnCloseInspector').onclick = () => toggleInspector(false);
-  // 主题
+  // 主题：按注册表顺序循环（四套，见 THEMES）
   $('#btnTheme').onclick = () => {
-    S.theme = S.theme === 'dark' ? 'light' : 'dark';
-    localStorage.setItem('litprism-theme', S.theme);
-    applyTheme();
-    if (S.activeView === 'settings') loadSettings();
+    setTheme(THEME_IDS[(THEME_IDS.indexOf(S.theme) + 1) % THEME_IDS.length]);
   };
 
   // 右侧面板开关

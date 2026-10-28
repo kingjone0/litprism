@@ -4,5 +4,5 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('litShell', {
   platform: process.platform,
-  setTitleBarTheme: theme => ipcRenderer.send('ui:titlebar-theme', theme === 'dark' ? 'dark' : 'light'),
+  setTitleBarTheme: theme => ipcRenderer.send('ui:titlebar-theme', String(theme || 'paper')),
 });

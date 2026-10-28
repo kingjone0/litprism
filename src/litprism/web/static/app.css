@@ -2219,3 +2219,172 @@ details.card .card-body > details > summary {
   color: var(--text-2);
   margin-bottom: 6px;
 }
+
+/* ==========================================================================
+   皮肤（data-skin）
+   data-theme 只管明暗（light / dark），data-skin 管风格（paper / minimal / glass）。
+   两者分开是为了让已有的 [data-theme="dark"] 选择器继续有效，
+   皮肤只覆盖令牌和少数结构，不重写组件。
+   ========================================================================== */
+
+/* ---------------- 极简深色：Linear / VS Code ----------------
+   近黑中性灰 + 单一冷色强调，去掉阴影改用 1px 描边分层，圆角收小。 */
+[data-skin="minimal"] {
+  --bg:            #0b0c0f;
+  --panel:         #121419;
+  --panel-2:       #171a20;
+  --panel-3:       #1e222a;
+  --border:        #232830;
+  --border-strong: #30363f;
+  --text:          #e8eaf0;
+  --text-2:        #a3a9b6;
+  --muted:         #7d8493;
+  --accent:        #7c8cf8;
+  --accent-hover:  #93a1fa;
+  --accent-soft:   #1a1e33;
+  --accent-line:   #2f3657;
+
+  --ok:            #4ade80;
+  --ok-soft:       #10261a;
+  --manual:        #60a5fa;
+  --manual-soft:   #0f1e33;
+  --warn:          #fbbf24;
+  --warn-soft:     #2b2110;
+  --danger:        #f87171;
+  --danger-soft:   #2c1414;
+  --neutral:       #7d8493;
+  --neutral-soft:  #1b1f26;
+
+  --radius-lg: 10px;
+  --radius:    8px;
+  --radius-sm: 6px;
+  --radius-xs: 4px;
+
+  --shadow-xs: none;
+  --shadow-1:  none;
+  --shadow-2:  0 14px 36px rgba(0, 0, 0, .55);
+  --shadow-3:  0 28px 70px rgba(0, 0, 0, .70);
+}
+/* 深色下主按钮文字用深底反色，与 paper 深色保持一致 */
+[data-skin="minimal"] .btn.primary { color: #0b0c0f; box-shadow: none; }
+[data-skin="minimal"] .btn.primary:hover:not(:disabled) { color: #0b0c0f; }
+[data-skin="minimal"] .card { box-shadow: none; }
+[data-skin="minimal"] .side-item.active { background: var(--panel-3); color: var(--text); }
+[data-skin="minimal"] .side-item.active .ico { color: var(--accent); opacity: 1; }
+
+/* ---------------- 毛玻璃：macOS / Fluent ----------------
+   面板半透明 + 背景模糊，底下铺一层柔和色斑提供可模糊的内容。 */
+[data-skin="glass"] {
+  --bg:            #eef2f8;
+  --panel:         rgba(255, 255, 255, .68);
+  --panel-2:       rgba(255, 255, 255, .46);
+  --panel-3:       rgba(255, 255, 255, .30);
+  --border:        rgba(22, 32, 46, .10);
+  --border-strong: rgba(22, 32, 46, .18);
+  --text:          #16202e;
+  --text-2:        #46536b;
+  --muted:         #5f6b83;
+  --accent:        #0f6b4f;
+  --accent-hover:  #0b5640;
+  --accent-soft:   rgba(15, 107, 79, .12);
+  --accent-line:   rgba(15, 107, 79, .28);
+
+  --ok:            #0f6b4f;
+  --ok-soft:       rgba(15, 107, 79, .12);
+  --manual:        #1d4ed8;
+  --manual-soft:   rgba(29, 78, 216, .10);
+  --warn:          #a4550a;
+  --warn-soft:     rgba(180, 83, 9, .12);
+  --danger:        #b3282b;
+  --danger-soft:   rgba(185, 28, 28, .10);
+  --neutral:       #5f6b83;
+  --neutral-soft:  rgba(22, 32, 46, .06);
+
+  --radius-lg: 20px;
+  --radius:    16px;
+  --radius-sm: 12px;
+  --radius-xs: 10px;
+
+  --shadow-xs: 0 1px 3px rgba(31, 45, 71, .06);
+  --shadow-1:  0 6px 20px rgba(31, 45, 71, .08);
+  --shadow-2:  0 16px 44px rgba(31, 45, 71, .14);
+  --shadow-3:  0 32px 80px rgba(31, 45, 71, .22);
+}
+/* 背景色斑：玻璃需要背后有东西可模糊，纯色底看不出质感 */
+[data-skin="glass"] body {
+  background:
+    radial-gradient(1200px 720px at 10% 6%,  #cfe0ff 0%, transparent 62%),
+    radial-gradient(980px 640px at 88% 4%,   #e3d6ff 0%, transparent 64%),
+    radial-gradient(1040px 820px at 78% 94%, #cbf0e2 0%, transparent 62%),
+    radial-gradient(860px 720px at 16% 90%,  #ffe6cf 0%, transparent 64%),
+    #eef2f8;
+  background-attachment: fixed;
+}
+/* 根容器让出底色，否则色斑被盖住 */
+[data-skin="glass"] .app,
+[data-skin="glass"] .work { background: transparent; }
+/* 需要浮起来的表面才做模糊，全站铺满会掉帧 */
+[data-skin="glass"] .titlebar,
+[data-skin="glass"] .sidebar,
+[data-skin="glass"] .inspector,
+[data-skin="glass"] .card,
+[data-skin="glass"] .modal,
+[data-skin="glass"] #chatCompose,
+[data-skin="glass"] .pool-head {
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+}
+[data-skin="glass"] .card { border-color: rgba(255, 255, 255, .70); }
+[data-skin="glass"] .btn { background: rgba(255, 255, 255, .62); }
+[data-skin="glass"] .btn:hover:not(:disabled) { background: rgba(255, 255, 255, .85); }
+[data-skin="glass"] .btn.primary { background: var(--accent); color: #fff; }
+[data-skin="glass"] .btn.primary:hover:not(:disabled) { background: var(--accent-hover); color: #fff; }
+[data-skin="glass"] .titlebar { border-bottom: 1px solid rgba(22, 32, 46, .08); }
+
+/* 系统设置里减弱透明效果时退回不透明，避免低性能设备卡顿 */
+@media (prefers-reduced-transparency: reduce) {
+  [data-skin="glass"] {
+    --panel:   #ffffff;
+    --panel-2: #f7f9fc;
+    --panel-3: #eef2f8;
+  }
+  [data-skin="glass"] .titlebar,
+  [data-skin="glass"] .sidebar,
+  [data-skin="glass"] .inspector,
+  [data-skin="glass"] .card,
+  [data-skin="glass"] .modal,
+  [data-skin="glass"] #chatCompose,
+  [data-skin="glass"] .pool-head { backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+
+/* ---------------- 设置页主题卡 ----------------
+   四张卡塞不进 .setting-control 的 224px 常规列，含主题网格的行改为纵向排布。
+   :has() 不支持时退化为单列（仍可用，只是窄）。 */
+.setting-row:has(.theme-grid) { flex-direction: column; gap: 10px; }
+.setting-row:has(.theme-grid) .setting-control { width: 100%; }
+.theme-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.theme-card:hover { border-color: var(--muted); }
+.theme-card.active { border-color: var(--accent); background: var(--accent-soft); }
+.theme-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-swatch { display: flex; gap: 4px; }
+.theme-swatch i {
+  display: block;
+  flex: 1;
+  height: 24px;
+  border-radius: 5px;
+  border: 1px solid rgba(0, 0, 0, .10);
+}
+.theme-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.theme-desc { font-size: 11.5px; line-height: 1.5; color: var(--muted); }

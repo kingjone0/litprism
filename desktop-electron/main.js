@@ -247,11 +247,15 @@ async function selfTest() {
 
 async function createWindow() {
   const windowState = createWindowState({ statePath: path.join(userDataRoot, 'window-state.json'), screen, log: trace });
-  // 叠层控件与页面顶栏（--panel）同色，避免出现突兀的浅/深色差带
+  // 叠层控件与页面顶栏（--panel）同色，避免出现突兀的浅/深色差带。
+  // 键为前端 THEMES 的主题 id；窗口背景跟随同一张表，切主题时不留色差。
   const TITLEBAR_COLORS = {
-    light: { color: '#ffffff', symbol: '#4a4640' },
-    dark: { color: '#1c1c1a', symbol: '#c7c2b8' },
+    paper:        { color: '#ffffff', symbol: '#4a4640', bg: '#f8f7f4' },
+    'paper-dark': { color: '#1c1c1a', symbol: '#c7c2b8', bg: '#141413' },
+    minimal:      { color: '#121419', symbol: '#a3a9b6', bg: '#0b0c0f' },
+    glass:        { color: '#f4f7fc', symbol: '#46536b', bg: '#eef2f8' },
   };
+  const themeOf = id => TITLEBAR_COLORS[id] || TITLEBAR_COLORS.paper;
 
   win = new BrowserWindow({
     ...windowState.options,
@@ -262,7 +266,7 @@ async function createWindow() {
     // 页面里已经有自绘的工具栏；再叠一条系统标题栏就是两层边框。
     // 用 hidden + overlay：去掉系统标题栏，只把最小化/最大化/关闭叠在右上角。
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: TITLEBAR_COLORS.light.color, symbolColor: TITLEBAR_COLORS.light.symbol, height: 44 },
+    titleBarOverlay: { color: themeOf('paper').color, symbolColor: themeOf('paper').symbol, height: 44 },
     webPreferences: {
       // 页面由本地后台提供，不需要任何 Node 能力 —— 只加一个主题通道
       nodeIntegration: false,
@@ -276,10 +280,10 @@ async function createWindow() {
 
   ipcMain.on('ui:titlebar-theme', (_event, theme) => {
     if (!win || win.isDestroyed()) return;
-    const palette = TITLEBAR_COLORS[theme] || TITLEBAR_COLORS.light;
+    const palette = themeOf(String(theme || 'paper'));
     try {
       win.setTitleBarOverlay({ color: palette.color, symbolColor: palette.symbol, height: 44 });
-      win.setBackgroundColor(theme === 'dark' ? '#141413' : '#f8f7f4');
+      win.setBackgroundColor(palette.bg);
     } catch {
       // 老版本 Electron 不支持动态更换叠层颜色：保持初始配色即可
     }
