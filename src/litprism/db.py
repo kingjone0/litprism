@@ -278,6 +278,53 @@ class KnowledgeBase:
         vals.append(limit)
         return [self._row_to_paper(r) for r in self._con.execute(sql, vals).fetchall()]
 
+    def paper_catalog(self) -> list[dict]:
+        """Complete lightweight identity index for scopes and management selectors."""
+        rows = self._con.execute(
+            'SELECT id,title,display_title,authors,year,collection_id,verify_level,material_level,'
+            + self._paper_material_projection() + ' '
+            'FROM papers WHERE deleted_at IS NULL ORDER BY created_at DESC,rowid DESC').fetchall()
+        return [dict(r, authors=_j(r['authors'], [])) for r in rows]
+
+    def paper_page(self, *, status=None, query=None, collection_id=None, limit=300, offset=0):
+        conds, vals = ['deleted_at IS NULL'], []
+        if status:
+            conds.append('verify_status=?')
+            vals.append(status)
+        if query:
+            # User search is literal, including % and _, and includes renamed titles/authors.
+            value = str(query).replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            conds.append('(' + ' OR '.join(f"{field} LIKE ? ESCAPE '\\'" for field in
+                                         ('title', 'display_title', 'authors', 'abstract', 'tags')) + ')')
+            vals.extend(['%' + value + '%'] * 5)
+        if collection_id:
+            from .scope import collection_ids
+            ids = collection_ids(self, collection_id)
+            conds.append('collection_id IN (' + ','.join('?' for _ in ids) + ')')
+            vals.extend(ids)
+        where = ' WHERE ' + ' AND '.join(conds)
+        # Serialize these reads with writes through the application's shared connection.
+        with self.tx() as con:
+            total = con.execute('SELECT COUNT(*) FROM papers' + where, vals).fetchone()[0]
+            columns = ','.join(r[1] for r in con.execute('PRAGMA table_info(papers)') if r[1] != 'full_text')
+            rows = con.execute('SELECT ' + columns + ',' + self._paper_material_projection() + ' FROM papers' + where +
+                               ' ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?',
+                               [*vals, limit, offset]).fetchall()
+        items = [self._row_to_paper(r) for r in rows]
+        for item in items:
+            item.pop('full_text', None)
+        return {'items': items, 'count': len(items), 'total': total, 'offset': offset,
+                'has_more': offset + len(items) < total}
+
+    @staticmethod
+    def _paper_material_projection():
+        return ("COALESCE((SELECT m.level FROM materials m WHERE m.id=papers.current_material_id),"
+                "material_level) AS current_material_level,"
+                "CASE WHEN EXISTS (SELECT 1 FROM analyses a WHERE a.paper_id=papers.id "
+                "AND a.material_id=papers.current_material_id) THEN 'current' "
+                "WHEN EXISTS (SELECT 1 FROM analyses a WHERE a.paper_id=papers.id) THEN 'historical' "
+                "ELSE 'none' END AS analysis_state")
+
     def rename_paper(self, paper_id: str, display_title: str) -> bool:
         """改**显示名**。
 
@@ -645,13 +692,19 @@ class KnowledgeBase:
         return cid
 
     @_locked
-    def list_conversations(self, limit: int = 100, query: str = '') -> list[dict]:
+    def list_conversations(self, limit: int = 100, query: str = '', offset: int = 0) -> list[dict]:
         rows = self._con.execute(
             "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count"
-            " FROM conversations c WHERE (?='' OR c.title LIKE ? OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=c.id AND m.content LIKE ?)) ORDER BY c.pinned DESC, c.updated_at DESC, c.rowid DESC LIMIT ?",
-            (query, '%'+query+'%', '%'+query+'%', limit),
+            " FROM conversations c WHERE (?='' OR c.title LIKE ? OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=c.id AND m.content LIKE ?)) ORDER BY c.pinned DESC, c.updated_at DESC, c.rowid DESC LIMIT ? OFFSET ?",
+            (query, '%'+query+'%', '%'+query+'%', limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def count_conversations(self, query: str = '') -> int:
+        return self._con.execute(
+            "SELECT COUNT(*) FROM conversations c WHERE (?='' OR c.title LIKE ? OR EXISTS "
+            "(SELECT 1 FROM messages m WHERE m.conversation_id=c.id AND m.content LIKE ?))",
+            (query, '%'+query+'%', '%'+query+'%')).fetchone()[0]
 
     def delete_conversation(self, conversation_id: str) -> bool:
         """删除会话及全部关联数据。

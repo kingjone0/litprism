@@ -111,6 +111,11 @@
           <div class="card library-card">
             <div class="list" id="paperList"></div>
           </div>
+          <nav id="libraryPager" class="row wrap library-pagination" aria-label="文献分页" hidden>
+            <span id="libraryPageInfo" role="status"></span>
+            <button class="btn sm" id="libraryPrevious" type="button">上一页</button>
+            <button class="btn sm" id="libraryNext" type="button">下一页</button>
+          </nav>
         </section>
 
         <section class="pane" data-pane="paper">
@@ -294,6 +299,7 @@
 
 <script src="/static/lit-ui.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/chat-stream.js"></script>
 <script src="/static/workflows.js"></script>
 <script src="/static/backup-ui.js"></script>
 </body>

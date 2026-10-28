@@ -16,6 +16,28 @@ def content_hash(chunks):
     return hashlib.sha256(json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
 
 
+def reading_status(kb, paper):
+    """Describe the current indexed material, without claiming PDF completeness."""
+    with kb._tx_lock:
+        current = next((m for m in kb.list_materials(paper['id'])
+                        if m['id'] == paper.get('current_material_id')), None)
+        level = (current or {}).get('level') or paper.get('material_level') or 'unknown'
+        labels = {'metadata': '仅题录', 'abstract': '摘要', 'partial': '部分正文',
+                  'fulltext': '已解析正文', 'unknown': '完整度未知'}
+        if level not in labels:
+            level = 'unknown'
+        chunks = kb.get_chunks(paper['id'])
+        chars = sum(len(c['text']) for c in chunks)
+        reason = None
+        if paper.get('verify_level') not in ('verified', 'manual_confirmed'):
+            reason = '请先完成文献真实性核验或人工确认。'
+        elif chars < 150:
+            reason = '当前可用文本过少，请先补充摘要或正文；扫描件需有可解析文本。'
+        return {'material_id': paper.get('current_material_id'), 'level': level, 'label': labels[level],
+                'chunks': len(chunks), 'indexed_chars': chars, 'ready': reason is None, 'reason': reason,
+                'has_analysis': bool(kb.get_analysis(paper['id']))}
+
+
 def migrate(conn):
     """v12 is atomic; a failed backfill rolls back columns and data together."""
     previous_factory = conn.row_factory

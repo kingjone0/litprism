@@ -556,7 +556,17 @@ def patch_config(path: str | Path, patch: dict[str, Any]) -> dict[str, Any]:
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    tmp.replace(p)
+    # Windows may briefly deny replacing a file held by a reader or indexer.
+    # Bound the wait and propagate persistent/access-policy failures unchanged.
+    for attempt in range(4):
+        try:
+            tmp.replace(p)
+            break
+        except PermissionError as exc:
+            if getattr(exc, 'winerror', None) not in (5, 32) or attempt == 3:
+                raise
+            import time
+            time.sleep(.02 * (2 ** attempt))
     return raw
 
 

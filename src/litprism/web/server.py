@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -145,11 +145,19 @@ def create_app(cfg: Config) -> FastAPI:
         return {"ok": True, "config": config_to_dict(cfg), "warnings": warnings}
 
     @app.get("/api/papers")
-    def papers(status_filter: str | None = None, q: str | None = None, limit: int = 300):
-        items = kb.list_papers(status=status_filter, query=q, limit=limit)
-        for p in items:
-            p.pop("full_text", None)
-        return {"items": items, "count": len(items)}
+    def papers(status_filter: str | None = None, q: str | None = None,
+               limit: int = Query(300, ge=1, le=2000), offset: int = Query(0, ge=0),
+               collection_id: str | None = None):
+        try:
+            return kb.paper_page(status=status_filter, query=q, collection_id=collection_id,
+                                 limit=limit, offset=offset)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get('/api/papers/catalog')
+    def paper_catalog():
+        items = kb.paper_catalog()
+        return {'items': items, 'count': len(items)}
 
     @app.patch("/api/paper/{paper_id}")
     def rename_paper(paper_id: str, req: dict):
@@ -221,8 +229,10 @@ def create_app(cfg: Config) -> FastAPI:
             p.pop("full_text", None)
             from ..candidate_snapshots import pending
             candidate = pending(kb, p['id'], analysis) if not version_id else None
+            from ..materials import reading_status
             return {
                 "paper": p,
+                'reading': reading_status(kb, p),
                 "analysis": payload,
                 'candidate_analysis': (candidate or {}).get('payload'),
                 "markdown": format_analysis(p, payload) if payload else "",
@@ -418,8 +428,11 @@ def create_app(cfg: Config) -> FastAPI:
 
     # ---------------------------------------------------------------- 会话
     @app.get("/api/conversations")
-    def conversations(limit: int = 100, q: str = ''):
-        return {"items": kb.list_conversations(limit=limit, query=q)}
+    def conversations(limit: int = Query(100, ge=1, le=2000), q: str = '', offset: int = Query(0, ge=0)):
+        with kb.tx():
+            items = kb.list_conversations(limit=limit, query=q, offset=offset)
+            total = kb.count_conversations(q)
+        return {'items': items, 'total': total, 'offset': offset, 'has_more': offset + len(items) < total}
 
     @app.post("/api/conversations")
     def create_conversation(req: dict):

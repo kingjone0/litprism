@@ -43,8 +43,7 @@ htmlcov/
 .mypy_cache/
 tools/_ocr_out/
 
-# ---- Tauri / 前端构建产物（阶段 F 用）----
-# Tauri 工程已删除（2026-10-19）；前端镜像目录与 sidecar 副本是 packaging/ 脚本生成的，不入库
+# ---- 桌面依赖与运行日志 ----
 node_modules/
 *.log
 

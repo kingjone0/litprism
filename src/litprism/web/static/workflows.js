@@ -49,35 +49,24 @@ async function startDurableChat(convId, request) {
   const receipt = await api('/api/conversations/'+encodeURIComponent(convId)+'/chat-runs', {method:'POST', body:pending});
   sessionStorage.removeItem(key);
   await refreshChatRuns(convId);
-  return waitChatRun(receipt.run_id);
+  return waitChatRun(receipt.run_id,convId);
 }
 
-async function waitChatRun(rid) {
-  const card = document.createElement('div');
-  card.className = 'task-progress';
-  card.innerHTML = '<span role="status">正在读取已保存的请求…</span><button class="btn sm">取消后续处理</button>';
-  document.body.appendChild(card);
-  let current;
-  const label = $('span', card), button = $('button', card);
-  button.onclick = async () => {
-    if (!current?.task_id || !current.active) return;
-    button.disabled = true;
-    try { await api('/api/tasks/'+current.task_id+'/cancel', {method:'POST'}); label.textContent = '等待当前调用返回；响应和费用记录将保留。'; }
-    catch (e) { label.textContent = e.message; button.disabled = false; }
-  };
-  try {
+async function waitChatRun(rid,convId = S.activeConv) {
+  observeChatStream(rid,convId);
     for (;;) {
-      current = await api('/api/chat-runs/'+encodeURIComponent(rid));
-      if (current.status === 'completed') return await api('/api/chat-runs/'+encodeURIComponent(rid)+'/result');
+      const current = await api('/api/chat-runs/'+encodeURIComponent(rid));
+      if (current.status === 'completed') {
+        clearChatStream(rid);
+        return await api('/api/chat-runs/'+encodeURIComponent(rid)+'/result');
+      }
       if (!current.active && !['queued','running'].includes(current.status)) {
         const error = new Error(current.stop_reason || '请求已停止，可在本轮请求记录中继续检查。');
         error.cancelled = current.status === 'cancelled';
         throw error;
       }
-      label.textContent = `${current.calls.length ? '已登记调用，等待保存响应' : '等待执行'} · 可重新打开会话查看记录`;
       await new Promise(resolve => setTimeout(resolve, 400));
     }
-  } finally { card.remove(); }
 }
 
 async function refreshChatRuns(convId) {
@@ -97,16 +86,20 @@ async function refreshChatRuns(convId) {
   try {
     const d = await api('/api/conversations/'+encodeURIComponent(convId)+'/chat-runs');
     if (!panel.isConnected || S.activeConv !== convId || S.activeView !== 'chat') return;
+    const latest=d.items[0];
+    const live=d.items.find(r=>r.active) || (latest&&!['completed','stale'].includes(latest.status) ? latest : null);
+    if(live)observeChatStream(live.id,convId);
     const labels = {queued:'待执行', running:'执行中', completed:'结果已保存', interrupted:'执行已中断',
       needs_retry:'需确认重试', failed:'调用或发布失败', cancelled:'已停止', stale:'依据已变化'};
     const incomplete = d.items.filter(r => r.status !== 'completed');
+    const attention = incomplete.filter(r=>!r.active);
     S.chatActiveRunning = d.items.some(r => r.active);
     if ($('#btnSend')) $('#btnSend').disabled = S.sending || S.chatActiveRunning || !!S.modelSwitch || modelReadBlocksSend();
-    panel.innerHTML = `<summary>本轮请求记录 · ${incomplete.length ? incomplete.length+' 项未发布' : '结果已保存'}</summary>
+    panel.innerHTML = `<summary>本轮请求记录 · ${S.chatActiveRunning ? '生成中' : incomplete.length ? incomplete.length+' 项未发布' : '结果已保存'}</summary>
       <div class="chat-run-list">${d.items.map(r => `<section class="chat-run-item"><strong>${esc(r.question)}</strong>
         <p class="source-intro">${esc(labels[r.status] || r.status)} · ${r.usage.calls} 次模型调用 · ${fmtNum(r.usage.input+r.usage.output)} 已报告 token${r.usage.unknown_usage_calls ? ' · '+r.usage.unknown_usage_calls+' 次用量未知' : ''}</p>
         ${r.stop_reason ? `<p>${esc(r.stop_reason)}</p>` : ''}
-        ${r.retry_required ? '<p class="source-intro">重试可能再次计费。已保存且完全匹配的响应会复用，旧失败记录保留。</p>' : ''}
+        ${r.retry_required && !r.active ? '<p class="source-intro">重试可能再次计费。已保存且完全匹配的响应会复用，旧失败记录保留。</p>' : ''}
         <div class="row wrap">${r.status === 'completed' ? `<button class="btn sm" data-chat-result="${esc(r.id)}">查看已存结果</button>` :
           r.status === 'stale' ? '<span class="source-intro">请依据当前材料重新提问。</span>' :
           `<button class="btn sm" data-chat-resume="${esc(r.id)}" data-retry="${r.retry_required}" data-active="${r.active}">${r.active ? '跟进当前请求' : r.retry_required ? '重新请求（可能再次计费）' : '继续处理已存请求'}</button>`}
@@ -115,11 +108,11 @@ async function refreshChatRuns(convId) {
       </section>`).join('') || '<p>尚无持久请求；旧消息不自动补建调用记录。</p>'}</div><p class="task-error" role="alert"></p>`;
     panel.hidden = !d.items.length;
     const view = S.chatRunViews.get(convId) || { manualOpen: null, attentionKey: '' };
-    const attentionKey = incomplete.map(r => r.id + ':' + r.status).join('|');
+    const attentionKey = attention.map(r => r.id + ':' + r.status).join('|');
     if (attentionKey && attentionKey !== view.attentionKey && view.manualOpen === false) view.manualOpen = null;
     view.attentionKey = attentionKey;
     S.chatRunViews.set(convId, view);
-    panel.open = view.manualOpen ?? Boolean(incomplete.length);
+    panel.open = view.manualOpen ?? Boolean(attention.length);
     $$('[data-chat-result]', panel).forEach(b => b.onclick = async () => {
       b.disabled = true;
       try {
@@ -141,7 +134,7 @@ async function refreshChatRuns(convId) {
       try {
         if (b.dataset.active !== 'true') await api('/api/chat-runs/'+b.dataset.chatResume+'/resume', {
           method:'POST', body:{retry_failed:b.dataset.retry === 'true'}});
-        await waitChatRun(b.dataset.chatResume);
+        await waitChatRun(b.dataset.chatResume,convId);
         if (S.activeConv === convId && S.activeView === 'chat') await loadChat();
       } catch (e) {
         if (S.activeConv === convId && S.activeView === 'chat') {
@@ -191,7 +184,7 @@ function workflowDialog(title, body, submit, action = '确定') {
       message.textContent = error.message;
       if (dialog.open) message.focus();
     }
-    finally { button.disabled = false; }
+    finally { button.disabled = button.hidden; }
   };
   dialog.showModal();
   return dialog;
@@ -200,31 +193,48 @@ function workflowDialog(title, body, submit, action = '确定') {
 const analysisStages = { extract: '原文提取', concepts: '术语提取', semantic_review: '逐项复核', semantic_cross_review: '跨批核对' };
 const analysisRunStatuses = { queued: '等待执行', running: '正在执行或上次中断', paused_budget: '旧版预算暂停', needs_retry: '需确认重试', cancelled: '已取消', partial: '仍有待审项', completed: '机器复核通过', failed: '运行失败', stale: '版本已变化' };
 
+function paperMaterialLabel(level) {
+  return {metadata:'仅题录',abstract:'摘要',partial:'部分正文',fulltext:'已解析正文'}[level] || '完整度未知';
+}
+
+function readingMaterialSummary(prepared) {
+  const note = {
+    metadata:'仅有题录信息，不能视为已取得论文正文。',
+    abstract:'本次仅依据已保存的摘要，不代表已阅读论文全文。',
+    partial:'本次仅依据已保存的部分正文。',
+    fulltext:'本次使用已解析正文，不保证原文件的每页、表格或公式均已完整解析。',
+  }[prepared.level] || '材料完整度未知，本次只依据当前已索引文本。';
+  return `<p class="reading-material"><strong>本次材料：${esc(prepared.label)}</strong> · ${fmtNum(prepared.chunks)} 个分块</p><p class="source-intro">${esc(note)}</p>`;
+}
+
 async function loadAnalysisRuns(pid) {
   const box = $('#analysisRuns');
   if (!box) return;
   try {
     const { items } = await api('/api/paper/'+encodeURIComponent(pid)+'/analysis-runs');
-    if (S.activePaper !== pid || $('#analysisRuns') !== box) return;
-    box.innerHTML = `<details class="run-log" ${items.length ? 'open' : ''}><summary>分阶段运行记录（${items.length}${items.length === 30 ? '，最近' : ''}）</summary>
+    if (S.activeView !== 'paper' || S.activePaper !== pid || $('#analysisRuns') !== box) return;
+    const entry = $('#btnReanalyze');
+    if (entry) {
+      entry.dataset.readingLabel ||= entry.textContent;
+      entry.textContent=items.some(run=>run.active) ? '查看解读进度' : entry.dataset.readingLabel;
+    }
+    box.innerHTML = `<details class="run-log" ${items.length ? 'open' : ''}><summary>解读运行记录（${items.length}${items.length === 30 ? '，最近' : ''}）</summary>
       <p class="source-intro">暂停时保留原解读。刷新或重新打开应用不会自动恢复调用。机器复核通过仍不等于人工确认。</p>
       <button class="btn sm" data-refresh-runs>刷新记录</button>
       ${items.map(run => `<div class="analysis-run" data-run-id="${esc(run.id)}">
         <div class="row wrap"><strong>${esc(analysisRunStatuses[run.status] || run.status)}</strong><span class="source-intro">${esc(run.model)} · ${esc(run.updated_at)}</span>
-        ${!['completed', 'stale'].includes(run.status) ? `<button class="btn sm" data-resume-run="${esc(run.id)}">检查并恢复</button>` : ''}</div>
-        ${run.capability_missing ? `<p class="lui-degraded">本次未解析到模型能力（${run.capability_missing === 'no_active_model' ? '未选择模型' : '未成功刷新模型目录'}），按配置的固定额度运行。</p>` : ''}
+        ${run.active || !['completed', 'stale'].includes(run.status) ? `<button class="btn sm" data-resume-run="${esc(run.id)}">${run.active ? '查看进度' : '检查并恢复'}</button>` : ''}</div>
         ${run.capability_missing ? `<p class="lui-degraded">本次未解析到模型能力（${run.capability_missing === 'no_active_model' ? '未选择模型' : '未成功刷新模型目录'}），按配置的固定额度运行。</p>` : ''}
         <p class="source-intro">${Object.entries(analysisStages).filter(([key]) => key !== 'concepts' || run.with_concepts).map(([key, label]) => `${label} ${run.spent[key]} 次`).join(' · ')}（已用调用次数）</p>
         ${(run.steps || []).some(s => s.request_settings?.max_tokens) ? `<details><summary>各次请求的实际输出额度</summary>${run.steps.filter(s => s.request_settings?.max_tokens).map(s => `<p class="source-intro">${esc(analysisStages[s.task] || s.task)} · 第 ${s.step} 步 / 尝试 ${s.attempt} · ${s.request_settings.output_mode === 'automatic' ? '自动分配' : '历史固定额度'} ${fmtNum(s.request_settings.max_tokens)} token${s.request_settings.estimated_input_tokens == null ? '' : ` · 输入估算 ${fmtNum(s.request_settings.estimated_input_tokens)}`}</p>`).join('')}</details>` : ''}
         <p class="source-intro">已报告用量：输入 ${run.usage.input} / 输出 ${run.usage.output} token；${run.usage.unknown_usage_calls} 次用量未知。${esc(run.stop_reason || '')}</p>
         ${run.candidate_count ? `<p class="source-intro">已保留 ${fmtNum(run.candidate_count)} 条提取候选；机器复核未完成也可在候选列表核对原文并人工审核。</p>` : ''}
-      </div>`).join('') || '<p class="source-intro">尚无分阶段记录。可用上方“分阶段解读”开始；阶段调用上限已取消，按内容与窗口自动分批。</p>'}</details>`;
+      </div>`).join('') || '<p class="source-intro">尚无解读记录。使用上方“解读论文”开始。</p>'}</details>`;
     $('[data-refresh-runs]', box).onclick = () => loadAnalysisRuns(pid);
     $$('[data-resume-run]', box).forEach(button => button.onclick = async () => {
       button.disabled = true;
       try {
-        const run = await api('/api/analysis-runs/'+encodeURIComponent(button.dataset.resumeRun));
-        analysisRunDialog(pid, run);
+        await analysisRunDialog(pid, {id:button.dataset.resumeRun});
       } catch (error) { toast(error.message, true); }
       finally { button.disabled = false; }
     });
@@ -237,8 +247,22 @@ async function loadAnalysisRuns(pid) {
   }
 }
 
-function analysisRunDialog(pid, run = null) {
-  workflowDialog(run ? '检查并恢复解读' : '分阶段解读', `<p class="source-intro">阶段调用上限已取消：批次数由原文内容与模型窗口决定，不再填写请求次数。精确匹配的成功请求直接复用，不再发送。</p>
+let analysisDialogRequest = 0;
+async function analysisRunDialog(pid, run = null) {
+  const request = ++analysisDialogRequest, revision = S.viewRevision;
+  const current = () => request === analysisDialogRequest && revision === S.viewRevision && S.activeView === 'paper' && S.activePaper === pid;
+  const entry = $('#btnReanalyze');
+  if (entry) entry.disabled = true;
+  try {
+  const prepared = await api('/api/paper/'+encodeURIComponent(pid)+'/reading');
+  run = run ? await api('/api/analysis-runs/'+encodeURIComponent(run.id)) : prepared.active_run;
+  if (!current()) return;
+  const title = run ? (run.active ? '查看解读进度' : '检查并恢复解读') : (prepared.has_analysis ? '重新解读' : '解读论文');
+  let receipt;
+  const dialog = workflowDialog(title, `${readingMaterialSummary(prepared)}
+    ${!prepared.ready ? `<p class="task-error">${esc(prepared.reason)}</p>` : ''}
+    ${!run && prepared.has_analysis ? '<p class="source-intro">将新建一次解读。完成发布前保留原分析；新的模型请求会产生用量。</p>' : ''}
+    ${run ? '<p class="source-intro">复用本次运行中精确匹配的成功响应；失败或结果未知的请求需明确允许重试。</p>' : ''}
     ${run ? `<p class="source-intro">已用调用：${Object.entries(run.spent).map(([k, v]) => `${analysisStages[k] || k} ${v} 次`).join(' · ')}</p>` : ''}
     ${run ? `<p class="source-intro">术语提取：${run.with_concepts ? '启用' : '关闭'}；机器复核：${run.semantic_review ? '启用' : '按设置跳过'}。恢复前核对原文、模型、协议、参数和分析版本。${esc(run.stop_reason || '')}</p>`
       : `<label><input type="checkbox" name="with_concepts" checked> 同时提取术语</label>
@@ -250,15 +274,46 @@ function analysisRunDialog(pid, run = null) {
         body.with_concepts = values.with_concepts === 'on';
         body.semantic_review = values.semantic_review === 'on';
       }
+      body.material_id = prepared.material_id;
       const endpoint = run ? '/api/analysis-runs/'+encodeURIComponent(run.id)+'/resume' : '/api/paper/'+encodeURIComponent(pid)+'/analysis-runs';
-      const started = await api(endpoint, { method: 'POST', body });
       try {
-        const result = await waitTask(started.task_id);
-        toast(analysisRunStatuses[result.status] || result.status, ['failed', 'stale', 'needs_retry'].includes(result.status));
-      } finally {
-        if (S.activePaper === pid) await loadPaperDetail();
+        receipt = run?.active ? {run_id:run.id,task_id:run.task_id} : await api(endpoint, { method: 'POST', body });
+      } catch (error) {
+        // A lost start receipt may already have created a paid run. Do not offer blind resubmission.
+        $('[type=submit]', dialog).hidden = true;
+        $('[type=submit]', dialog).disabled = true;
+        const inspect = document.createElement('button'); inspect.type='button'; inspect.className='btn'; inspect.textContent='查看运行记录';
+        inspect.onclick=()=>{dialog.close();if(current())loadPaperDetail();};
+        $('.task-body',dialog).append(inspect);
+        throw new Error(error.message+' 请先查看运行记录，再决定恢复或新建。');
       }
-    }, run ? '检查并恢复' : '开始解读');
+      try {
+        if (current()) await loadAnalysisRuns(pid);
+        const result = await waitTask(receipt.task_id);
+        toast(analysisRunStatuses[result.status] || result.status, ['failed', 'stale', 'needs_retry'].includes(result.status));
+      } catch (error) {
+        if (current()) {
+          await loadPaperDetail();
+          const stopped = await analysisRunDialog(pid, {id:receipt.run_id});
+          if (stopped) $('.task-error',stopped).textContent=error.message;
+        }
+        return false;
+      } finally {
+        if (current()) await loadPaperDetail();
+      }
+    }, run ? (run.active ? '查看进度' : '检查并恢复') : (prepared.has_analysis ? '重新解读' : '开始解读'));
+  if (!prepared.ready && !run?.active) $('[type=submit]',dialog).disabled=true;
+  if (!run) {
+    const actions=document.createElement('div');actions.className='row wrap';
+    actions.innerHTML='<button class="btn sm" type="button" data-reading-text>查看当前材料</button><button class="btn sm" type="button" data-reading-import>导入本地材料</button>';
+    $('.task-body',dialog).append(actions);
+    $('[data-reading-text]',actions).onclick=()=>{dialog.close();if(current())$('[data-ptab=text]').click();};
+    $('[data-reading-import]',actions).onclick=()=>{dialog.close();if(current()&&openView('library'))$('#importFiles').click();};
+  }
+  return dialog;
+  } catch (error) {
+    if (current()) toast(error.message,true);
+  } finally { if (entry?.isConnected) entry.disabled=false; }
 }
 
 async function downloadApi(path, filename, body) {

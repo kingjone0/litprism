@@ -1,23 +1,18 @@
-"""Tauri sidecar 入口。
+"""Electron sidecar 入口。
 
-外壳（Tauri/Rust）与本进程的握手协议::
+外壳与本进程的握手协议::
 
     1. 外壳以子进程方式启动本程序（可带 --port 指定端口）；
     2. 本程序完成初始化后向 **stdout** 打一行握手：
 
            LITPRISM_READY {"port": 8766, "token": "<一次性随机串>", "pid": 1234}
 
-    3. 外壳读取该行，把 port 与 token 注入前端（``window.__LITPRISM__``）；
+    3. 外壳读取该行，加载同源页面 ``http://127.0.0.1:<port>/#t=<token>``；
     4. 前端所有 /api 请求带 ``X-LitPrism-Token`` 头。
 
 为什么需要 token：端口在 127.0.0.1 上，本机的其他进程也能访问。
-一次性 token 保证「只有通过外壳启动的前端」能用这套 API ——
-这是本地单机应用的最小访问控制。
-
-为什么还要 CORS：Tauri 的 webview 页面 origin 是 ``tauri://localhost`` /
-``http(s)://tauri.localhost``，而 API 在 ``http://127.0.0.1:<port>`` —— 属跨源。
-**CORS 只在有 token 的外壳模式开启**：裸 ``run.py serve`` 模式没有 token，
-若也放开 CORS，任意网页都能读走本地知识库。
+持有本次 token 的请求才可访问数据，这是本地单机应用的最小访问控制。
+Electron 直接加载后台提供的同源页面，不需要跨源放行。
 
 握手行之前、之后的 stdout 内容（uvicorn 日志等）外壳都会忽略。
 """
@@ -31,22 +26,10 @@ import secrets
 import sys
 
 
-# Tauri v2 webview 的 origin：Windows 用 http，其他平台用自定义协议
-TAURI_ORIGINS = (
-    "http://tauri.localhost",
-    "https://tauri.localhost",
-    "tauri://localhost",
-)
-
-
 def harden(app, token: str | None) -> None:  # noqa: ANN001
-    """给应用装上「token 守卫 + 外壳专用 CORS」。
+    """给同源应用装上 token 守卫，不授予跨源读取权限。
 
-    **中间件顺序很关键**：Starlette 里后 add 的在更外层。
-    预检请求（OPTIONS）不带 token，必须由 CORS 先接住并直接应答，
-    否则浏览器拿不到 200 就不会发真正的请求。
-
-    ``token`` 为空表示不设防（等价于裸 serve 模式），此时也不开 CORS。
+    ``token`` 为空表示不设防（等价于裸 serve 模式）。
     """
     if not token:
         return
@@ -65,18 +48,6 @@ def harden(app, token: str | None) -> None:  # noqa: ANN001
         if provided != token:
             return JSONResponse(status_code=401, content={"error": "无效的访问令牌"})
         return await call_next(request)
-
-    # 后 add → 更外层：预检在 token 守卫之前被接住
-    from starlette.middleware.cors import CORSMiddleware
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=list(TAURI_ORIGINS),
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "X-LitPrism-Token"],
-        max_age=600,
-    )
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="litprism-sidecar")

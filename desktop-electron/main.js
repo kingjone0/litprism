@@ -1,7 +1,7 @@
 /**
  * 文献棱镜 LitPrism · Electron 外壳
  *
- * 与 Tauri 版做同一件事，但刻意走最简单的路径：
+ * 桌面启动路径：
  *   起 Python sidecar → 读 stdout 握手行 → 窗口 loadURL(它自己的页面)
  *
  * 为什么这么设计：Python 侧本来就用 FastAPI 提供整套 UI 和 API（`run.py serve`），
@@ -36,8 +36,7 @@ const HANDSHAKE = 'LITPRISM_READY ';
 const STARTUP_TIMEOUT_MS = 120000;
 
 // 本机实测：Chromium 的 GPU 进程反复以 0xC0000005（访问违例）崩溃，
-// 最终 FATAL「GPU process isn't usable」→ 窗口全白。Tauri/WebView2 同样症状，
-// 因为底子是同一个 Chromium。这里彻底关掉 GPU 与 GPU 沙箱。
+// 最终 FATAL「GPU process isn't usable」→ 窗口全白。这里彻底关掉 GPU 与 GPU 沙箱。
 // 这个应用是纯文本界面，不需要 GPU。
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-gpu-compositing');

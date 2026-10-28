@@ -44,6 +44,10 @@ const path = require('node:path');
     await expect(page.locator('#researchTask')).toHaveCount(0);
     await page.locator('#collectionFilter').selectOption(group);
     await expect(page.locator('#paperList .list-item')).toHaveCount(2);
+    // A new filter clears the previous selection; choose the visible comparison inputs explicitly.
+    await expect(page.locator('#btnCompareSelected')).toBeDisabled();
+    await page.locator('[data-select-paper]').nth(0).check();
+    await page.locator('[data-select-paper]').nth(1).check();
 
     // 对比 → 保存 → 预览 → 下载归档，均走真实守卫。
     await page.locator('#btnCompareSelected').click();
@@ -62,6 +66,9 @@ const path = require('node:path');
     await page.locator('.workspace-nav [data-view=library]').click();
     await page.locator('#paperList [data-paper]').first().click();
     await page.locator('#btnReanalyze').click();
+    await expect(page.locator('#researchTask')).toBeVisible();
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#researchTask')).toHaveCount(0);
     await expect(page.locator('#paperDetail')).toContainText('offline:acceptance-fixture');
     await expect(page.locator('#paperDetail')).toContainText('1 项待核对');
     await expect(page.locator('#paperDetail')).toContainText('用量未知');
@@ -99,7 +106,7 @@ const path = require('node:path');
     await expect(page.locator('[data-ppane=concepts]')).toContainText('alphatopic');
 
     // Skip machine review: persisted candidates can still be reviewed and revoked.
-    await page.locator('#btnBudgetAnalyze').click();
+    await page.locator('#btnReanalyze').click();
     await page.locator('#researchTask [name=semantic_review]').uncheck();
     await page.locator('#researchTask [name=with_concepts]').uncheck();
     await page.locator('#researchTask [type=submit]').click();
@@ -472,8 +479,8 @@ const path = require('node:path');
 
     // 阶段预算已取消；持久记录保留实际调用和待审状态，刷新后仍能精确恢复。
     await page.locator('#paperList [data-paper]').first().click();
-    await expect(page.locator('#btnBudgetAnalyze')).toBeVisible();
-    await page.locator('#btnBudgetAnalyze').click();
+    await expect(page.locator('#btnReanalyze')).toBeVisible();
+    await page.locator('#btnReanalyze').click();
     await page.locator('#researchTask [name=with_concepts]').uncheck();
     await page.locator('#researchTask [name=semantic_review]').check();
     await page.locator('#researchTask [type=submit]').click();

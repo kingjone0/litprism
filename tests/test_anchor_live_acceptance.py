@@ -94,7 +94,7 @@ def test_durable_pair_uses_same_sources_and_first_attempts_without_semantic_clai
         'source_results_sha256': t.mixed.sha(source / 'qa-results.json'),
         'cases_sha256': t.mixed.sha(home / 'cases.json'), 'snapshots_sha256': t.mixed.sha(home / 'web-snapshots.json')})
     sends = []
-    def transport(url, *, headers, json, timeout):
+    def transport(url, *, headers, json, timeout, stream=False):
         messages = json['messages']
         anchor = '【试验定位锚点' in messages[-1]['content']
         sends.append(anchor)
@@ -110,6 +110,16 @@ def test_durable_pair_uses_same_sources_and_first_attempts_without_semantic_clai
                    'sources': ['P1'], 'quotes': [quote]}]}
         class Response:
             status_code = 200
+            def iter_lines(self, **kwargs):
+                for packet in [
+                    {'choices':[{'index':0,'delta':{'content':__import__('json').dumps(value)},'finish_reason':'stop'}]},
+                    {'choices':[],'usage':{'prompt_tokens':200,'completion_tokens':100}}]:
+                    yield ('data: '+__import__('json').dumps(packet)).encode()
+                    yield b''
+                yield b'data: [DONE]'
+                yield b''
+            def close(self):
+                pass
             def json(self):
                 return {'choices': [{'finish_reason': 'stop', 'message': {'content': __import__('json').dumps(value)}}],
                         'usage': {'prompt_tokens': 200, 'completion_tokens': 100}}

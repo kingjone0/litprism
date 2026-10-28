@@ -1,8 +1,11 @@
 """Persistent QA endpoints; read/reopen never initiates a model call."""
 import json
 import threading
+import asyncio
+import time
 
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 
 from ..analysis_runs import RunConflict, _run_lock
 from ..chat_runs import ChatRuns, request_input
@@ -10,6 +13,8 @@ from ..chat_runs import ChatRuns, request_input
 
 def register_chat_runs(app, kb, cfg, task_llm, process, messages):
     store = ChatRuns(kb)
+    from ..streaming import DraftStreams
+    store.streams = DraftStreams()
     jobs, lock = {}, threading.RLock()
     app.state.chat_runs = store
 
@@ -87,6 +92,50 @@ def register_chat_runs(app, kb, cfg, task_llm, process, messages):
     @app.get('/api/chat-runs/{rid}')
     def detail(rid: str):
         return read(rid)
+
+    @app.get('/api/chat-runs/{rid}/events')
+    def events(rid: str):
+        row(rid)  # Reject unknown identities before sending HTTP 200.
+        async def generate():
+            previous_text = previous_reasoning = ''
+            previous_key, heartbeat = None, time.monotonic()
+            while True:
+                try:
+                    was_active = active(rid)
+                    saved = row(rid)
+                    status = saved['status']
+                    if not was_active and status in ('queued', 'running'):
+                        status = read(rid)['status']
+                except HTTPException:
+                    status, was_active = 'unavailable', False
+                terminal = status in ('completed', 'stale', 'unavailable', 'interrupted') or (
+                    not was_active and status not in ('queued', 'running'))
+                snapshot = store.streams.snapshot(rid)
+                # A completed draft is replaced by the currently checked result,
+                # including refusal/isolation. Never expose a stale preview as final.
+                if status in ('completed', 'stale', 'unavailable'):
+                    snapshot.update(text='', reasoning='')
+                key = (snapshot['revision'], status, was_active, terminal)
+                if key != previous_key:
+                    text, reasoning = snapshot.pop('text'), snapshot.pop('reasoning')
+                    task = app.state.tasks.items.get(jobs.get(rid)) or {}
+                    event = dict(run_id=rid, status=status, active=was_active, terminal=terminal,
+                                 task_id=task.get('id'), cancelling=task.get('status') == 'cancelling', **snapshot)
+                    if previous_key is None or not text.startswith(previous_text) or not reasoning.startswith(previous_reasoning):
+                        event.update(reset=True, text=text, reasoning=reasoning)
+                    else:
+                        event.update(text_delta=text[len(previous_text):], reasoning_delta=reasoning[len(previous_reasoning):])
+                    yield 'event: draft\ndata: ' + json.dumps(event, ensure_ascii=True) + '\n\n'
+                    previous_key, previous_text, previous_reasoning = key, text, reasoning
+                    heartbeat = time.monotonic()
+                elif time.monotonic() - heartbeat > 5:
+                    yield ': keepalive\n\n'
+                    heartbeat = time.monotonic()
+                if terminal:
+                    break
+                await asyncio.sleep(.05)
+        return StreamingResponse(generate(), media_type='text/event-stream',
+                                 headers={'Cache-Control':'no-store', 'X-Accel-Buffering':'no'})
 
     @app.get('/api/chat-runs/{rid}/result')
     def result(rid: str):

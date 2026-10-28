@@ -435,7 +435,7 @@ const path = require('node:path');
       await page.screenshot({path:path.join(output,'source-focus-narrow.png')});
       await page.locator('#btnCloseInspector').click(); await expect(source).toBeFocused();
     });
-    await check('chat-receipts-collapse-only-automatic-success', async () => {
+    await check('chat-receipts-collapse-normal-generation-and-success-but-preserve-manual-choice', async () => {
       const conversation = await call('/api/conversations', 'POST', {title:'记录展开反例'});
       await page.evaluate(async id=>{await loadSidebar();openView('chat',{convId:id});},conversation.id);
       await expect(page.locator('#chatInput')).toBeVisible();
@@ -445,8 +445,7 @@ const path = require('node:path');
       await expect(panel).not.toHaveAttribute('open');
       await expect(page.locator('#btnSend')).toBeEnabled();
       await page.locator('#chatInput').fill('alphatopic durablereloadmarker'); await page.locator('#btnSend').click();
-      await expect(panel).toHaveAttribute('open','');
-      await page.locator('#chatRunPanel > summary').click();
+      await expect(panel).not.toHaveAttribute('open');
       await page.locator('#chatRunPanel > summary').click();
       await expect(page.locator('.from-assistant')).toHaveCount(2);
       await expect(page.locator('#btnSend')).toBeEnabled();
@@ -706,7 +705,7 @@ const path = require('node:path');
       const seed = process.env.LITPRISM_ACCEPTANCE_SEED;
       await page.locator(`[data-select-paper="${seed}"]`).check();
       const initialCount = await page.locator('#paperList [data-paper]').count();
-      const papersUrl = base + '/api/papers';
+      const papersUrl = base + '/api/papers/catalog';
       const fail = r => r.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'N10 导航暂不可读'})});
       await page.route(papersUrl, fail);
       try {
@@ -766,10 +765,11 @@ const path = require('node:path');
         await expect(page.locator('#paperList')).not.toContainText('知识库还是空');
       } finally { await page.unroute(papersUrl, fail); }
       await page.locator('#btnRetrySidebar').click(); await expect(page.locator('#paperList [data-paper]')).toHaveCount(initialCount);
-      const empty = r => r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({items:[]})});
+      const empty = r => r.fulfill({status:200,contentType:'application/json',body:JSON.stringify({items:[],count:0,total:0,offset:0,has_more:false})});
       await page.route(papersUrl, empty);
+      await page.route(base+'/api/papers?*', empty);
       try { await page.evaluate(() => loadSidebar()); await expect(page.locator('#paperList')).toContainText('知识库还是空'); await expect(page.locator('#sidebarReadError')).toBeHidden(); }
-      finally { await page.unroute(papersUrl, empty); }
+      finally { await page.unroute(papersUrl, empty); await page.unroute(base+'/api/papers?*', empty); }
     });
     await check('secondary-controls-have-associated-accessible-names', async () => {
       const seed = process.env.LITPRISM_ACCEPTANCE_SEED;
@@ -1329,6 +1329,295 @@ const path = require('node:path');
       const stored=(await call('/api/memories')).items;
       for(const record of records)assert.equal(stored.find(m=>m.id===record.id).kind,record.kind);
       assert.equal(stored.find(m=>m.id===custom.id).key,'自定义展示名称');
+    });
+    await check('g01-growing-library-pages-search-scope-and-older-conversations', async () => {
+      await page.evaluate(()=>{S.theme='light';applyTheme();});
+      const fixture = await call('/api/acceptance/library-capacity', 'POST', {});
+      let scoped;
+      try {
+        await page.evaluate(async () => { await refreshCollections(); await refreshLibrary(); });
+        const catalog = (await call('/api/papers/catalog')).items;
+        await expect(page.locator('#libCount')).toHaveText(String(catalog.length));
+        await expect(page.locator('#libList [data-paper]')).toHaveCount(20);
+        await page.locator('#libSearch').fill('G01容量');
+        await expect(page.locator('#libSub')).toHaveText('找到 301 篇匹配文献');
+        await expect(page.locator('#paperList [data-paper]')).toHaveCount(50);
+        await expect(page.locator('#libraryPageInfo')).toHaveText('1–50 / 301 篇');
+        await page.locator('[data-select-paper]').first().check();
+        await page.locator('#libraryNext').click();
+        await expect(page.locator('#libraryPageInfo')).toHaveText('51–100 / 301 篇');
+        await expect(page.locator('#btnPaperExport')).toBeDisabled();
+        assert.equal(await page.evaluate(()=>S.selectedPapers.size),0);
+        await page.evaluate(()=>loadSidebar());
+        await expect(page.locator('#libraryPageInfo')).toHaveText('51–100 / 301 篇');
+        for (let i=0;i<5;i++) {
+          const before = await page.locator('#libraryPageInfo').textContent();
+          await page.locator('#libraryNext').click();
+          await expect(page.locator('#libraryPageInfo')).not.toHaveText(before);
+        }
+        await expect(page.locator('#libraryPageInfo')).toHaveText('301–301 / 301 篇');
+        await expect(page.locator('#libraryNext')).toBeDisabled();
+        await expect(page.locator(`#paperList [data-paper="${fixture.papers[0]}"]`)).toBeVisible();
+        await expect(page.locator('#paperList')).toBeFocused();
+        await page.screenshot({path:path.join(output,'g01-desktop-last-page.png')});
+        await page.locator('#libSearch').fill('G01独有作者');
+        await expect(page.locator('#paperList [data-paper]')).toHaveCount(1);
+        await expect(page.locator('#libraryPager')).toBeHidden();
+        await page.locator('[data-select-paper]').check();
+        await page.locator('#libSearch').fill('');
+        await page.locator('#collectionFilter').selectOption(fixture.parent);
+        await expect(page.locator('#paperList [data-paper]')).toHaveCount(1);
+        await expect(page.locator('#btnBatchDelete')).toBeDisabled();
+        await expect(page.locator(`#paperList [data-paper="${fixture.papers[0]}"]`)).toBeVisible();
+        scoped = (await call('/api/conversations','POST',{title:'G01范围可达性'})).id;
+        await page.evaluate(id=>openView('chat',{convId:id}),scoped);
+        await expect(page.locator('#scopeChip')).toBeVisible();
+        await page.locator('#scopeChip').click();
+        await page.locator('#researchTask [name=scope]').selectOption('p:'+fixture.papers[0]);
+        await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+        const saved = (await call('/api/conversations/'+scoped+'/messages')).conversation.scope;
+        assert.deepEqual((typeof saved === 'string' ? JSON.parse(saved) : saved).paper_ids,[fixture.papers[0]]);
+        await page.locator('#convSearch').fill('G01会话');
+        await expect(page.locator('#convList [data-conv]')).toHaveCount(100);
+        await expect(page.locator('#convCount')).toHaveText('101');
+        await page.locator('#btnOlderConversations').click();
+        await expect(page.locator('#convList [data-conv]')).toHaveCount(101);
+        await expect(page.locator('#btnOlderConversations')).toHaveCount(0);
+        await page.locator(`#convList [data-conv="${fixture.conversations[0]}"]`).scrollIntoViewIfNeeded();
+        await expect(page.locator(`#convList [data-conv="${fixture.conversations[0]}"]`)).toBeVisible();
+        await page.locator('#sidebar [data-view=library]').click();
+        await page.locator('#collectionFilter').selectOption('');
+        await page.locator('#libSearch').fill('G01容量');
+        await expect(page.locator('#paperList [data-paper]')).toHaveCount(50);
+        await page.setViewportSize({width:390,height:844});
+        await page.evaluate(()=>{S.theme='dark';applyTheme();});
+        await expect(page.locator('#libraryNext')).toBeVisible();
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+        await page.screenshot({path:path.join(output,'g01-narrow-dark-pagination.png')});
+      } finally {
+        if (scoped) await call('/api/conversations/'+scoped,'DELETE');
+        await call('/api/acceptance/library-capacity','DELETE');
+      }
+    });
+    await check('g01-library-late-reads-failure-and-retry-preserve-selection-boundaries', async () => {
+      const fixture=await call('/api/acceptance/library-capacity','POST',{});
+      try {
+        await page.evaluate(()=>refreshLibrary());
+        const url=base+'/api/papers?*';
+        const held=await delayed(url,req=>new URL(req.url()).searchParams.get('q')==='G01容量');
+        try {
+          await page.locator('#libSearch').fill('G01容量');await held.ready;
+          await page.locator('#libSearch').fill('G01独有作者');
+          await expect(page.locator('#paperList [data-paper]')).toHaveCount(1);
+          const late=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/papers'&&new URL(r.url()).searchParams.get('q')==='G01容量');
+          held.release();await late;
+          await expect(page.locator('#paperList [data-paper]')).toHaveCount(1);
+          await expect(page.locator('#libSub')).toHaveText('找到 1 篇匹配文献');
+        } finally {await held.close();}
+        const fail=route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'G01列表暂不可读'})});
+        await page.route(url,fail);
+        try {
+          await page.locator('[data-select-paper]').check();
+          await page.evaluate(()=>loadLibrary());
+          await expect(page.locator('#paperList [role=alert]')).toContainText('G01列表暂不可读');
+          await expect(page.locator('[data-select-paper]')).toBeDisabled();
+          await expect(page.locator('#btnPaperExport')).toBeDisabled();
+        } finally {await page.unroute(url,fail);}
+        await page.locator('#paperList [data-read-retry]').click();
+        await expect(page.locator('#paperList [role=alert]')).toHaveCount(0);
+        await expect(page.locator('[data-select-paper]')).toBeEnabled();
+        await expect(page.locator('[data-select-paper]')).not.toBeChecked();
+        await page.locator('#libSearch').fill('G01容量');
+        await expect(page.locator('#libSub')).toHaveText('找到 301 篇匹配文献');
+        await page.evaluate(()=>loadLibrary(300));
+        await expect(page.locator('#libraryPageInfo')).toHaveText('301–301 / 301 篇');
+        await call('/api/paper/'+fixture.papers[0],'DELETE');
+        await page.evaluate(()=>loadLibrary(300));
+        await expect(page.locator('#libraryPageInfo')).toHaveText('251–300 / 300 篇');
+        await expect(page.locator('#paperList [data-paper]')).toHaveCount(50);
+      } finally {await call('/api/acceptance/library-capacity','DELETE');}
+    });
+    await check('g02-reading-entry-materials-are-explicit-before-any-generation', async () => {
+      const created=[];
+      try {
+        for (const [level,label] of Object.entries({metadata:'仅题录',abstract:'摘要',partial:'部分正文',fulltext:'已解析正文',unknown:'完整度未知'})) {
+          const pid=(await call('/api/acceptance/reading','POST',{level})).paper_id;created.push(pid);
+          await page.evaluate(()=>openView('library'));
+          await page.evaluate(()=>refreshLibrary());
+          await expect(page.locator(`#paperList [data-paper="${pid}"]`)).toBeVisible();
+          await expect(page.locator(`#paperList [data-drag-paper="${pid}"]`)).toContainText('材料：'+label);
+          await page.locator(`#paperList [data-paper="${pid}"]`).click();
+          await expect(page.locator('#btnReanalyze')).toHaveText('解读论文');
+          await expect(page.locator('#btnBudgetAnalyze')).toHaveCount(0);
+          await expect(page.locator('[data-current-material]')).toContainText(label);
+          await page.locator('#btnReanalyze').click();
+          await expect(page.locator('#researchTask')).toContainText('本次材料：'+label);
+          assert.equal((await call('/api/paper/'+pid+'/analysis-runs')).items.length,0);
+          if (level==='metadata') {
+            await expect(page.locator('#researchTask [type=submit]')).toBeDisabled();
+            await expect(page.locator('#researchTask')).toContainText('可用文本过少');
+          } else await expect(page.locator('#researchTask [type=submit]')).toBeEnabled();
+          if(level==='partial')await page.screenshot({path:path.join(output,'g02-materials-desktop.png')});
+          if(level==='unknown') {
+            await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{S.theme='dark';applyTheme();});
+            const button=await page.locator('#researchTask [type=submit]').boundingBox();
+            assert(button.x>=0&&button.x+button.width<=390&&button.y+button.height<=844);
+            await page.screenshot({path:path.join(output,'g02-materials-narrow-dark.png')});
+          }
+          await page.locator('#researchTask [data-reading-text]').click();
+          await expect(page.locator('#researchTask')).toHaveCount(0);
+          await expect(page.locator('[data-ppane=text]')).toBeVisible();
+        }
+      } finally {for(const pid of created)await call('/api/paper/'+pid,'DELETE');}
+    });
+    await check('g02-default-reading-persists-unknown-outcomes-and-does-not-blindly-resubmit', async () => {
+      const pid=(await call('/api/acceptance/reading','POST',{level:'abstract',retry:true,previous:true})).paper_id;
+      const records=async()=> (await call('/api/paper/'+pid+'/analysis-runs')).items;
+      try {
+        await page.evaluate(id=>openView('paper',{paperId:id}),pid);
+        await expect(page.locator('#paperDetail')).toContainText('PREVIOUS_READING_VISIBLE');
+        await page.locator('#btnReanalyze').click();
+        await expect(page.locator('#researchTaskTitle')).toHaveText('重新解读');
+        await page.locator('#researchTask [name=with_concepts]').uncheck();
+        await page.locator('#researchTask [name=semantic_review]').uncheck();
+        await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+        await expect(page.locator('#analysisRuns')).toContainText('运行失败');
+        await expect(page.locator('#paperDetail')).toContainText('PREVIOUS_READING_VISIBLE');
+        const failed=(await records())[0],rid=failed.id,before=failed.steps.length;
+        assert(failed.retry_required);
+        await page.reload();await expect(page.locator('#paperList [data-paper]').first()).toBeVisible();
+        await page.evaluate(id=>openView('paper',{paperId:id}),pid);
+        await expect(page.locator(`[data-resume-run="${rid}"]`)).toBeVisible();
+        assert.equal((await records())[0].steps.length,before);
+        await page.locator(`[data-resume-run="${rid}"]`).click();
+        await expect(page.locator('#researchTask [name=retry_failed]')).not.toBeChecked();
+        await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+        await expect(page.locator('#analysisRuns')).toContainText('需确认重试');
+        assert.equal((await records())[0].steps.length,before);
+        await page.locator(`[data-resume-run="${rid}"]`).click();
+        await page.locator('#researchTask [name=retry_failed]').check();
+        await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+        await expect(page.locator('#analysisRuns')).toContainText('仍有待审项');
+        const done=(await records())[0];assert(done.steps.length>before&&!done.retry_required);
+        assert.equal((await call('/api/paper/'+pid)).analysis._analysis_run_id,rid);
+        await page.locator(`[data-resume-run="${rid}"]`).click();
+        await page.locator('#researchTask [type=submit]').click();
+        await expect(page.locator('#researchTask')).toHaveCount(0);
+        assert.equal((await records())[0].steps.length,done.steps.length);
+        const endpoint=base+'/api/paper/'+pid+'/analysis-runs';let starts=0;
+        const lost=async route=>{if(route.request().method()!=='POST')return route.continue();starts++;await route.fetch();await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'G02回执丢失'})});};
+        await page.route(endpoint,lost);
+        try {
+          await page.locator('#btnReanalyze').click();
+          await page.locator('#researchTask [name=with_concepts]').uncheck();
+          await page.locator('#researchTask [name=semantic_review]').uncheck();
+          await page.locator('#researchTask [type=submit]').click();
+          await expect(page.locator('#researchTask .task-error').last()).toContainText('请先查看运行记录');
+          await expect(page.locator('#researchTask [type=submit]')).toBeHidden();
+          await expect(page.locator('#researchTask [type=submit]')).toBeDisabled();
+          await page.locator('#researchTask').evaluate(el=>el.querySelector('form').requestSubmit());
+          assert.equal(starts,1);
+          await page.locator('#researchTask').getByRole('button',{name:'查看运行记录',exact:true}).click();
+          await expect(page.locator('#researchTask')).toHaveCount(0);
+          await expect(page.locator('#analysisRuns [data-run-id]')).toHaveCount(2);
+          assert.equal(starts,1);
+        } finally {await page.unroute(endpoint,lost);}
+      } finally {await call('/api/paper/'+pid,'DELETE');}
+    });
+    const openStreamFixture=async(mode='normal')=>{
+      const fixture=await call('/api/acceptance/stream','POST',{mode});
+      await page.evaluate(()=>loadSidebar());
+      await page.locator(`[data-conv="${fixture.conversation_id}"]`).click();
+      await page.locator('#chatInput').fill('streamingfixture 的原文是什么？');
+      await page.locator('#btnSend').click();
+      await expect(page.locator('#chatLiveDraft [data-live-text]')).toContainText('streamingfixture 提出了有依据的');
+      return fixture;
+    };
+    const cleanStreamFixture=async fixture=>{
+      await call('/api/acceptance/stream/'+fixture.key+'/release','POST',{});
+      await call('/api/paper/'+fixture.paper_id,'DELETE');
+      await call('/api/providers/'+fixture.provider_id,'DELETE');
+    };
+    await check('g05a-real-stream-before-final-reconnect-and-refresh-never-regenerate',async()=>{
+      let fixture;
+      try {
+        fixture=await openStreamFixture();
+        const cid=fixture.conversation_id;
+        await expect(page.locator('#chatLiveDraft [data-live-thought] pre')).toHaveText('服务实际返回的思考片段。');
+        await expect(page.locator('#chatRunPanel')).not.toHaveAttribute('open','');
+        await expect(page.locator('#chatRunPanel')).not.toContainText('重试可能再次计费');
+        await expect(page.locator('.from-assistant')).toHaveCount(0);
+        let messages=(await call('/api/conversations/'+cid+'/messages')).items;
+        assert.equal(messages.filter(m=>m.role==='assistant').length,0);
+        await expect(page.locator('#chatLiveDraft [data-chat-review]')).toHaveCount(0);
+        await page.locator('#chatLiveDraft summary').click();
+        await page.screenshot({path:path.join(output,'g05a-live-desktop.png')});
+        const rid=(await call('/api/conversations/'+cid+'/chat-runs')).items[0].id;
+        await page.evaluate(({rid,cid})=>observeChatStream(rid,cid,true),{rid,cid});
+        await expect(page.locator('#chatLiveDraft [data-live-text]')).toHaveText('streamingfixture 提出了有依据的');
+        assert.equal((await call('/api/acceptance/stream/'+fixture.key)).qa_calls,1);
+        await page.reload();await expect(page.locator('#paperList [data-paper]').first()).toBeVisible();
+        await page.locator(`[data-conv="${cid}"]`).click();
+        await expect(page.locator('#chatLiveDraft [data-live-text]')).toHaveText('streamingfixture 提出了有依据的');
+        await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{S.theme='dark';applyTheme();});
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+        await expect(page.locator('#chatLiveDraft [data-live-cancel]')).toBeEnabled();
+        assert((await page.locator('#chatLiveDraft [data-live-cancel]').boundingBox()).height>=44);
+        await page.screenshot({path:path.join(output,'g05a-live-narrow-dark.png')});
+        await call('/api/acceptance/stream/'+fixture.key+'/release','POST',{});
+        await expect(page.locator('.from-assistant')).toHaveCount(1);
+        await expect(page.locator('#chatLiveDraft')).toHaveCount(0);
+        await expect(page.locator('.from-assistant .answer-sources [data-evidence-ref]').first()).toBeVisible();
+        messages=(await call('/api/conversations/'+cid+'/messages')).items;
+        assert.equal(messages.filter(m=>m.role==='assistant').length,1);
+        assert.equal(messages.find(m=>m.role==='assistant').status,'answered');
+        assert.equal((await call('/api/acceptance/stream/'+fixture.key)).qa_calls,1);
+      } finally {if(fixture)await cleanStreamFixture(fixture);}
+    });
+    await check('g05a-disconnect-and-cancel-keep-partial-text-untrusted-without-retry',async()=>{
+      for(const mode of ['disconnect','cancel']) {
+        let fixture;
+        try {
+          fixture=await openStreamFixture(mode);
+          if(mode==='cancel')await page.locator('#chatLiveDraft [data-live-cancel]').click();
+          else await call('/api/acceptance/stream/'+fixture.key+'/release','POST',{});
+          await expect(page.locator('#chatLiveDraft [data-live-state]')).toContainText('生成已停止');
+          await expect(page.locator('#chatLiveDraft [data-live-text]')).toHaveText('streamingfixture 提出了有依据的');
+          await expect(page.locator('.from-assistant')).toHaveCount(0);
+          const calls=await call('/api/acceptance/stream/'+fixture.key);
+          assert.equal(calls.qa_calls,1);
+          const record=(await call('/api/conversations/'+fixture.conversation_id+'/chat-runs')).items[0];
+          assert.equal(record.status,mode==='cancel'?'cancelled':'failed');assert(record.retry_required);
+          assert.equal((await call('/api/conversations/'+fixture.conversation_id+'/messages')).items.filter(m=>m.role==='assistant').length,0);
+        } finally {if(fixture)await cleanStreamFixture(fixture);}
+      }
+    });
+    await check('g05a-late-streams-stay-in-their-conversation-and-bad-citations-replace-preview',async()=>{
+      let fixture,other;
+      try {
+        fixture=await openStreamFixture('bad_citation');
+        other=(await call('/api/conversations','POST',{title:'流式隔离空会话'})).id;
+        await page.evaluate(()=>loadSidebar());await page.locator(`[data-conv="${other}"]`).click();
+        await expect(page.locator('#chatInput')).toBeVisible();
+        await expect(page.locator('#chatLiveDraft')).toHaveCount(0);
+        await call('/api/acceptance/stream/'+fixture.key+'/release','POST',{});
+        await expect.poll(async()=> (await call('/api/conversations/'+fixture.conversation_id+'/chat-runs')).items[0].status).toBe('completed');
+        await expect(page.locator('#chatLiveDraft')).toHaveCount(0);
+        await expect(page.locator('.from-assistant')).toHaveCount(0);
+        await page.locator(`[data-conv="${fixture.conversation_id}"]`).click();
+        await expect(page.locator('.from-assistant')).toHaveCount(1);
+        await expect(page.locator('#chatLiveDraft')).toHaveCount(0);
+        const reply=(await call('/api/conversations/'+fixture.conversation_id+'/messages')).items.find(m=>m.role==='assistant');
+        assert.notEqual(reply.status,'answered');
+        assert.equal((await call('/api/acceptance/stream/'+fixture.key)).qa_calls,1);
+      } finally {
+        if(fixture)await cleanStreamFixture(fixture);
+        if(other)await call('/api/conversations/'+other,'DELETE');
+      }
     });
     results.push({ name: 'no-browser-errors-or-external-requests', passed: !errors.length && !external.length, errors, external });
     fs.writeFileSync(path.join(output, 'summary.json'), JSON.stringify({ results }, null, 2));

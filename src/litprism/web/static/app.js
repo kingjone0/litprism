@@ -90,8 +90,8 @@ function short(s, n = 60) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-/* 后台地址与 token 由桌面外壳在握手完成后用 eval 推给页面（也可来自 URL fragment）。
-   两种来源都要认，且**必须等它到达**再发请求 —— 否则首屏会拿 401。 */
+/* Electron 加载后台同源页面，token 来自 URL fragment。
+   保留显式预置环境的兼容入口，在解析完成后再发请求。 */
 let resolveEnv;
 const ENV_READY = new Promise(res => { resolveEnv = res; });
 
@@ -106,17 +106,6 @@ window.__setLitPrismEnv = function (cfg) {
   const m = /(?:^|[#&])t=([^&]*)/.exec(location.hash || '');
   if (m && m[1]) {
     window.__setLitPrismEnv({ base: '', token: decodeURIComponent(m[1]) });
-    return;
-  }
-
-  /* 关键：桌面外壳里页面 origin 是 tauri://localhost，API 在后端端口上。
-     此时**绝不能**用空配置放行 —— 相对路径会打到 Tauri 的资源处理器，
-     请求根本到不了后端（表现是「界面空白、服务端零请求」，极难定位）。
-     必须等外壳把 base/token 推过来。 */
-  const inShell = location.protocol === 'tauri:' || /(^|\.)tauri\.localhost$/.test(location.hostname);
-  if (inShell) {
-    // 兜底：外壳彻底失败时也不能让界面永远卡住
-    setTimeout(() => resolveEnv(window.__LITPRISM__ || {}), 120000);
     return;
   }
 
@@ -420,14 +409,15 @@ function editConversationScope() {
    左侧栏
    ========================================================================== */
 let sidebarRequest = 0;
-async function loadSidebar() {
+async function loadSidebar({ moreConversations = false } = {}) {
   const request = ++sidebarRequest;
   const query = $('#convSearch')?.value || '';
+  const offset = moreConversations && query === S.conversationQuery ? S.conversations.length : 0;
   const retry = $('#btnRetrySidebar');
   if (retry) retry.disabled = true;
   const [papers, convs, skills] = await Promise.allSettled([
-    api('/api/papers'),
-    api('/api/conversations?q='+encodeURIComponent(query)),
+    api('/api/papers/catalog'),
+    api('/api/conversations?q='+encodeURIComponent(query)+(offset ? '&offset='+offset : '')),
     api('/api/skills'),
   ]);
   if (request !== sidebarRequest || query !== ($('#convSearch')?.value || '')) return;
@@ -435,7 +425,14 @@ async function loadSidebar() {
   const failures = [];
   for (const [key, label, result] of [['papers', '文献', papers], ['conversations', '会话', convs], ['skills', '技能', skills]]) {
     if (result.status === 'fulfilled') {
-      S[key] = result.value.items || [];
+      const items = result.value.items || [];
+      S[key] = key === 'conversations' && offset
+        ? [...new Map([...S.conversations, ...items].map(c => [c.id, c])).values()] : items;
+      if (key === 'conversations') {
+        S.conversationQuery = query;
+        S.conversationTotal = result.value.total ?? S.conversations.length;
+        S.conversationsMore = result.value.has_more === true;
+      }
       S.sidebarLoaded[key] = true;
     } else {
       failures.push(`${label}读取失败。${S.sidebarLoaded[key] ? '显示上次成功内容。' : ''} ${result.reason?.message || result.reason}`);
@@ -465,7 +462,7 @@ async function loadSidebar() {
   };
 
   $('#libCount').textContent = S.sidebarLoaded.papers ? S.papers.length || '' : '—';
-  $('#convCount').textContent = S.sidebarLoaded.conversations ? S.conversations.length || '' : '—';
+  $('#convCount').textContent = S.sidebarLoaded.conversations ? S.conversationTotal || '' : '—';
 
   // ---- 对话 ----
   const convBox = $('#convList');
@@ -479,6 +476,19 @@ async function loadSidebar() {
         <button class="conv-del" data-conv-del="${esc(c.id)}" title="删除会话">✕</button>
         <button class="btn sm" data-conv-manage="${esc(c.id)}" title="会话名称与置顶">⋯</button>
       </div>`).join('') : `<div class="side-empty">${convs.status === 'rejected' ? '会话尚未读取。' : '新建对话，开始一次有据可查的研究。'}</div>`;
+  if (S.conversationsMore) {
+    const more = document.createElement('button');
+    more.className = 'btn sm'; more.id = 'btnOlderConversations'; more.textContent = '加载更早会话';
+    more.onclick = async () => {
+      more.disabled = true;
+      const restore = document.activeElement === more;
+      await loadSidebar({moreConversations:true});
+      if (restore && document.activeElement === document.body) {
+        ($('#btnOlderConversations') || $('#convSearch')).focus();
+      }
+    };
+    convBox.append(more);
+  }
   $('#btnNewConv').onclick = newConversation;
   $$('[data-conv-manage]', convBox).forEach(b => b.onclick = () => editConversation(S.conversations.find(c => c.id === b.dataset.convManage)));
   $$('[data-conv]', convBox).forEach(b => b.onclick = () => openView('chat', { convId: b.dataset.conv }));
@@ -503,18 +513,24 @@ async function loadSidebar() {
     lib.innerHTML = papers.status === 'rejected' ? '<div class="side-empty">文献尚未读取。</div>'
       : `<div class="side-empty">知识库为空。<br>用 <code class="mono">litprism add &lt;pdf&gt;</code> 导入。</div>`;
   } else {
-    lib.innerHTML = S.papers.map(p => `
+    lib.innerHTML = S.papers.slice(0, 20).map(p => `
       <button class="side-item" data-paper="${esc(p.id)}">
         ${icon('document')}
         <span class="label" title="${esc(p.title)}">${esc(short(p.display_title || p.title, 20))}</span>
       </button>`).join('');
     $$('[data-paper]', lib).forEach(b => b.onclick = () => openView('paper', { paperId: b.dataset.paper }));
+    if (S.papers.length > 20) {
+      const all = document.createElement('button'); all.className = 'btn sm';
+      all.textContent = `查看全部 ${fmtNum(S.papers.length)} 篇文献`;
+      all.onclick = () => { if (openView('library')) $('#libSearch').focus(); };
+      lib.append(all);
+    }
   }
 
   // 技能统一从底部进入管理页，不在主导航重复展开。
   $('#skillCount').textContent = S.sidebarLoaded.skills ? S.skills.length || '' : '—';
   $$('.side-item[data-view]').forEach(b => b.onclick = () => enterView(b.dataset.view));
-  if (S.activeView === 'library') await loadLibrary();
+  if (S.activeView === 'library') await loadLibrary(S.libraryOffset || 0);
 }
 
 async function newConversation() {
@@ -524,69 +540,108 @@ async function newConversation() {
 /* ==========================================================================
    知识库
    ========================================================================== */
-async function loadLibrary() {
+let libraryRequest = 0;
+const LIBRARY_PAGE_SIZE = 50;
+async function loadLibrary(offset = 0) {
+  if (S.activeView !== 'library') return;
+  const request = ++libraryRequest, revision = S.viewRevision;
+  const box = $('#paperList'), pager = $('#libraryPager');
   if (!S.sidebarLoaded?.papers) {
-    $('#paperList').innerHTML = emptyState({ bare: true, icon: 'library', title: '文献尚未读取', desc: '请在导航中的错误提示处重新读取。' });
+    pager.hidden = true;
+    box.innerHTML = emptyState({ bare: true, icon: 'library', title: '文献尚未读取', desc: '请在导航中的错误提示处重新读取。' });
     return;
   }
-  const q = ($('#libSearch').value || '').toLowerCase();
-  let items = q
-    ? S.papers.filter(p =>
-        (p.title || '').toLowerCase().includes(q) ||
-        (p.display_title || '').toLowerCase().includes(q) ||
-        (p.authors || []).some(a => (a || '').toLowerCase().includes(q)))
-    : S.papers;
+  const q = ($('#libSearch').value || '').trim();
   const group = $('#collectionFilter').value;
-  if (group) items = items.filter(p => collectionDescendants(group).includes(p.collection_id));
-  // 批量操作只包含屏幕上的勾选，搜索/换组不会暗中操作隐藏文献。
-  const visibleIds = new Set(items.map(p => p.id));
-  S.selectedPapers = new Set([...S.selectedPapers].filter(id => visibleIds.has(id)));
-
-  const st = S.status?.stats || {};
-  $('#libSub').textContent =
-    q ? `找到 ${items.length} 篇匹配文献` : '整理文献、阅读原文，让每一个结论有据可查。';
-  const citable = S.papers.filter(p => ['verified', 'manual_confirmed'].includes(p.verify_level)).length;
-  // 三张 hero 数字卡与下方列表重复，收成一行事实描述
-  $('#libSummary').innerHTML = `<p class="library-facts">${fmtNum(S.papers.length)} 篇文献 · `
-    + `${fmtNum(citable)} 篇可引用 · ${fmtNum(st.analyses ?? 0)} 篇已解读</p>`;
-  // 每次重绘都对齐批量按钮的可用状态（含空列表与首次加载）
+  const key = JSON.stringify([q, group, offset]);
+  S.libraryOffset = offset;
+  const retained = S.libraryPageKey === key && box.querySelector('[data-paper]');
+  if (S.libraryPageKey !== key) S.selectedPapers.clear();
+  if (!retained) box.innerHTML = '<p class="source-intro" role="status">正在读取文献…</p>';
+  $$('[data-select-paper]',box).forEach(cb => {cb.disabled=true;});
+  box.setAttribute('aria-busy','true');
+  const focused = pager.contains(document.activeElement) ? document.activeElement : null;
+  $('#libraryPrevious').disabled = true; $('#libraryNext').disabled = true;
   syncBatchActions();
+  const current = () => request === libraryRequest && revision === S.viewRevision && S.activeView === 'library'
+    && q === ($('#libSearch').value || '').trim() && group === $('#collectionFilter').value;
+  try {
+    const params = new URLSearchParams({q, limit:LIBRARY_PAGE_SIZE, offset});
+    if (group) params.set('collection_id',group);
+    const page = await api('/api/papers?'+params);
+    if (!current()) return;
+    if (offset && offset >= page.total) return loadLibrary(Math.max(0, Math.floor((page.total-1)/LIBRARY_PAGE_SIZE)*LIBRARY_PAGE_SIZE));
+    const items = page.items || [];
+    S.libraryPageKey = key;
+    S.libraryOffset = offset;
+    // 批量操作只包含屏幕上的勾选，搜索/换组不会暗中操作隐藏文献。
+    const visibleIds = new Set(items.map(p => p.id));
+    S.selectedPapers = new Set([...S.selectedPapers].filter(id => visibleIds.has(id)));
 
-  const box = $('#paperList');
-  if (!items.length) {
-    box.innerHTML = emptyState({
-      bare: true,
-      icon: 'library',
-      title: q ? '没有匹配的论文' : group ? '此分组暂无文献' : '知识库还是空的',
-      desc: q ? '换个标题或作者关键词试试。'
-        : group ? '切换到全部分组，或将已有文献移入此分组。'
-        : '点击「导入文献」或拖入 PDF，完成核验后开始阅读。核验未通过时可查看原因并人工确认。',
-    });
-    return;
-  }
-
-  box.innerHTML = items.map(p => `
-    <div class="list-item" draggable="true" data-drag-paper="${esc(p.id)}">
-      <input type="checkbox" data-select-paper="${esc(p.id)}" aria-label="选择 ${esc(p.title)}" ${S.selectedPapers?.has(p.id) ? 'checked' : ''}>
-      <span class="paper-mark">${icon('document')}</span>
-      <button class="list-main paper-link" data-paper="${esc(p.id)}">
-        <div class="list-title">${esc(p.display_title || p.title)}</div>
-        <div class="list-sub">
-          <span>${esc((p.authors || []).slice(0, 3).join('、') || '作者未知')}${(p.authors || []).length > 3 ? ' 等' : ''}</span>
-          <span>${p.year || '年份未知'}</span>
-          ${p.venue ? `<span>${esc(p.venue)}</span>` : ''}
-          ${badgeOf(p.verify_level)}
-        </div>
-      </button>
-      <span class="paper-open" aria-hidden="true">${icon('arrow')}</span>
-    </div>`).join('');
-
-  $$('[data-paper]', box).forEach(b => b.onclick = () => openView('paper', { paperId: b.dataset.paper }));
-  $$('[data-drag-paper]', box).forEach(row => row.ondragstart = e => e.dataTransfer.setData('application/litprism-paper', row.dataset.dragPaper));
-  $$('[data-select-paper]', box).forEach(cb => cb.onchange = () => {
-    if (cb.checked) S.selectedPapers.add(cb.dataset.selectPaper); else S.selectedPapers.delete(cb.dataset.selectPaper);
+    const st = S.status?.stats || {};
+    $('#libSub').textContent =
+      q || group ? `找到 ${fmtNum(page.total)} 篇匹配文献` : '整理文献、阅读原文，让每一个结论有据可查。';
+    const citable = S.papers.filter(p => ['verified', 'manual_confirmed'].includes(p.verify_level)).length;
+    // 三张 hero 数字卡与下方列表重复，收成一行事实描述
+    $('#libSummary').innerHTML = `<p class="library-facts">${fmtNum(S.papers.length)} 篇文献 · `
+      + `${fmtNum(citable)} 篇可引用 · ${fmtNum(st.analyses ?? 0)} 篇已解读</p>`;
+    // 每次重绘都对齐批量按钮的可用状态（含空列表与首次加载）
     syncBatchActions();
-  });
+
+    pager.hidden = page.total <= LIBRARY_PAGE_SIZE && offset === 0;
+    $('#libraryPageInfo').textContent = `${items.length ? offset+1 : 0}–${offset+items.length} / ${fmtNum(page.total)} 篇`;
+    $('#libraryPrevious').disabled = offset === 0;
+    $('#libraryNext').disabled = !page.has_more;
+    $('#libraryPrevious').onclick = () => loadLibrary(Math.max(0,offset-LIBRARY_PAGE_SIZE));
+    $('#libraryNext').onclick = () => loadLibrary(offset+LIBRARY_PAGE_SIZE);
+    if (!items.length) {
+      box.innerHTML = emptyState({
+        bare: true,
+        icon: 'library',
+        title: q ? '没有匹配的论文' : group ? '此分组暂无文献' : '知识库还是空的',
+        desc: q ? '换个标题或作者关键词试试。'
+          : group ? '切换到全部分组，或将已有文献移入此分组。'
+          : '点击「导入文献」或拖入 PDF，完成核验后开始阅读。核验未通过时可查看原因并人工确认。',
+      });
+      return;
+    }
+
+    box.innerHTML = items.map(p => `
+      <div class="list-item" draggable="true" data-drag-paper="${esc(p.id)}">
+        <input type="checkbox" data-select-paper="${esc(p.id)}" aria-label="选择 ${esc(p.title)}" ${S.selectedPapers?.has(p.id) ? 'checked' : ''}>
+        <span class="paper-mark">${icon('document')}</span>
+        <button class="list-main paper-link" data-paper="${esc(p.id)}">
+          <div class="list-title">${esc(p.display_title || p.title)}</div>
+          <div class="list-sub">
+            <span>${esc((p.authors || []).slice(0, 3).join('、') || '作者未知')}${(p.authors || []).length > 3 ? ' 等' : ''}</span>
+            <span>${p.year || '年份未知'}</span>
+            ${p.venue ? `<span>${esc(p.venue)}</span>` : ''}
+            ${badgeOf(p.verify_level)}
+          <span>材料：${esc(paperMaterialLabel(p.current_material_level || p.material_level))}</span>
+          <span>${p.analysis_state === 'current' ? '已有解读' : p.analysis_state === 'historical' ? '有历史解读' : '尚未解读'}</span>
+          </div>
+        </button>
+        <span class="paper-open" aria-hidden="true">${icon('arrow')}</span>
+      </div>`).join('');
+
+    $$('[data-paper]', box).forEach(b => b.onclick = () => openView('paper', { paperId: b.dataset.paper }));
+    $$('[data-drag-paper]', box).forEach(row => row.ondragstart = e => e.dataTransfer.setData('application/litprism-paper', row.dataset.dragPaper));
+    $$('[data-select-paper]', box).forEach(cb => cb.onchange = () => {
+      if (cb.checked) S.selectedPapers.add(cb.dataset.selectPaper); else S.selectedPapers.delete(cb.dataset.selectPaper);
+      syncBatchActions();
+    });
+  } catch (error) {
+    if (!current()) return;
+    S.selectedPapers.clear(); syncBatchActions(); pager.hidden = true;
+    showReadError(box,error,()=>loadLibrary(offset),!!retained);
+  } finally {
+    if (current()) {
+      box.setAttribute('aria-busy','false');
+      if (focused && (document.activeElement === focused || document.activeElement === document.body) && (focused.disabled || !focused.getClientRects().length)) {
+        box.tabIndex = -1; box.focus();
+      }
+    }
+  }
 }
 
 /* ==========================================================================
@@ -633,6 +688,7 @@ async function loadPaperDetail(versionId = null) {
             </div>
             <div class="row wrap" style="margin-top:10px">
               ${badgeOf(p.verify_level)}
+              <span data-current-material>材料：${esc(d.reading?.label || paperMaterialLabel(p.material_level))}</span>
               ${p.doi ? `<span class="mono muted">DOI: ${esc(p.doi)}</span>` : ''}
               <span class="mono muted">${d.chunks ?? 0} 个分块</span>
             </div>
@@ -643,8 +699,7 @@ async function loadPaperDetail(versionId = null) {
             <button class="btn sm" id="btnAskThis">就这篇提问</button>
             <button class="btn sm" id="btnRename">重命名</button>
             <button class="btn sm danger" id="btnDelete">删除</button>
-            <button class="btn sm primary" id="btnReanalyze">重新解读</button>
-            <button class="btn sm" id="btnBudgetAnalyze">分阶段解读</button>
+            <button class="btn sm primary" id="btnReanalyze">${d.reading?.has_analysis ? '重新解读' : '解读论文'}</button>
           </div>
         </div>
         <div class="segmented" style="margin-top:14px" id="paperTabs">
@@ -691,7 +746,7 @@ async function loadPaperDetail(versionId = null) {
           <div class="card"><div class="card-body">
             <div class="empty"><div class="ico">🧩</div>
               <div class="title">${candidateView._candidates?.length ? '正式解读尚未发布' : '尚未解读'}</div>
-              <div class="desc">${candidateView._candidates?.length ? '候选已保留，可在上方直接核对原文并人工审核。未经核实的候选不会显示为正式结论。' : '点「重新解读」生成结构化解读（研究问题 / 方法 / 实验 / 结论 / 创新点 / 局限）。'}</div>
+              <div class="desc">${candidateView._candidates?.length ? '候选已保留，可在上方直接核对原文并人工审核。未经核实的候选不会显示为正式结论。' : '点「解读论文」开始，先查看本次材料范围。'}</div>
             </div>
           </div></div>`}
       </div>
@@ -749,19 +804,11 @@ async function loadPaperDetail(versionId = null) {
         .catch(e => toast(e.message, true));
     };
 
-    const reanalyze = async () => {
-      try {
-        toast('正在解读…');
-        await runTask('analyze', { paper_id: S.activePaper });
-        toast('解读完成');
-        loadPaperDetail();
-      } catch (e) { toast(e.message, true); }
-    };
+    const reanalyze = () => analysisRunDialog(p.id);
     $('#btnReanalyze').onclick = reanalyze;
     // 状态条里的「重新解读」是同一个动作，只是出现在阻断提示里
     const statusReanalyze = $('#btnStatusReanalyze');
     if (statusReanalyze) statusReanalyze.onclick = reanalyze;
-    $('#btnBudgetAnalyze').onclick = () => analysisRunDialog(p.id);
 
     // 就这篇提问：新建一个只含本片的对话，而不是改现有会话 —— 改现有会话会把
     // 之前基于其他文献的回答置于一个不一致的范围里。
@@ -1288,8 +1335,10 @@ async function askQuestion() {
   $('#btnSend').disabled = true;
   stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
 
+  let completed = false;
   try {
     const r = await startDurableChat(convId, { question: q, web_search: S.convScope?.raw?.mode !== 'strict' });
+    completed = true;
     if (S.activeConv !== convId || S.activeView !== 'chat' || !stream.isConnected) return;
     S.messages.push(r.user, r.assistant);
     S.sources = r.sources || [];
@@ -1319,6 +1368,7 @@ async function askQuestion() {
     sendButton.disabled = false;
     if ($('#btnSend')) $('#btnSend').disabled = !!S.modelSwitch || S.chatActiveRunning || modelReadBlocksSend();
     if (S.activeConv === convId && S.activeView === 'chat') await refreshChatRuns(convId);
+    if (completed && !stream.isConnected && S.activeConv === convId && S.activeView === 'chat') await loadChat();
     if (stream.isConnected) $('#chatInput')?.focus();
   }
 }

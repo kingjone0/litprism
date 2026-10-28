@@ -159,7 +159,7 @@ class OpenAICompatClient:
         self.name = f"{cfg.provider}:{self.model}"
 
     def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None,
-             temperature: float | None = None, max_tokens: int | None = None) -> str:
+             temperature: float | None = None, max_tokens: int | None = None, on_delta=None) -> str:
         self.last_usage = None
         self.last_reasoning = ''
         self.last_request_settings = {}
@@ -176,6 +176,8 @@ class OpenAICompatClient:
             payload['max_tokens'] = min(payload['max_tokens'], self.cfg.model_max_output_tokens)
         if json_mode and self.cfg.json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if on_delta is not None:
+            payload.update(stream=True, stream_options={'include_usage': True})
         bounded = task in ('semantic_review', 'semantic_cross_review')
         if bounded and not self.cfg.automatic_output:
             cap = self.cfg.cross_review_max_tokens if task == 'semantic_cross_review' else _review_output_cap(self.cfg.review_max_tokens)
@@ -191,7 +193,7 @@ class OpenAICompatClient:
             headers["Authorization"] = f"Bearer {self.cfg.api_key}"
 
         last_err: Exception | None = None
-        single_attempt = getattr(self, 'durable_single_attempt', False)
+        single_attempt = getattr(self, 'durable_single_attempt', False) or on_delta is not None
         for attempt in range(1 if single_attempt else (2 if bounded else 3)):
             self.last_request_settings['attempts'] = attempt+1
             try:
@@ -201,6 +203,7 @@ class OpenAICompatClient:
                     headers=headers,
                     json=payload,
                     timeout=request_timeout,
+                    **({'stream': True} if on_delta is not None else {}),
                 )
                 checkpoint()
                 if resp.status_code >= 400:
@@ -211,6 +214,12 @@ class OpenAICompatClient:
                         payload.pop("response_format", None)
                         continue
                     raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}", http_status=resp.status_code)
+                if on_delta is not None:
+                    from .streaming import provider_stream
+                    try:
+                        return provider_stream(resp, 'openai', self, on_delta)
+                    finally:
+                        resp.close()
                 data = resp.json()
                 self.last_usage = data.get('usage')
                 if data['choices'][0].get('finish_reason') == 'length':
@@ -237,6 +246,14 @@ class OpenAICompatClient:
 
     def chat_json(self, messages: list[dict], *, task: str | None = None) -> dict:
         text = self.chat(messages, json_mode=True, task=task)
+        return self._parse_json(text, task)
+
+    def chat_json_stream(self, messages: list[dict], *, task=None, on_delta):
+        text = self.chat(messages, json_mode=True, task=task, on_delta=on_delta)
+        return OpenAICompatClient._parse_json(text, task)
+
+    @staticmethod
+    def _parse_json(text, task):
         if task in ('semantic_review', 'semantic_cross_review'):
             try:
                 parsed = json.loads(text)
@@ -529,10 +546,12 @@ class AnthropicClient:
         self.name = f"anthropic:{self.model}"
 
     def chat_json(self, messages: list[dict], *, task: str | None = None) -> dict:
-        return OpenAICompatClient.chat_json(self, messages, task=task)
+        return OpenAICompatClient._parse_json(self.chat(messages, json_mode=True, task=task), task)
+
+    chat_json_stream = OpenAICompatClient.chat_json_stream
 
     def chat(self, messages: list[dict], *, json_mode: bool = False, task: str | None = None,
-             temperature: float | None = None, max_tokens: int | None = None) -> str:
+             temperature: float | None = None, max_tokens: int | None = None, on_delta=None) -> str:
         self.last_usage = None
         self.last_reasoning = ''
         self.last_request_settings = {}
@@ -550,6 +569,8 @@ class AnthropicClient:
         }
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
+        if on_delta is not None:
+            payload['stream'] = True
         allocation = output_allocation(self.cfg, messages, meter=getattr(self, 'meter', None))
         if self.cfg.automatic_output:
             payload['max_tokens'] = allocation['max_tokens']
@@ -572,7 +593,7 @@ class AnthropicClient:
         }
 
         last_err: Exception | None = None
-        single_attempt = getattr(self, 'durable_single_attempt', False)
+        single_attempt = getattr(self, 'durable_single_attempt', False) or on_delta is not None
         for attempt in range(1 if single_attempt else (2 if bounded else 3)):
             self.last_request_settings['attempts'] = attempt+1
             try:
@@ -580,12 +601,19 @@ class AnthropicClient:
                 resp = requests.post(
                     f"{self.base_url}/messages", headers=headers, json=payload,
                     timeout=request_timeout,
+                    **({'stream': True} if on_delta is not None else {}),
                 )
                 checkpoint()
                 if resp.status_code >= 400:
                     if any(w in resp.text.lower() for w in ('context_length', 'maximum context', 'too many tokens')):
                         raise ContextWindowError('context_length_exceeded')
                     raise LLMError(f"HTTP {resp.status_code}: {truncate(resp.text, 400)}", http_status=resp.status_code)
+                if on_delta is not None:
+                    from .streaming import provider_stream
+                    try:
+                        return provider_stream(resp, 'anthropic', self, on_delta)
+                    finally:
+                        resp.close()
                 data = resp.json()
                 self.last_usage = data.get('usage')
                 blocks = data.get("content") or []

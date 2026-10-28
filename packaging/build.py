@@ -5,8 +5,6 @@
 为什么不再顺带准备 UI 或复制到别处：
 - 桌面壳是 Electron（``desktop-electron/main.js``），窗口直接加载 sidecar 提供的页面，
   不需要单独的 splash 目录；
-- 旧 Tauri 工程（``src-tauri/``）已在本机 Chromium GPU 崩溃后退场并删除，
-  它的 ``bundle.resources`` 约定不再适用。
 
 为什么不直接调 pyinstaller：默认落点是**当前工作目录**的 ``dist/``，
 跑一次会多出一份 140 MB 副本，还很容易验证到旧的那一个。

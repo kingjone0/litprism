@@ -192,7 +192,19 @@ class ChatJournal:
         self.conflict = None
 
     def chat_json(self, messages, *, task=None):
-        return self.invoke(task, messages, lambda: self.client.chat_json(messages, task=task))
+        def send():
+            streams = getattr(self.store, 'streams', None)
+            stream = getattr(self.client, 'chat_json_stream', None) if task == 'qa' else None
+            if streams is not None and task == 'qa':
+                streams.begin(self.rid, supported=callable(stream))
+            try:
+                if streams is not None and callable(stream):
+                    return stream(messages, task=task, on_delta=lambda kind,text:streams.feed(self.rid,kind,text))
+                return self.client.chat_json(messages, task=task)
+            finally:
+                if streams is not None and task == 'qa':
+                    streams.finish(self.rid)
+        return self.invoke(task, messages, send)
 
     def invoke(self, task, request, fn):
         from .tasks import checkpoint

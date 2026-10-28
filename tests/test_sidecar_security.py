@@ -1,15 +1,11 @@
-"""sidecar 安全层测试：token 守卫 + 外壳专用 CORS。
-
-为什么 CORS 必须与 token 绑定：裸 ``run.py serve`` 模式没有 token，
-若也放开跨源，任意网页都能读走本地知识库。所以这两件事一起测。
-"""
+"""同源 sidecar 的 token 守卫与不授予跨源读取权限。"""
 
 from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from litprism.sidecar import TAURI_ORIGINS, harden
+from litprism.sidecar import harden
 
 
 def make_app(token: str | None) -> FastAPI:
@@ -63,8 +59,8 @@ def test_page_shell_is_not_guarded():
 
 
 # ---------------------------------------------------------------- CORS
-def test_preflight_passes_without_token():
-    """预检不带 token，必须由 CORS 先接住 —— 这是浏览器能发起请求的前提。"""
+def test_cross_origin_preflight_without_token_is_rejected():
+    """Electron 无需跨源预检，旧来源不再豁免 token 守卫。"""
     c = TestClient(make_app("tk"))
     r = c.options(
         "/api/data",
@@ -74,20 +70,19 @@ def test_preflight_passes_without_token():
             "Access-Control-Request-Headers": "x-litprism-token,content-type",
         },
     )
-    assert r.status_code == 200
-    assert r.headers["access-control-allow-origin"] == "http://tauri.localhost"
-    allow_headers = r.headers["access-control-allow-headers"].lower()
-    assert "x-litprism-token" in allow_headers
+    assert r.status_code == 401
+    assert "access-control-allow-origin" not in r.headers
 
 
-def test_all_tauri_origins_allowed():
+def test_retired_origins_are_not_granted():
     c = TestClient(make_app("tk"))
-    for origin in TAURI_ORIGINS:
+    for origin in ('http://tauri.localhost', 'https://tauri.localhost', 'tauri://localhost'):
         r = c.options(
             "/api/data",
-            headers={"Origin": origin, "Access-Control-Request-Method": "GET"},
+            headers={"Origin": origin, "Access-Control-Request-Method": "GET", "X-LitPrism-Token": "tk"},
         )
-        assert r.headers.get("access-control-allow-origin") == origin, origin
+        assert r.status_code == 405
+        assert "access-control-allow-origin" not in r.headers, origin
 
 
 def test_foreign_origin_is_not_granted():
