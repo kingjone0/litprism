@@ -233,6 +233,46 @@ app.whenReady().then(async () => {
   await sleep(1400);
   await shot('inspector-evidence');
 
+  // 9) 窄屏巡检：390px 下是否有横向溢出、触控目标是否达标
+  await run(`toggleInspector(false)`);
+  win.setContentSize(390, 780);
+  await sleep(900);
+  const narrow = await run(`(() => {
+    const de = document.documentElement;
+    const overflow = de.scrollWidth - de.clientWidth;
+    // 找出实际溢出的元素（宽于视口且非全屏容器）
+    const wide = [...document.querySelectorAll('body *')].filter(el => {
+      const r = el.getBoundingClientRect();
+      return r.width > de.clientWidth + 1 && getComputedStyle(el).position !== 'fixed';
+    }).slice(0, 5).map(el => el.className || el.tagName);
+    // 可点区域下限：分档统计，并区分是否落在横向滚动容器内
+    const targets = [...document.querySelectorAll('button, [role=button], a[href]')]
+      .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+    const bucket = { lt32: [], lt44: [] };
+    for (const el of targets) {
+      const h = Math.round(el.getBoundingClientRect().height);
+      const name = (el.textContent || el.className || el.tagName).trim().slice(0, 14);
+      if (h < 32) bucket.lt32.push(name + ':' + h);
+      else if (h < 44) bucket.lt44.push(name + ':' + h);
+    }
+    const inScroller = wide.every(c => {
+      const el = document.querySelector('.' + String(c).split(' ')[0]);
+      return !el || !!el.closest('.quality-scroll, [style*="overflow"]');
+    });
+    return {inner: de.clientWidth, scroll: de.scrollWidth, overflow,
+            wideInScroller: inScroller, lt32: bucket.lt32, lt44: bucket.lt44};
+  })()`);
+  log('窄屏 390:', narrow);
+  await shot('narrow-chat');
+  await run(`openView('paper', {paperId: ${JSON.stringify(paper)}})`);
+  await sleep(1500);
+  await shot('narrow-paper');
+  await run(`enterView('library')`);
+  await sleep(900);
+  await shot('narrow-library');
+  win.setContentSize(1280, 820);
+  await sleep(400);
+
   child.kill();
   app.quit();
 }).catch((e) => {

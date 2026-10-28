@@ -588,17 +588,6 @@ function evHit(text, claim) {
   return bestScore >= 0.12 ? best : null;
 }
 
-/**
- * 作者行折叠：30 位作者全列会把右栏撑满，且看不出重点。
- * 8 人以内全列，超过则前 6 位 + 「等 N 人」，完整名单放 title。
- */
-function authorLine(authors) {
-  const list = (Array.isArray(authors) ? authors : String(authors || '').split(/[;,]/))
-    .map(a => String(a).trim()).filter(Boolean);
-  if (!list.length) return '';
-  return list.length <= 8 ? list.join('、') : `${list.slice(0, 6).join('、')} 等 ${list.length} 人`;
-}
-
 function renderEvidenceText(text, claim) {
   const s = String(text || '');
   const hit = evHit(s, claim);

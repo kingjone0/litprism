@@ -75,6 +75,18 @@ function emptyState({ icon: name = 'document', title = '', desc = '', action = '
     : `<div class="card"><div class="empty-state">${inner}</div></div>`;
 }
 
+/**
+ * 作者行折叠：30 位作者全列会占掉整个首屏（390px 下可达 14 行）。
+ * 8 人以内全列，超过则前 6 位 + 「等 N 人」；完整名单由调用方放进 title。
+ * 列表、论文详情、右栏共用这一处，避免同一份数据三种写法。
+ */
+function authorLine(authors) {
+  const list = (Array.isArray(authors) ? authors : String(authors || '').split(/[;,]/))
+    .map(a => String(a).trim()).filter(Boolean);
+  if (!list.length) return '';
+  return list.length <= 8 ? list.join('、') : `${list.slice(0, 6).join('、')} 等 ${list.length} 人`;
+}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -683,7 +695,7 @@ async function loadPaperDetail(versionId = null) {
           <div>
             <div class="page-title">${esc(p.display_title || p.title)}</div>
             <div class="page-sub">
-              ${esc((p.authors || []).join('、') || '作者未知')} · ${p.year || '年份未知'}
+              <span title="${esc((p.authors || []).join('、'))}">${esc(authorLine(p.authors) || '作者未知')}</span> · ${p.year || '年份未知'}
               ${p.venue ? ' · ' + esc(p.venue) : ''}
             </div>
             <div class="row wrap" style="margin-top:10px">
