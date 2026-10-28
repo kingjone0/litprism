@@ -82,6 +82,10 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* hidden 属性的优先级低于任何类选择器：只要元素带了 display（.btn / .tool-group …），
+   hidden 就失效。此前逐个补 #id[hidden] 补了 5 处仍会漏，这里统一兜底。 */
+[hidden] { display: none !important; }
+
 html, body {
   height: 100%;
   overflow: hidden;
@@ -757,7 +761,6 @@ details.card > summary::before,
 .list-item:hover { background: var(--panel-2); }
 .list-item.active { background: var(--accent-soft); }
 .list-main { flex: 1; min-width: 0; }
-#delivList [hidden], #modelSaveFeedback[hidden] { display: none; }
 #delivList [data-dfeedback], #modelSaveFeedback { padding: 0; }
 #delivList .deliverable-actions { gap: 6px; flex: none; }
 .read-error { padding-block: 12px; }
@@ -900,7 +903,6 @@ details.card > summary::before,
 .material-controls label { display: grid; gap: 6px; min-width: 0; font-size: 12px; font-weight: 550; color: var(--text-2); }
 .material-controls select { min-width: 0; width: 100%; }
 .backup-settings { max-width: 72ch; }
-.backup-settings [hidden] { display: none !important; }
 .backup-settings section {
   margin-block: 18px;
   padding: 16px;
@@ -2122,8 +2124,6 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
 .qa-unit-evidence > .reading-text { display: block; margin-block-start: 6px; }
 .qa-unit-list { margin-block: 18px; }
 .library-pagination { margin-block: 16px; gap: 12px; justify-content: flex-end; }
-#libraryPager[hidden] { display: none; }
-.task-dialog [type="submit"][hidden] { display: none; }
 .qa-unit-row { padding-block: 12px; border-block-end: 1px solid var(--border); }
 .qa-unit-row > summary { cursor: pointer; overflow-wrap: anywhere; }
 .qa-unit-row > summary .reading-text { display: inline; font-weight: 400; }
@@ -2173,7 +2173,6 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
 .chat-live-draft [data-live-state] { color: var(--accent); font-size: 12.5px; font-weight: 600; }
 .chat-live-draft [data-live-text] { white-space: pre-wrap; overflow-wrap: anywhere; }
 .chat-live-draft .chat-reasoning { margin-block: 10px; }
-.chat-live-draft [hidden] { display: none; }
 @media (max-width: 760px) {
   .chat-live-draft .btn { min-block-size: 44px; }
   .chat-live-draft summary { padding-block: 12px; }

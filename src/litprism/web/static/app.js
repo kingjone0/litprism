@@ -560,7 +560,7 @@ async function loadSidebar({ moreConversations = false } = {}) {
   const lib = $('#libList');
   if (!S.papers.length) {
     lib.innerHTML = papers.status === 'rejected' ? '<div class="side-empty">文献尚未读取。</div>'
-      : `<div class="side-empty">知识库为空。<br>用 <code class="mono">litprism add &lt;pdf&gt;</code> 导入。</div>`;
+      : `<div class="side-empty">知识库为空。<br>在「知识库」里导入第一篇论文。</div>`;
   } else {
     lib.innerHTML = S.papers.slice(0, 20).map(p => `
       <button class="side-item" data-paper="${esc(p.id)}">
@@ -1278,11 +1278,15 @@ async function loadChat() {
   if (!S.activeConv) {
     S.convScope = null;
     renderLocation();
-    box.innerHTML = `<div class="empty" style="padding-top:120px">
-      <div class="ico">💬</div>
-      <div class="title">没有选中的对话</div>
-      <div class="desc">从左侧选择一个会话，或新建一个。</div>
-    </div>`;
+    // 空库时左侧没有任何会话，"从左侧选择"是空承诺；直接给一个可点的出口
+    box.innerHTML = `<div style="padding-top:96px">${emptyState({
+      bare: true,
+      icon: 'chat',
+      title: '还没有对话',
+      desc: '新建一个会话，从一个研究问题开始；回答会附上原文来源。',
+      action: '<button class="btn primary" id="btnEmptyNewConv" style="margin-top:14px">新建会话</button>',
+    })}</div>`;
+    $('#btnEmptyNewConv').onclick = newConversation;
     return;
   }
   box.innerHTML = '<p role="status">正在加载会话与来源…</p>';
@@ -1572,6 +1576,9 @@ async function loadDeliverables() {
   const box = $('#delivList');
 
   if (!S.deliverables.length) {
+    // 没有交付物时「导出全部」点了只会得到空文件，禁用比让它报错好
+    const exportAll = $('#btnExportAll');
+    if (exportAll) exportAll.disabled = true;
     box.innerHTML = emptyState({
       icon: 'note',
       title: '还没有交付物',
@@ -1579,6 +1586,8 @@ async function loadDeliverables() {
     });
     return;
   }
+  const exportAllBtn = $('#btnExportAll');
+  if (exportAllBtn) exportAllBtn.disabled = false;
 
   box.innerHTML = S.deliverables.map(x => `
     <div class="list-item">

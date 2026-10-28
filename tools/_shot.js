@@ -68,7 +68,13 @@ app.whenReady().then(async () => {
     webPreferences: { preload: path.join(ROOT, 'desktop-electron', 'preload.js') },
   });
   await win.loadURL(`http://127.0.0.1:${port}/#t=${encodeURIComponent(token)}`);
-  await sleep(1500);
+  // boot() 是异步的，末尾会 openView('library')；固定等待在空库上不够，
+  // 会把我们随后的导航覆盖回知识库。等它真正跑完再操作。
+  for (let i = 0; i < 50; i++) {
+    if (await win.webContents.executeJavaScript('Boolean(window.S && S.status)')) break;
+    await sleep(200);
+  }
+  await sleep(900);
 
   const run = (js) => win.webContents.executeJavaScript(js);
   const shot = async (name) => {
@@ -82,6 +88,22 @@ app.whenReady().then(async () => {
   const conv = await run(`(async () => (await api('/api/conversations')).items?.[0]?.id || null)()`);
   const paper = await run(`(async () => (await api('/api/papers')).items?.[0]?.id || null)()`);
   log('会话', conv, '| 论文', paper);
+
+  // 空库（首次启动）：后续步骤都依赖真实会话/论文，改为只巡检空状态
+  if (!conv || !paper) {
+    for (const v of ['chat', 'library', 'knowledge', 'deliverables', 'recommend', 'memories', 'trash', 'skills', 'verify']) {
+      await run(`openView(${JSON.stringify(v)})`);
+      await sleep(700);
+      await shot('empty-' + v);
+    }
+    await run(`openSettings('general')`);
+    await sleep(700);
+    await shot('empty-settings');
+    log('空库巡检完成');
+    child.kill();
+    app.quit();
+    return;
+  }
 
   // 1) 对话空状态
   await run(`openView('chat', {convId: ${JSON.stringify(conv)}})`);

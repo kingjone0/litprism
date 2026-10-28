@@ -1297,6 +1297,9 @@ const POOL_FILTERS = { open: '待处理', library: '已在库', all: '全部' };
  */
 function syncBatchActions() {
   const none = S.selectedPapers.size === 0;
+  // 库里一篇都没有时整组没有意义，隐藏比显示一排禁用按钮干净
+  const group = document.querySelector('.tool-group');
+  if (group) group.hidden = S.papers.length === 0;
   ['#btnMovePapers', '#btnBatchDelete', '#btnPaperExport', '#btnBatchVerify'].forEach(sel => {
     const el = $(sel);
     if (el) el.disabled = none;
