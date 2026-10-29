@@ -1,0 +1,100 @@
+name: install-lifecycle
+
+# 只手动触发：安装包 258MB，不该在每次 push 时跑。
+# 方案与覆盖边界见 docs/安装生命周期CI方案-2026-10-29.md
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '含安装包的 Release tag'
+        required: true
+        default: 'v0.1.0-ci.1'
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: 下载安装包
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\pkg" | Out-Null
+          gh release download "${{ inputs.release_tag }}" --repo "${{ github.repository }}" `
+            --pattern "LitPrism-Setup-*.exe" --dir "$env:RUNNER_TEMP\pkg"
+          $f = Get-ChildItem "$env:RUNNER_TEMP\pkg\LitPrism-Setup-*.exe"
+          "包: $($f.Name)  $($f.Length) 字节"
+          if ($f.Length -lt 100MB) { throw "安装包大小异常: $($f.Length)" }
+
+      - name: 静默安装
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem "$env:RUNNER_TEMP\pkg\LitPrism-Setup-*.exe").FullName
+          $p = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
+          "退出码: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "安装失败 $($p.ExitCode)" }
+
+      - name: 校验落位
+        shell: pwsh
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\LitPrism"
+          $need = @('LitPrism.exe', 'resources\litprism-sidecar.exe', 'Uninstall LitPrism.exe')
+          foreach ($f in $need) {
+            $path = Join-Path $dir $f
+            if (-not (Test-Path $path)) { throw "缺文件: $path" }
+            "OK  $f  ($([math]::Round((Get-Item $path).Length/1MB,1)) MB)"
+          }
+
+      - name: 启动并确认内置 sidecar
+        shell: pwsh
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\LitPrism"
+          $app = Start-Process (Join-Path $dir 'LitPrism.exe') -PassThru
+          $sc = $null
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 3
+            $sc = Get-CimInstance Win32_Process -Filter "Name='litprism-sidecar.exe'"
+            if ($sc) { break }
+          }
+          if (-not $sc) { throw "90 秒内 sidecar 未启动" }
+          $paths = @($sc | ForEach-Object { $_.ExecutablePath } | Sort-Object -Unique)
+          $paths | ForEach-Object { "sidecar 进程: $_" }
+          # 关键断言：跑的是包内二进制，不是系统 Python
+          if ($paths -match 'python') { throw "sidecar 由 python 启动: $($paths -join '; ')" }
+          if (-not ($paths -match [regex]::Escape($dir))) { throw "sidecar 不在安装目录: $($paths -join '; ')" }
+
+          $dataDir = "$env:APPDATA\LitPrism"
+          if (-not (Test-Path $dataDir)) { throw "数据目录未创建: $dataDir" }
+          "数据目录: $dataDir"
+          "DATA_DIR=$dataDir" | Out-File "$env:GITHUB_ENV" -Append -Encoding utf8
+
+          'keep-me' | Out-File (Join-Path $dataDir 'ci-retention.marker') -Encoding utf8
+
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          Get-Process litprism-sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 4
+
+      - name: 静默卸载
+        shell: pwsh
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\LitPrism"
+          $un = Join-Path $dir 'Uninstall LitPrism.exe'
+          $p = Start-Process $un -ArgumentList '/S' -Wait -PassThru
+          "退出码: $($p.ExitCode)"
+          Start-Sleep -Seconds 10
+          if (Test-Path (Join-Path $dir 'LitPrism.exe')) { throw '卸载后主程序仍在' }
+          "卸载后主程序已移除"
+
+      - name: 重装并核对数据保留
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem "$env:RUNNER_TEMP\pkg\LitPrism-Setup-*.exe").FullName
+          $p = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "重装失败 $($p.ExitCode)" }
+          $marker = Join-Path $env:DATA_DIR 'ci-retention.marker'
+          if (-not (Test-Path $marker)) { throw "重装后数据丢失: $marker" }
+          "数据保留 OK: $((Get-Content $marker).Trim())"
