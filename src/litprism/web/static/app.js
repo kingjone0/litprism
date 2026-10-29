@@ -98,10 +98,14 @@ const EMPTY_ACTION_TARGETS = {
   compare: '#btnCompareSelected',
   'fetch-models': '[data-pv-fetch]',
   'use-selection': '#btnUseSelection',
+  'new-conv': '#btnNewConv',
+  'new-skill': '#btnSkillNew',
+  'reload-papers': '#btnRetrySidebar',
 };
 
 function emptyCta(action, label, { primary = true } = {}) {
-  return `<button class="btn sm${primary ? ' primary' : ''}" data-empty-action="${esc(action)}">${esc(label)}</button>`;
+  // 空态里这通常是页面上唯一的动作，用常规尺寸（约 33px）而不是 sm（约 27px）
+  return `<button class="btn${primary ? ' primary' : ''}" data-empty-action="${esc(action)}">${esc(label)}</button>`;
 }
 
 document.addEventListener('click', event => {
@@ -567,7 +571,8 @@ async function loadSidebar({ moreConversations = false } = {}) {
     };
     convBox.append(more);
   }
-  $('#btnNewConv').onclick = newConversation;
+  // #btnNewConv 是 index.html 里的静态按钮，bindGlobal() 已绑一次；
+  // 这里原来每次加载侧栏都重绑一遍，属冗余。
   $$('[data-conv-manage]', convBox).forEach(b => b.onclick = () => editConversation(S.conversations.find(c => c.id === b.dataset.convManage)));
   $$('[data-conv]', convBox).forEach(b => b.onclick = () => openView('chat', { convId: b.dataset.conv }));
   $$('[data-conv-del]', convBox).forEach(b => b.onclick = async e => {
@@ -626,7 +631,7 @@ async function loadLibrary(offset = 0) {
   const box = $('#paperList'), pager = $('#libraryPager');
   if (!S.sidebarLoaded?.papers) {
     pager.hidden = true;
-    box.innerHTML = emptyState({ bare: true, icon: 'library', title: '文献尚未读取', desc: '请在导航中的错误提示处重新读取。' });
+    box.innerHTML = emptyState({ bare: true, icon: 'library', title: '文献尚未读取', desc: '导航读取失败，可以重新读一次；仍失败时看左侧错误提示。', action: emptyCta('reload-papers', '重新读取') });
     return;
   }
   const q = ($('#libSearch').value || '').trim();
@@ -1315,9 +1320,8 @@ async function loadChat() {
       icon: 'chat',
       title: '还没有对话',
       desc: '新建一个会话，从一个研究问题开始；回答会附上原文来源。',
-      action: '<button class="btn primary" id="btnEmptyNewConv" style="margin-top:14px">新建会话</button>',
+      action: emptyCta('new-conv', '新建会话'),
     })}</div>`;
-    $('#btnEmptyNewConv').onclick = newConversation;
     return;
   }
   box.innerHTML = '<p role="status">正在加载会话与来源…</p>';
@@ -1698,7 +1702,8 @@ async function loadSkills() {
       icon: 'skills',
       title: q ? '没有匹配的 Skill' : '尚未添加 Skill',
       desc: q ? '换个关键词试试。'
-        : 'Skill 是声明式的提示词扩展，不含可执行代码。在下方「Skill 目录」里新建子目录，放入 skill.yaml 与 prompt.md 即可。',
+        : 'Skill 是声明式的提示词扩展，不含可执行代码；也可以直接在下方「Skill 目录」里建子目录。',
+      action: q ? '' : emptyCta('new-skill', '新建 Skill'),
     });
     return;
   }

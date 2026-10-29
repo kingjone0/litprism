@@ -1113,7 +1113,7 @@ async function loadKnowledge() {
   const d = await readPanel($('#knowledgeList'), '/api/evidence', loadKnowledge, () => S.activeView === 'knowledge');
   if (!d) return false;
   $('#knowledgeList').innerHTML = d.items.length ? d.items.map(s => `<div class="list-item"><div class="list-main"><a href="#evidence-${esc(s.id)}" data-evidence-ref="${esc(s.id)}">${esc(s.title)}</a><p>${esc(s.kind === 'web' ? '网页' : '知识条目')} · ${esc(trustLabel(s.effective_status || s.status))}</p></div></div>`).join('')
-    : emptyState({ icon: 'library', title: '还没有知识条目', desc: '在右栏把可引用的原文片段或网页快照人工确认后，会出现在这里。' });
+    : emptyState({ icon: 'library', title: '还没有知识条目', desc: '在右栏把可引用的原文片段或网页快照人工确认后，会出现在这里。', action: emptyCta('view:chat', '去对话') });
 }
 
 document.addEventListener('click', e => {
