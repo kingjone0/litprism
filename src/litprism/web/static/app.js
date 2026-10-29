@@ -2982,8 +2982,8 @@ function bindGlobal() {
     $('#verifyInputError').textContent = '';
   };
 
-  // 导出全部
-  $('#btnExportAll').onclick = () => toast('批量导出将在后续版本提供');
+  // 「导出全部」的绑定在 workflows.js（downloadApi → /api/deliverables-archive）。
+  // 这里曾有一个 toast 占位，靠脚本加载顺序被覆盖才没生效，属于会随顺序失效的陷阱，已删除。
 
   // 右侧面板 tab
   $$('[data-insp]').forEach(t => t.onclick = () => {
