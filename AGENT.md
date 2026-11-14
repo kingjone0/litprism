@@ -75,6 +75,12 @@ Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
 | `tools/check_workbench.cjs` | 无窗口的前端交互验收（与 `check_workflows` 覆盖面不同，需要 playwright） |
 | `tools/_empty_state_check.cjs`、`tools/_theme_check.cjs` | 空态按钮点击、四套主题明暗与分层校验（需运行中的实例与 `BASE_URL`） |
 
+## 打包
+
+打安装包只有一条命令：`python packaging/release.py`（sidecar → 冒烟 → 安装包 → 校验）。
+**不要手工跑 `build.py` + `electron-builder`**——产物落后代码已经因此发生过两次；
+脚本会在冒烟里确认打包件建出的库是当前 schema，并校验安装包内 sidecar 与 `packaging/dist` 哈希相同。
+
 ## 不能削弱的边界
 
 1. 卖点是“不编”：多源真实性核验、检索与引用回溯、导入守卫共同生效。`verified`/`manual_confirmed` 可引用；`likely` 需人工确认；`not_found` 是源正常但无匹配，`unchecked` 是源失败，不能混用。
