@@ -1676,7 +1676,10 @@ async function showDeliverable(id) {
   try {
     const d = await api(`/api/deliverables/${encodeURIComponent(id)}`);
     const cites = (d.citations || []).map(c => `<p>${esc(c.paper_title || c.paper_id)} · ${c.page == null ? '无页码' : 'p.'+esc(c.page)}</p>`).join('');
-    workflowDialog(d.title, `<p class="source-intro">${esc(d.model || '模型未记录')} · ${esc(d.status_label)}</p><div class="reading-report">${LitUI.md(d.content || '')}</div><h3>引用来源</h3>${cites || '<p>无来源，禁止导出。</p>'}`, null);
+    const comparison = d.type === 'comparison';
+    const content = comparison ? LitUI.reportMarkdown(d.content) : LitUI.md(d.content || '');
+    const dialog = workflowDialog(d.title, `<p class="source-intro">${esc(d.model || '模型未记录')} · ${esc(d.status_label)}</p><div class="reading-report">${content}</div><h3>引用来源</h3>${cites || '<p>无来源，禁止导出。</p>'}`, null);
+    if (comparison) dialog.classList.add('comparison-preview');
 
   } catch (e) { toast(e.message, true); }
 }

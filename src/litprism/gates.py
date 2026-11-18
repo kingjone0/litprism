@@ -10,12 +10,11 @@
 | 闸门 | 判断 | 失败后果 |
 |---|---|---|
 | `json_complete` | 返回是可解析的对象 | 整条指令重跑 |
-| `has_citation` | 每个非空字段都带来源 | 该字段清空（既有逻辑） |
+| `has_citation` | 每个非空字段正文带来源 | 已校验字段引用可有界重提，否则保留告警 |
 | `numeric_parse` | 含数字的陈述能抽出数值 | 标记待人工，不阻断 |
 | `section_coverage` | 条数落在期望区间 | 低于下限 → 疑似漏读，重跑 |
 
-**`section_coverage` 是注意力质量的唯一可观测代理。** 它不完美
-（模型可以"编满"而不报错），但配合引用逐字校验能挡住大部分情况。
+条数与引用格式是机械信号，不能证明理解完整、语义归属或原句蕴含。
 
 修复有界
 --------
@@ -127,15 +126,25 @@ def evaluate(
         report.results.append(GateResult('structure_valid', False,
                                          '模型返回了未知字段或结构损坏，整批字段作废', 'flag'))
 
-    # 2) 引用存在性：字段有内容但没有任何来源标记
-    missing = [label for k, label in fields
-               if (data.get(k) or '').strip() and not _CITATION.search(data.get(k) or '')]
+    # 2) Citation presence uses the same sentence boundaries as candidates;
+    # one cited sentence cannot conceal another uncited sentence in that field.
+    missing = [(k, label) for k, label in fields
+               if any(not _CITATION.search(part) for part in _SENTENCE.findall(data.get(k) or '')
+                      if re.search(r'[\w\u4e00-\u9fff]', _CITATION.sub('', part)))]
+    evidence = data.get('field_evidence') or {}
+    # evaluate() receives fields after source/page validation. A field-level
+    # reference list may justify asking for a new extraction, never attaching
+    # that list locally to each claim. Invalid or absent evidence stays flagged.
+    layout_repair = bool(missing) and not issues and isinstance(evidence, dict) and all(
+        isinstance(evidence.get(k), list) and evidence[k]
+        and all(isinstance(ref, str) and _CITATION.fullmatch('['+ref.strip('[]')+']')
+                for ref in evidence[k]) for k, _ in missing)
     has_any = any((data.get(k) or '').strip() for k, _ in fields)
     report.results.append(GateResult(
         'has_citation', not missing,
         '全部字段带来源' if (not missing and has_any) else
-        ('各字段均无内容，未形成引用' if not has_any else f'缺来源：{"、".join(missing)}'),
-        action='pass' if not missing else 'flag',
+        ('各字段均无内容，未形成引用' if not has_any else f'正文缺行内引用：{"、".join(label for _, label in missing)}'),
+        action='pass' if not missing else 'repair' if layout_repair else 'flag',
     ))
 
     # 3) 数值可解析：含数字的陈述必须能抽出数字，否则说明表述模糊
@@ -147,7 +156,8 @@ def evaluate(
         action='pass' if not unparsed else 'flag',
     ))
 
-    # 4) 章节覆盖：条数落在期望区间
+    # 4) Claim-count estimate; retain the persisted section_coverage key.
+    # Counts do not establish either semantic correctness or complete recall.
     total = count_claims(data, fields)
     if expected:
         lo, hi = expected
@@ -155,10 +165,10 @@ def evaluate(
             detail = f'提出 {total} 条，期望 {lo}–{hi} 条 —— 疑似漏读'
             action = 'repair'
         elif total > hi:
-            detail = f'提出 {total} 条，期望 {lo}–{hi} 条 —— 疑似重复或编造'
+            detail = f'提出 {total} 条，高于陈述数估计 {lo}–{hi}；仅为数量提示，需结合原文核对'
             action = 'flag'
         else:
-            detail = f'{total} 条，落在期望区间 {lo}–{hi}'
+            detail = f'{total} 条，落在估计区间 {lo}–{hi}；不代表内容完整或正确'
             action = 'pass'
         report.results.append(GateResult('section_coverage', action == 'pass', detail, action))
     else:
@@ -180,12 +190,26 @@ REPAIR_HINT = (
 )
 
 
-def repair_text(directive, got: int) -> str:
-    """给"疑似漏读"的指令加一段定向提示。"""
+CITATION_REPAIR_HINT = (
+    '\n\n【上一轮的问题】部分字段正文缺行内引用，字段来源列表不能替代逐条引用。'
+    '请依据同一份原文重新返回完整六字段 JSON，不只返回局部修订。'
+    '每条贡献写成独立完整句，逐条核对后就地附直接依据 [P# p.N]，field_evidence 汇总这些引用。'
+    '不要把一个字段的全部来源机械铺到每条陈述上，不为补格式增加条数或编造依据；'
+    '原文不支持的内容留空并说明。保留作者的主张主体、条件与确定性，未来计划明确写为计划而非已完成。'
+)
+
+
+def repair_text(directive, got: int, gates: GateReport | None = None) -> str:
+    """Target actual failed gates; no report means reserve both hints in preflight."""
     lo, hi = directive.expected
-    return directive.text + REPAIR_HINT.format(
-        tokens=f'{directive.tokens:,}', got=got, lo=lo, hi=hi,
-    )
+    reasons = {r.name for r in gates.failed if r.action == 'repair'} if gates is not None else {
+        'section_coverage', 'has_citation'}
+    text = directive.text
+    if 'section_coverage' in reasons:
+        text += REPAIR_HINT.format(tokens=f'{directive.tokens:,}', got=got, lo=lo, hi=hi)
+    if 'has_citation' in reasons:
+        text += CITATION_REPAIR_HINT
+    return text
 
 
 def split_scope(scope: str) -> tuple[str, str] | None:

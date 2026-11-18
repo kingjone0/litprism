@@ -481,16 +481,39 @@ async function loadComparison() {
   S.compareSources = r.sources || [];
   refreshInspector();
   const check = r.data._citation_check || {};
-  box.innerHTML = `<div class="source-intro">模型：${esc(r.data._model || '未知')}</div>
-    ${check.passed === false ? `<div class="lui-degraded">${esc((check.issues || []).join('；'))}</div>` : '<button class="btn" id="btnSaveComparison">保存为对比报告</button>'}
-    <div class="reading-report">${LitUI.md(r.data.summary || '')}
-      ${materialNote(r.data._coverage)}
-      ${coverageNote(r.data._coverage)}
-      ${semanticReviewPanel(r.data._semantic_review, {kind: 'run', id: r.data._semantic_run_id}, r.data._candidates)}
-      ${(r.data.dimensions || []).length ? `<div style="overflow-x:auto"><table class="table"><thead><tr><th>维度</th>${(r.data._papers || []).map(p => `<th>${esc(p.title)}</th>`).join('')}</tr></thead>
-        <tbody>${r.data.dimensions.map(d => `<tr><td>${esc(d.dimension)}</td>${(r.data._papers || []).map(p => `<td>${LitUI.md(String((d.values || {})[p.tag] || '当前提取未找到依据'))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : ''}
-      ${['convergence', 'divergence'].map(k => (r.data[k] || []).length ? `<h3>${k === 'convergence' ? '一致点' : '分歧点'}</h3>${r.data[k].map(v => `<p>${LitUI.md(v)}</p>`).join('')}` : '').join('')}
-      ${(r.data.evidence_map || []).length ? `<h3>结论与证据映射</h3>${r.data.evidence_map.map(e => `<p>${esc(e.claim)} — ${esc((e.sources || []).join('、'))}</p>`).join('')}` : ''}</div>`;
+  if (check.passed === false) {
+    box.innerHTML = `<div class="lui-degraded" role="alert">${esc((check.issues || []).join('；') || r.data.summary)}</div>`;
+    return;
+  }
+  const papers = r.data._papers || [], dimensions = r.data.dimensions || [];
+  box.innerHTML = `<div class="comparison-actions">
+      <span>${papers.length} 篇论文${dimensions.length ? ` · ${dimensions.length} 个维度` : ''}</span>
+      <span id="comparisonReviewActions" class="comparison-review-actions"></span>
+      <button class="btn" id="btnSaveComparison">保存为对比报告</button>
+    </div>
+    <div class="reading-report"><div id="comparisonSummary">${LitUI.md(r.data.summary || '')}</div>
+      ${dimensions.length ? `<p class="comparison-scroll-hint">横向滑动查看其他论文</p><div class="comparison-table-scroll" role="region" aria-label="论文对比表，可横向滚动" tabindex="0"><table class="table comparison-table" style="--comparison-columns:${papers.length}"><thead><tr><th scope="col">维度</th>${papers.map(p => `<th scope="col"><span class="comparison-paper-tag">${esc(p.tag)}</span>${esc(p.title)}</th>`).join('')}</tr></thead>
+        <tbody>${dimensions.map(d => `<tr><th scope="row">${esc(d.dimension)}</th>${papers.map(p => {
+          const value = d.values?.[p.tag];
+          return `<td><div class="comparison-cell-value">${value ? LitUI.md(value) : ''}</div><div class="comparison-cell-state" data-compare-field="${esc('dimension|'+d.dimension+'|'+p.tag)}" data-original-value="${esc(value || '')}"></div></td>`;
+        }).join('')}</tr>`).join('')}</tbody></table></div>` : ''}
+      <div id="comparisonHighlights"></div>
+      <details class="comparison-metadata"><summary>材料与来源记录</summary>
+        <p class="source-intro">模型：${esc(r.data._model || '未知')}</p>${materialNote(r.data._coverage)}${coverageNote(r.data._coverage)}
+        <div id="comparisonEvidenceMap"></div></details></div>`;
+  paintComparisonReviews(r);
+  if (r.data._semantic_run_id) {
+    const fetchReviews = api(semanticEndpoint({kind:'run', id:r.data._semantic_run_id}));
+    r.reviewsRequest = fetchReviews;
+    fetchReviews.then(detail => {
+      if (r.reviewsRequest !== fetchReviews) return;
+      r.reviews = detail.reviews;
+      if (S.comparison === r) paintComparisonReviews(r);
+    }).catch(() => {
+      if (r.reviewsRequest !== fetchReviews || S.comparison !== r) return;
+      $('#btnComparisonReview', box)?.setAttribute('title', '暂未取得人工审核记录，点击重试');
+    });
+  }
   $('#btnSaveComparison')?.addEventListener('click', async () => {
     try {
       await api('/api/deliverables', { method: 'POST', body: { type: 'comparison', title: '论文对比报告', content: r.markdown,
@@ -498,6 +521,69 @@ async function loadComparison() {
       toast('已保存到研究产出');
     } catch (error) { toast(error.message, true); }
   });
+}
+
+const semanticDecisionLabels = {confirm: '已确认入库', reject: '已拒绝', revoke: '已撤销'};
+
+function latestSemanticActions(reviews) {
+  return new Map((reviews || []).map(review => [review.claim_id, review.action]));
+}
+
+function comparisonClaimLink(id, claim, label) {
+  return `<a href="#semantic-${esc(claim.id)}" data-semantic-claim="${esc(claim.id)}" data-semantic-kind="run" data-semantic-id="${esc(id)}">${esc(label)}</a>`;
+}
+
+function comparisonFieldText(items) {
+  return [...new Set(items.map(item => item.text + '\n依据：' + (item.quotes || []).map(q =>
+    `[${q.tag}${q.page != null ? ` p.${q.page}` : ''}]`).join(' ')))].join('\n\n');
+}
+
+function paintComparisonReviews(result) {
+  const box = $('#comparisonResult');
+  const toolbar = $('#comparisonReviewActions', box);
+  if (!toolbar) return;
+  const { _semantic_run_id: id, _semantic_review: report } = result.data;
+  const actions = latestSemanticActions(result.reviews);
+  const items = report?.items || [];
+  const excludes = item => ['reject','revoke'].includes(actions.get(item.id));
+  const demotedFields = new Set(items.filter(item => item.status === 'machine_supported' && excludes(item)).map(item => item.field));
+  const remaining = items.filter(item => item.status === 'machine_supported' && !excludes(item));
+  const save = $('#btnSaveComparison', box);
+  save.disabled = !!demotedFields.size;
+  save.title = demotedFields.size ? '生成快照包含已拒绝或撤销的陈述' : '';
+  $('#comparisonSummary', box).innerHTML = LitUI.md(demotedFields.has('summary') ? comparisonFieldText(remaining.filter(i => i.field === 'summary')) : result.data.summary || '');
+  $('#comparisonHighlights', box).innerHTML = ['convergence', 'divergence'].map(key => {
+    const values = demotedFields.has(key) ? remaining.filter(item => item.field === key).map(item => item.text) : result.data[key] || [];
+    return values.length ? `<h3>${key === 'convergence' ? '一致点' : '分歧点'}</h3>${values.map(v => LitUI.md(v)).join('')}` : '';
+  }).join('');
+  const evidence = demotedFields.size ? remaining.map(item => ({claim:item.text, sources:item.quotes.map(q => q.tag)})) : result.data.evidence_map || [];
+  $('#comparisonEvidenceMap', box).innerHTML = (evidence.length ? '<h3>结论与证据映射</h3>' : '') + evidence.map(e => `<p>${esc(e.claim)} — ${esc((e.sources || []).join('、'))}</p>`).join('');
+  const pending = items.filter(item => item.status !== 'machine_supported' && !actions.has(item.id));
+  const label = !id ? '未运行语义核查' : [
+    pending.length ? `${pending.length} 条待核对` : '',
+    actions.size ? `${actions.size} 条已处理` : '',
+  ].filter(Boolean).join(' · ') || '核对陈述与来源';
+  if (!toolbar.firstElementChild && id) {
+    toolbar.innerHTML = '<button class="btn" id="btnComparisonReview"></button>';
+    $('#btnComparisonReview', toolbar).onclick = () => showSemantic({kind:'run', id});
+  }
+  ($('#btnComparisonReview', toolbar) || toolbar).textContent = label;
+  const byField = new Map();
+  for (const item of items) {
+    if (item.status === 'machine_supported' && !actions.has(item.id)) continue;
+    if (!byField.has(item.field)) byField.set(item.field, []);
+    byField.get(item.field).push(item);
+  }
+  for (const cell of $$('[data-compare-field]', box)) {
+    const field = cell.dataset.compareField;
+    const claims = byField.get(field) || [];
+    const value = demotedFields.has(field) ? comparisonFieldText(remaining.filter(i => i.field === field)) : cell.dataset.originalValue;
+    cell.previousElementSibling.innerHTML = value ? LitUI.md(value) : '';
+    cell.innerHTML = id && claims.length ? claims.map((claim, index) => {
+      const state = semanticDecisionLabels[actions.get(claim.id)] || '待核对';
+      return comparisonClaimLink(id, claim, claims.length === 1 ? state : `${state}（${index+1}）`);
+    }).join(' · ') : value ? '' : '未提及';
+  }
 }
 
 async function recommendPapers(event) {
@@ -723,6 +809,25 @@ async function loadSemanticDetail(ref) {
   try {
     const d = await api(semanticEndpoint(ref));
     if (S.semanticRef !== ref || seq !== S.evidenceLoadSeq) return;
+    const compare = ref.kind === 'run' && S.comparison?.data._semantic_run_id === ref.id ? S.comparison : null;
+    if (compare) {
+      compare.reviewsRequest = null;
+      compare.reviews = d.reviews;
+      paintComparisonReviews(compare);
+    }
+    const decisions = latestSemanticActions(d.reviews);
+    if (ref.kind === 'run' && !ref.claimId) {
+      const items = d.report.items || [];
+      const groups = [
+        ['待核对', items.filter(item => item.status !== 'machine_supported' && !decisions.has(item.id))],
+        ['已处理', items.filter(item => decisions.has(item.id))],
+        ['机器支持', items.filter(item => item.status === 'machine_supported' && !decisions.has(item.id))],
+      ];
+      const entries = ([title, rows], index) => !rows.length ? '' : `<details class="comparison-review-list"${index === 0 ? ' open' : ''}><summary>${title} · ${rows.length} 条</summary><ul>${rows.map(item => `<li>${comparisonClaimLink(ref.id, item, item.text)}${decisions.has(item.id) ? `<span class="source-intro">${esc(semanticDecisionLabels[decisions.get(item.id)])}</span>` : ''}</li>`).join('')}</ul></details>`;
+      box.innerHTML = `<button class="btn sm" id="btnSemanticBack">返回来源列表</button><h3>核对对比陈述</h3>${groups.map(entries).join('') || '<p>本次没有可核对的陈述。</p>'}`;
+      $('#btnSemanticBack').onclick = () => { S.semanticRef = null; refreshInspector(); };
+      return;
+    }
     const cand = (d.candidates || []).find(i => i.id === ref.claimId);
     const claim = (d.report.items || []).find(i => i.id === ref.claimId)
       || (cand ? {...cand, status: 'candidate', reason: '候选陈述 · 未经机器核查'} : null);
@@ -732,7 +837,7 @@ async function loadSemanticDetail(ref) {
     const related = (d.report.differences || []).filter(i => i.claim_ids.includes(claim.id));
     const labels = {machine_supported: '机器支持 · 尚未经人工确认', needs_review: '待人工核对', contradicted: '机器发现不符 · 待人工核对', candidate: '候选陈述 · 未经机器核查，可直接确认入知识库'};
     const fields = {research_question:'研究问题', methodology:'方法', experiment_design:'实验设计', key_conclusions:'主要结论', innovations:'创新点', limitations:'局限', summary:'总体结论', convergence:'一致点', divergence:'分歧点'};
-    const renderClaim = c => `<h4>第 ${esc(c.batch)} 批 · ${esc(fields[c.field] || '对比陈述')}</h4><div class="reading-text">${esc(c.text)}</div><p class="source-intro">${esc(labels[c.status] || c.status)}</p>${c.reason ? `<p>${c.status === 'candidate' ? '状态' : '机器核查说明'}：${esc(c.reason)}</p>` : ''}${(c.quotes || []).map(q => `<details><summary>引文 [${esc(q.tag)}] ${q.page == null ? '' : 'p.'+esc(q.page)} · ${esc(q.quote.slice(0,70))}${q.quote.length > 70 ? '…' : ''}</summary><blockquote class="reading-text">${renderEvidenceText(q.quote, c.text)}</blockquote></details>`).join('')}<p>候选来源：${(c.candidate_tags || []).map(t => {
+    const renderClaim = c => `<h4>第 ${esc(c.batch)} 批 · ${esc(fields[c.field] || '对比陈述')}</h4><div class="reading-text">${esc(c.text)}</div><p class="source-intro" data-semantic-state>${esc(semanticDecisionLabels[decisions.get(c.id)] || labels[c.status] || c.status)}</p>${c.reason ? `<details ${decisions.has(c.id) ? '' : 'open'}><summary>${c.status === 'candidate' ? '候选记录' : '原机器核查记录'}</summary><p>${esc(c.reason)}</p></details>` : ''}${(c.quotes || []).map(q => `<details><summary>引文 [${esc(q.tag)}] ${q.page == null ? '' : 'p.'+esc(q.page)} · ${esc(q.quote.slice(0,70))}${q.quote.length > 70 ? '…' : ''}</summary><blockquote class="reading-text">${renderEvidenceText(q.quote, c.text)}</blockquote></details>`).join('')}<p>候选来源：${(c.candidate_tags || []).map(t => {
       const stored = S.semanticSources?.[t];
       return stored ? `<a href="#evidence-${esc(stored.chunk_id)}" data-evidence-ref="${esc(stored.chunk_id)}">[${esc(t)}] ${esc(stored.paper_title || '原文')} ${stored.page == null ? '' : 'p.'+esc(stored.page)}</a>` : esc('['+t+']');
     }).join(' · ')}</p>${renderSourceBlocks(c)}`;
@@ -742,12 +847,16 @@ async function loadSemanticDetail(ref) {
     const linked = (d.report.items || []).filter(i => ids.has(i.id));
     const sourceRecords = d.sources || [];
     sourceRecords.forEach(s => { S.semanticSources[s.tag] = s; });
-    box.innerHTML = `<button class="btn sm" id="btnSemanticBack">返回来源列表</button><h3>陈述与整体差异核对</h3><p class="source-intro">机器核查不等于人工确认。待核对项保留在此处，不作为正常结论。</p>${renderClaim(claim)}
+    box.innerHTML = `<button class="btn sm" id="btnSemanticBack">${ref.kind === 'run' ? '返回核对列表' : '返回来源列表'}</button><h3>陈述与整体差异核对</h3>${renderClaim(claim)}
       ${related.map(diff => `<details open><summary>差异候选：${esc(diff.reason)}</summary>${linked.filter(c => c.id !== claim.id && diff.claim_ids.includes(c.id)).map(renderClaim).join('')}</details>`).join('')}
       <form id="semanticReview"><label>核对后的知识正文（可修正原陈述）<textarea class="textarea" rows="5" name="reviewed_text" maxlength="20000">${esc(last?.reviewed_text || claim.text)}</textarea></label><label>人工核对依据<textarea class="textarea" name="note" maxlength="5000" required placeholder="核对双方出处、条件、数字与适用范围后填写"></textarea></label><p class="source-intro">确认后单独加入可信知识库，原始解读与论文核验状态保留。</p><div class="row wrap"><button class="btn primary" name="action" value="confirm" ${last?.action === 'confirm' ? 'disabled' : ''}>${last?.action === 'confirm' ? '已人工确认入库' : '确认正文并入库'}</button><button class="btn" name="action" value="reject" ${last?.action === 'reject' ? 'disabled' : ''}>拒绝陈述</button><button class="btn" name="action" value="revoke" ${last?.action !== 'confirm' ? 'disabled' : ''}>撤销入库</button></div><p class="task-error" role="alert"></p></form>
       ${last?.knowledge_id ? `<p><a href="#evidence-${esc(last.knowledge_id)}" data-evidence-ref="${esc(last.knowledge_id)}">查看知识条目与来源快照</a></p>` : ''}
       ${reviews.length ? `<details><summary>人工审核历史</summary>${reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm:'确认入库', reject:'拒绝', revoke:'撤销'})[r.action])}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
-    $('#btnSemanticBack').onclick = () => { if (!confirmReviewLeave()) return; S.semanticRef = null; refreshInspector(); };
+    $('#btnSemanticBack').onclick = () => {
+      if (ref.kind === 'run') { showSemantic({kind:'run', id:ref.id}); return; }
+      if (!confirmReviewLeave()) return;
+      S.semanticRef = null; refreshInspector();
+    };
     $('#semanticReview').addEventListener('submit', async event => {
       event.preventDefault(); const form = event.currentTarget;
       if (S.semanticRef !== ref || !form.isConnected || form.getAttribute('aria-busy') === 'true') return;
@@ -758,6 +867,11 @@ async function loadSemanticDetail(ref) {
       buttons.forEach(b => { b.disabled = true; });
       try {
         await api(semanticEndpoint(ref)+'/'+encodeURIComponent(ref.claimId)+'/review', {method:'POST', body:{...values, action, analysis_hash:d.analysis_hash}});
+        if (compare && S.comparison === compare) {
+          compare.reviewsRequest = null;
+          compare.reviews = [...(compare.reviews || d.reviews || []), {claim_id:claim.id, action}];
+          paintComparisonReviews(compare);
+        }
         toast('人工审核已留档');
         if (S.semanticRef === ref) await loadSemanticDetail(ref);
       } catch (error) { $('.task-error', form).textContent = error.message; buttons.forEach((b,i) => {b.disabled=disabled[i];}); }

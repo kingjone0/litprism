@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "scope": "Six first-attempt, single-paper Web QA cases; not six-field extraction, independent Compare, search, or blind evaluation",
+  "criteria": {"fabricated_or_misattributed_claims": 0, "missing_available_required_points": 0, "unsafe_answers_to_unknowns": 0},
+  "papers": {
+    "fasttext": {"title": "Bag of Tricks for Efficient Text Classification", "url": "https://arxiv.org/pdf/1607.01759v3", "pages": 5, "sha256": "6cbcf620c2537ed54dfb9ed0d843a83689b82dc41dcd305bfb2e82425d4d7906"},
+    "gpt3": {"title": "Language Models are Few-Shot Learners", "url": "https://arxiv.org/pdf/2005.14165v4", "pages": 75, "sha256": "97fd272f1fdfc18677462d0292f5fbf26ca86b4d1b485c2dba03269b643a0e83"}
+  },
+  "cases": [
+    {"id": "S1", "paper": "fasttext", "question": "根据这篇论文，概述 fastText 的分类架构、层次 softmax 的作用和 word n-gram 的作用。请区分监督文本分类与 word2vec 的训练目标，逐项给出原文依据。", "expect": [
+      {"id": "S1a", "fact": "词/特征向量平均为文本表示后送入线性分类器", "pages": [1,2]},
+      {"id": "S1b", "fact": "有标签的文本分类，不是以中心词预测为目标的无监督 word2vec", "pages": [2,4,5]},
+      {"id": "S1c", "fact": "Huffman 树层次 softmax，训练复杂度从 O(kh) 降为 O(h log2 k)", "pages": [2]},
+      {"id": "S1d", "fact": "word n-grams 引入局部词序；使用哈希节省存储", "pages": [2]}
+    ]},
+    {"id": "S2", "paper": "fasttext", "question": "核对表1和表5：h=10 时 AG 数据集的 fastText 无 bigram/有 bigram 准确率各多少？YFCC100M 上 h=200、有 bigram 的 precision@1、训练时间、测试时间各多少？训练与测试各用多少线程？请注明物理页和表号，材料不足时不要猜数值。", "expect": [
+      {"id": "S2a", "fact": "表1 AG 无 bigram 91.5%，有 bigram 92.5%，h=10", "pages": [3]},
+      {"id": "S2b", "fact": "表5 h=200+bigram：precision@1 46.1%，训练13m38，测试1m37", "pages": [4]},
+      {"id": "S2c", "fact": "表5测试单线程，训练20线程", "pages": [4]}
+    ]},
+    {"id": "S3", "paper": "fasttext", "question": "YFCC100M 标签预测实验的训练、验证、测试样本数和标签数是什么，采用什么评价指标？再说明本文是否报告了 GPU 训练时间和该任务的 F1；未报告的项目请明确区分，不能用 CPU 时间或 precision@1 代替。", "expect": [
+      {"id": "S3a", "fact": "训练91,188,648、验证930,497、测试543,424；标签312,116", "pages": [4]},
+      {"id": "S3b", "fact": "指标precision at 1", "pages": [4]},
+      {"id": "S3c", "fact": "没有报告所问GPU训练时间或该任务F1，不能替换指标或硬件", "pages": [2,4], "absence_control": true}
+    ]},
+    {"id": "L1", "paper": "gpt3", "question": "概述 GPT-3 本文的核心实验设定：最大模型参数量、训练 token 数、上下文长度，以及 zero-shot、one-shot、few-shot 和 fine-tuning 的区别。few-shot 测试时是否做梯度更新？请逐项给出原文依据。", "expect": [
+      {"id": "L1a", "fact": "最大175B参数，训练300B tokens，上下文2048", "pages": [1,8,9,10]},
+      {"id": "L1b", "fact": "zero-shot无示例、one-shot一个示例、few-shot多个上下文示例", "pages": [6,7]},
+      {"id": "L1c", "fact": "这些测试设置仅前向计算，不做梯度更新或任务微调；与传统fine-tuning区分", "pages": [1,6,7]}
+    ]},
+    {"id": "L2", "paper": "gpt3", "question": "只根据附录 A 解释 Common Crawl 的质量过滤和模糊去重：分类器是什么、使用什么特征、正负样本来自哪里，以及去重方法。请定位到附录中的直接来源；不要把主文训练混合表的采样权重当成过滤规则。", "expect": [
+      {"id": "L2a", "fact": "质量分类器是logistic regression，特征来自Spark标准tokenizer和HashingTF", "pages": [43]},
+      {"id": "L2b", "fact": "正例包括WebText、Wikipedia和web books；负例为未过滤Common Crawl", "pages": [43]},
+      {"id": "L2c", "fact": "按分类器质量分数重采样；使用MinHashLSH近似去重", "pages": [43]},
+      {"id": "L2d", "fact": "过滤/去重规则不能与主文表2.2训练混合权重混为一谈", "pages": [9,43]}
+    ]},
+    {"id": "L3", "paper": "gpt3", "question": "结合第4节、第5节与附录相关说明，列出本文明确承认的评估污染和学习能力限制：过滤是否完全成功、为什么未重训、哪些语言建模评测没有报告、预训练样本效率、few-shot是否一定是从零学会新任务。本文是否已经用RLHF实验证明解决了这些限制？请逐项回答并给依据。", "expect": [
+      {"id": "L3a", "fact": "过滤bug遗漏部分重叠，因成本未重训；不能称已彻底消除污染", "pages": [9,31,32,33]},
+      {"id": "L3b", "fact": "GPT-2的四个Wikipedia语言建模评测及Children's Book Test未报告；PTB是相对未受影响的例外", "pages": [33]},
+      {"id": "L3c", "fact": "预训练样本效率低，所见文本远多于人类一生", "pages": [34]},
+      {"id": "L3d", "fact": "few-shot从零学习或识别/适应已学任务仍有歧义", "pages": [34]},
+      {"id": "L3e", "fact": "人类目标/强化学习等是未来方向，不是本文已验证解决的RLHF成果", "pages": [34], "absence_control": true}
+    ]}
+  ]
+}

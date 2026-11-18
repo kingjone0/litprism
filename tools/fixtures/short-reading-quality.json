@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "paper": {
+    "title": "Bag of Tricks for Efficient Text Classification",
+    "url": "https://arxiv.org/pdf/1607.01759v3",
+    "pdf_sha256": "6cbcf620c2537ed54dfb9ed0d843a83689b82dc41dcd305bfb2e82425d4d7906",
+    "physical_pages": 5
+  },
+  "scope": "One N01 run, six extraction fields; no separate concepts or machine semantic review. Developer source comparison, not blind evaluation or knowledge approval.",
+  "quality_rules": {
+    "required_point_omissions": 0,
+    "unsupported_or_misattributed_claims": 0,
+    "wrong_numeric_conditions_or_units": 0,
+    "limitations_may_be_empty_with_reason": true,
+    "automatic_semantic_judge": false,
+    "note": "Required points are a small authored checklist, not whole-paper recall. Optional numeric probes are audited only if generated; exact Chinese wording and exhaustive tables are not required."
+  },
+  "fields": {
+    "research_question": {
+      "required": [
+        {"id": "RQ1", "meaning": "研究简单而高效的文本分类基线，兼顾与深度方法可比的准确性和训练/预测速度。", "pages": [1]},
+        {"id": "RQ2", "meaning": "面向大规模语料和大输出类别空间的可扩展性。", "pages": [1, 4]}
+      ]
+    },
+    "methodology": {
+      "required": [
+        {"id": "M1", "meaning": "词/特征表示平均为文本表示，接带低秩约束的线性分类器，以类别标签监督训练；不当作无监督word2vec。", "pages": [1, 2]},
+        {"id": "M2", "meaning": "Huffman树的层次softmax用于高效大类别训练/预测。", "pages": [2]},
+        {"id": "M3", "meaning": "word n-gram增加局部词序信息，哈希用于高效存储/映射。", "pages": [2]}
+      ]
+    },
+    "experiment_design": {
+      "required": [
+        {"id": "E1", "meaning": "覆盖文本/情感分类基准和YFCC100M标签预测两类实验，不能只保留其中之一或混淆任务。", "pages": [2, 3, 4]},
+        {"id": "E2", "meaning": "交代任务对应的比较/评价：分类与已有基线/深度分类器比较准确率和效率，标签任务采用precision@1并比较Tagspace等基线。", "pages": [2, 3, 4]}
+      ],
+      "optional_numeric_probes": [
+        "分类实验h=10、5个epoch、学习率从{0.05,0.1,0.25,0.5}在验证集选取；保留具体任务范围。",
+        "卷积基线使用Tesla K40 GPU，fastText用CPU 20线程，不能把基线硬件归到fastText。",
+        "YFCC训练91,188,648、验证930,497、测试543,424，312,116个标签；precision@1不是F1。",
+        "标签实验5个epoch、h=50/200；表5训练20线程、测试单线程。"
+      ]
+    },
+    "key_conclusions": {
+      "required": [
+        {"id": "K1", "meaning": "原文报告在所评估任务中准确性有竞争力且训练/测试快，不能升级为所有任务全面超过深度模型。", "pages": [1, 3, 4, 5]},
+        {"id": "K2", "meaning": "n-gram/bigram特征有收益，且大输出空间标签预测的结果与速度有实验支持。", "pages": [3, 4]}
+      ],
+      "optional_numeric_probes": [
+        "表1 AG h=10：无bigram 91.5%，有bigram 92.5%。",
+        "表5 fastText h=200+bigram：precision@1 46.1、训练13m38、测试1m37；不要与其他行混配。",
+        "文中报告加入bigram提升1–4%，大类别预测约600倍加速；保留比较对象与实验范围。"
+      ]
+    },
+    "innovations": {
+      "required": [
+        {"id": "I1", "meaning": "仅概括作者提出的简单、高效、可扩展文本分类基线及其组合/实现贡献；Huffman层次softmax、哈希、n-gram不能被另行宣称为本文首次发明。", "pages": [1, 2, 4, 5]}
+      ]
+    },
+    "limitations": {
+      "required": [],
+      "acceptance_rule": "作者没有单列独立局限实验，允许空字符串并说明未找到明确自述。若写入p5关于深层表征能力与简单分类基准适用性的讨论，须忠实保留作者措辞；计划发布代码可列为作者未来计划。不得补造长文本失效、因果缺陷或无依据的研究路线。",
+      "pages": [4, 5]
+    }
+  }
+}

@@ -745,6 +745,57 @@ details.card > summary::before,
 .table tr:last-child td { border-bottom: none; }
 .table tbody tr:hover { background: var(--panel-2); }
 
+.comparison-actions, .comparison-review-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--text-2);
+}
+.comparison-actions > :first-child { margin-inline-end: auto; }
+.comparison-scroll-hint { display: none; color: var(--text-2); font-size: 12px; }
+@media (max-width: 700px) { .comparison-scroll-hint { display: block; } }
+.comparison-table-scroll {
+  overflow: auto;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.comparison-table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.comparison-table {
+  table-layout: fixed;
+  min-width: calc(7.5rem + var(--comparison-columns, 2) * 15rem);
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+.comparison-table th {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: top;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: inherit;
+  color: var(--text);
+}
+.comparison-table th:first-child {
+  position: sticky;
+  inset-inline-start: 0;
+  z-index: 1;
+  width: 7.5rem;
+  border-inline-end: 1px solid var(--border);
+}
+.comparison-table th[scope="row"] { background: var(--panel); font-weight: 600; }
+.comparison-table td, .comparison-table th { padding: 12px; }
+.comparison-table td + td { border-inline-start: 1px solid var(--border); }
+.comparison-paper-tag { display: block; color: var(--text-2); font-size: 12px; }
+.comparison-cell-state { color: var(--text-2); font-size: 12px; }
+.comparison-cell-state:empty { display: none; }
+.comparison-metadata { margin-top: 18px; }
+.comparison-review-list ul { padding-inline-start: 18px; }
+.comparison-review-list li + li { margin-top: 10px; }
+.comparison-review-list li span { display: block; }
+
 /* ---------------- 列表 ---------------- */
 .list { display: flex; flex-direction: column; }
 .list-item {
@@ -1874,6 +1925,7 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
   background: rgba(20, 19, 17, .44);
   backdrop-filter: blur(3px);
 }
+.task-dialog.comparison-preview { width: min(960px, 94vw); }
 .task-dialog form { display: flex; flex-direction: column; max-height: calc(85vh - 2px); }
 .task-dialog .task-body { overflow-y: auto; min-height: 0; }
 .task-dialog header, .task-dialog footer { flex-shrink: 0; }

@@ -311,7 +311,16 @@ class QAAgent:
                 res.answer = '回答的证据归属存在疑点，已隔离生成草稿。请核对原文后再判断。\n'+' '.join(refs)
                 res.open_questions, res.evidence_map = [], []
             elif res.insufficient_evidence:
-                res.status = 'refused'
+                from .qa_answer import partial_availability
+                availability = partial_availability(res.evidence_audit)
+                if availability:
+                    # Keep the immutable raw flag/answer in the journal. This
+                    # describes available body text, not question completeness
+                    # or semantic support. Existing source/risk guards ran first.
+                    res.evidence_audit['answer_availability'] = availability
+                    res.insufficient_evidence = False
+                else:
+                    res.status = 'refused'
         return finish()
 
     def _check_citations(self, res: QAAnswer) -> None:
@@ -347,16 +356,21 @@ class CompareAgent:
     def compare(self, refs: list[str], *, aspects: list[str] | None = None) -> dict:
         papers = []
         missing = []
+        seen = set()
         for r in refs:
             p = self.kb.resolve_paper(r)
             if p:
-                papers.append(p)
+                if p['id'] not in seen:
+                    papers.append(p)
+                    seen.add(p['id'])
             else:
                 missing.append(r)
+        if missing:
+            raise ValueError(f"所选论文不存在或无法识别，请重新选择：{missing}")
         if len(papers) < 2:
-            raise ValueError(f"需要至少 2 篇可识别的论文，当前识别到 {len(papers)} 篇；未找到：{missing}")
+            raise ValueError(f"需要至少 2 篇不同的可识别论文，当前识别到 {len(papers)} 篇。")
 
-        from .comparison import check_comparison
+        from .comparison import check_comparison, source_issues
         from .evidence import require_citable
         from .prompts import SYSTEM_ACADEMIC
         from .reading import build_messages, excerpt_context, reading_batches
@@ -365,6 +379,7 @@ class CompareAgent:
         system = SYSTEM_ACADEMIC + "\n仅比较给定原文，不使用先前解读作为事实。维度缺信息写未提及。输出 JSON：summary, dimensions（每项 dimension, values，键为 D1/D2 等论文编号）, convergence, divergence, evidence_map。每个非空学术结论标注 [P# p.N]，P 是原文片段编号；无页码来源不写页码。"
         system += '\n严格使用以下结构：{"summary":"结论 [P1 p.3]","dimensions":[{"dimension":"方法","values":{"D1":"方法 [P1 p.3]","D2":"方法 [P2 p.3]"}}],"convergence":["一致点 [P1 p.3][P2 p.3]"],"divergence":["差异 [P1 p.3][P2 p.3]"],"evidence_map":[{"claim":"结论","sources":["P1 p.3","P2 p.3"]}]}。这里页码仅为格式示例，必须替换为实际页码。convergence、divergence、sources 必须是字符串数组，无结论则用空数组。'
         instruction = '仅比较本批原文，未读取的部分不能写成原文未提及。'
+        instruction += '\n每个 D# 单元格只描述该论文。描述缺项时明确说「D# 的已提供材料未说明」，不要用不指明论文的「本批未提及」。'
         if aspects:
             instruction += '\n关注维度：' + '、'.join(aspects)
         batches, excerpts, coverage = reading_batches(self.kb, self.cfg, papers, system, instruction)
@@ -407,8 +422,9 @@ class CompareAgent:
             for key in ('convergence', 'divergence'):
                 fields.extend((key, text, []) for text in result.get(key) or [])
             inputs.append((fields, batch))
+        issues.extend(source_issues(self.kb, excerpts))
         if not issues:
-            semantic = run_review(inputs, excerpts, self.cfg, self.llm, tracker=tracker)
+            semantic = run_review(inputs, excerpts, self.cfg, self.llm, tracker=tracker, comparison=True)
             data['_semantic_review'] = semantic
             if semantic['status'] != 'not_run':
                 safe = supported_fields(semantic)
@@ -424,21 +440,16 @@ class CompareAgent:
         data['_coverage'] = coverage
         coverage['usage'] = tracker.to_dict()
         data['_citation_check'] = {'passed': not issues, 'issues': issues}
-        from .evidence import citations_for, stored_excerpts
+        from .evidence import citations_for
         data['_citations'] = citations_for(excerpts)
-        try:
-            stored_excerpts(self.kb, data['_citations'])
-        except ValueError as exc:
-            issues.append(str(exc))
-            data['_citation_check'] = {'passed': False, 'issues': issues}
+        issues = list(dict.fromkeys(issues + source_issues(self.kb, excerpts)))
+        data['_citation_check'] = {'passed': not issues, 'issues': issues}
         data['_model'] = getattr(self.llm, 'name', 'unknown')
         data['_papers'] = [{'tag': f'D{i}', 'id': p['id'], 'title': p['title']} for i, p in enumerate(papers, 1)]
         data['_coverage']['reading_mode'] = 'whole' if len(batches) == 1 else 'batched'
         if issues:
             data = {k: v for k, v in data.items() if k.startswith('_')}
             data['summary'] = '引用校验未通过，已阻止展示无法回溯的对比结论。'
-        if missing:
-            data['_missing'] = missing
         if data.get('_semantic_review', {}).get('status') not in (None, 'not_run'):
             import json
             import uuid
@@ -446,18 +457,23 @@ class CompareAgent:
             from .knowledge import now
             data['_semantic_run_id'] = 'sm_'+uuid.uuid4().hex[:12]
             with self.kb.tx() as con:
-                stored_excerpts(self.kb, data['_citations'])
+                changed = source_issues(self.kb, excerpts)
+                if changed:
+                    raise ValueError('；'.join(changed))
                 con.execute('INSERT INTO semantic_runs VALUES (?,?,?,?)',
                             (data['_semantic_run_id'], '跨论文对比', json.dumps(data, ensure_ascii=False), now()))
         return data
 
 
 def render_comparison(data: dict) -> str:
+    def cell(value):
+        return ' '.join(str(value).splitlines()).replace('\\', '\\\\').replace('|', '\\|')
+
     papers = data.get("_papers") or []
     lines = ["# 论文对比分析", ""]
     semantic = data.get('_semantic_review') or {}
     lines += ['> '+(semantic.get('note') or '尚未运行整体语义核查。引用存在不等于语义正确。'),
-              f"> 待核对陈述：{semantic.get('pending', '未知')}；待核对项不作为正常结论导出。", '']
+              f"> 生成时待核对陈述：{semantic.get('pending', '未知')}；人工审核另存。", '']
     if data.get("summary"):
         lines += ["## 总体结论", str(data["summary"]), ""]
 
@@ -466,14 +482,18 @@ def render_comparison(data: dict) -> str:
         tags = [p["tag"] for p in papers] or sorted(
             {k for d in dims for k in (d.get("values") or {})}
         )
-        header = "| 维度 | " + " | ".join(tags) + " |"
+        titles = {p['tag']: p['title'] for p in papers}
+        pending_fields = {u['field'] for u in semantic.get('items', []) if u['status'] != 'machine_supported'}
+        header = "| 维度 | " + " | ".join(cell(f'{t} · {titles[t]}' if t in titles else t) for t in tags) + " |"
         sep = "|" + "---|" * (len(tags) + 1)
         lines += [header, sep]
         for d in dims:
             vals = d.get("values") or {}
-            row = [str(d.get("dimension", ""))]
+            dimension = d.get('dimension', '')
+            row = [cell(dimension)]
             for t in tags:
-                row.append(str(vals.get(t, "未提及")).replace("\n", " "))
+                missing = '待核对' if f'dimension|{dimension}|{t}' in pending_fields else '未提及'
+                row.append(cell(vals.get(t) or missing))
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
 

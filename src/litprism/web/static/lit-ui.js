@@ -70,6 +70,28 @@ const LitUI = (() => {
     return blocks.filter(Boolean).join('');
   }
 
+  function reportMarkdown(text) {
+    const blocks = String(text ?? '').split(/(```[\s\S]*?```|\r?\n[\t ]*\r?\n)/);
+    const splitCells = line => {
+      const inner = line.trim().slice(1, -1);
+      const cells = [''];
+      for (let index = 0; index < inner.length; index++) {
+        const char = inner[index];
+        if (char === '|') cells.push('');
+        else cells[cells.length-1] += char === '\\' && ['|', '\\'].includes(inner[index+1]) ? inner[++index] : char;
+      }
+      return cells.map(cell => cell.trim());
+    };
+    return blocks.map(block => {
+      const lines = block.trim().split(/\r?\n/);
+      if (lines.length < 3 || !lines.every(line => /^\s*\|.*\|\s*$/.test(line))) return md(block);
+      const [headers, divider, ...rows] = lines.map(splitCells);
+      if (headers.length < 2 || divider.length !== headers.length || !divider.every(cell => /^:?-{3,}:?$/.test(cell))
+          || !rows.every(row => row.length === headers.length)) return md(block);
+      return `<p class="comparison-scroll-hint">横向滑动查看其他论文</p><div class="comparison-table-scroll" role="region" aria-label="报告对比表，可横向滚动" tabindex="0"><table class="table comparison-table" style="--comparison-columns:${headers.length-1}"><thead><tr>${headers.map(cell => `<th scope="col">${esc(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(([label, ...values]) => `<tr><th scope="row">${esc(label)}</th>${values.map(cell => `<td>${esc(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    }).join('');
+  }
+
   /* ================================================================
      组件渲染
      ================================================================ */
@@ -317,5 +339,5 @@ const LitUI = (() => {
     });
   }
 
-  return { renderComponent, renderSegments, parseFences, md, esc, bind };
+  return { renderComponent, renderSegments, parseFences, md, reportMarkdown, esc, bind };
 })();

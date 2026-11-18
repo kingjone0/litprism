@@ -161,7 +161,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
             'total_chunks': len(chunks), 'read_chunks': len(chunks), 'omitted_chunks': [],
             'sections': sorted({c.get('section') or '正文' for c in chunks}),
             'basis': 'indexed_chunks', 'reading_mode': 'whole',
-            'note': plan.note + ' 每条指令只提取指定章节；其余章节仅作上下文参考。',
+            'note': plan.note + ' 每条指令以原文编号和字符区间限定目标，章节标签仅作导航；目标之外仅作上下文参考。',
         }
     else:
         batches, all_excerpts, coverage = reading_batches(kb, cfg, [paper], system, instruction)
@@ -184,6 +184,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     brief_entries: list[dict] = []
     structure_failures: list[dict] = []
     structure_failures: list[dict] = []
+    repair_attempts: list[dict] = []
     for index, (directive, excerpts) in enumerate(units, 1):
         unit_label = directive.id if directive is not None else f'b{index}'
         checkpoint(f'解读原文第 {index}/{len(units)} 段')
@@ -200,6 +201,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         data, issues, gates = _run_with_repair(
             llm, extract_system, ctx, directive, unit_instruction, scope, unit_label, tracker,
             meter=meter, available_tokens=cfg.context.available_tokens, failures=structure_failures,
+            repairs=repair_attempts,
         )
         gate_log.append({'unit': unit_label, **gates.to_dict()})
         if gates.failed and data is not None:
@@ -312,6 +314,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     if structure_failures:
         # 结构损坏的原始片段留档：否则这类失败事后无法复盘
         coverage['structure_failures'] = structure_failures
+    if repair_attempts:
+        coverage['repair_attempts'] = repair_attempts
     if structure_failures:
         # 结构损坏的原始片段留档：否则这类失败事后无法复盘
         coverage['structure_failures'] = structure_failures
@@ -434,13 +438,15 @@ def _validate_fields(data: dict, excerpts: list[dict]):
 
 def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
                      scope: list[dict], unit_label: str, tracker=None, *,
-                     meter=None, available_tokens=None, failures: list | None = None):
+                     meter=None, available_tokens=None, failures: list | None = None,
+                     repairs: list | None = None):
     """跑一条指令，按闸门结果**有界修复**。
 
     返回 ``(data | None, issues, gates)``。``data is None`` 表示这条指令
     没有可用产出（例如输出被截断）—— 此时如实记未覆盖，不伪造空字段。
 
-    修复只针对「疑似漏读」（条数低于期望下限）。截断不自动细分：
+    修复针对条数偏低，以及字段引用已校验但正文缺引用的格式问题。
+    不在本地推断每条证据归属；重提结果仍逐项走相同校验。截断不自动细分：
     那需要重新规划指令，留到下一版；这里先保证不崩、不假通过。
     """
     from .gates import MAX_REPAIR_ROUNDS, GateReport, GateResult, count_claims, evaluate, repair_text
@@ -491,9 +497,13 @@ def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
         score = (len(gates.failed) == 0, claims)
         if best is None or score >= best[0]:
             best = (score, data, issues, gates)
-        if not gates.needs_repair or directive is None or attempt >= MAX_REPAIR_ROUNDS:
+        retry = gates.needs_repair and directive is not None and attempt < MAX_REPAIR_ROUNDS
+        if gates.failed and repairs is not None:
+            repairs.append({'unit': unit_label, 'attempt': attempt+1,
+                            'gates': gates.to_dict(), 'retry': retry})
+        if not retry:
             break
-        text = repair_text(directive, claims)
+        text = repair_text(directive, claims, gates)
     return best[1], best[2], best[3]
 
 

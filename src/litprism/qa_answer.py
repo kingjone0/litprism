@@ -41,6 +41,34 @@ def compile_answer(data):
     return answer, records, bindings, 'answer_units_v1'
 
 
+def partial_availability(audit):
+    """Recognize a mixed body after source checks, never certify its semantics.
+
+    Only current, bound answer units with located literal evidence count as
+    substantive text. Metadata, legacy paragraphs, invalid records and the
+    model's question-item links cannot turn a refusal into an available reply.
+    """
+    if audit.get('answer_protocol') != 'answer_units_v1' or audit.get('state') != 'recorded':
+        return None
+    from .textutil import parse_citations
+    located, gaps = [], []
+    for item in audit.get('items', []):
+        if item.get('answer_binding', {}).get('state') != 'bound':
+            return None
+        if item.get('state') == 'not_located' and not item.get('sources') and not item.get('quotes'):
+            gaps.append(item['id'])
+        elif (item.get('state') == 'located' and item.get('basis') in ('direct', 'inference')
+              and item.get('quotes') and item.get('sources')
+              and {tag for tag, _ in parse_citations(item.get('claim', ''))} == set(item['sources'])
+              and all(q.get('kind') != 'program_metadata' for q in item['quotes'])):
+            located.append(item['id'])
+    if not located or not gaps:
+        return None
+    return {'state': 'partial', 'model_insufficient_evidence': True,
+            'located_unit_ids': located, 'gap_unit_ids': gaps,
+            'semantic_status': 'unreviewed', 'question_completeness': 'unknown'}
+
+
 def bind(answer, claim):
     """Literal identity only. Repeated occurrences remain ambiguous, not first-hit."""
     if not isinstance(claim, str) or not claim.strip():

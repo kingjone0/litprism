@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html as html_mod
 import re
+import unicodedata
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -472,41 +473,90 @@ def _structural_boundaries(sections: list[Section]) -> list[Section]:
     return out
 
 
+_OUTLINE_PAGE_RANGE = '（页级范围；章节边界未定位）'
+
+
+def _outline_heading_key(text: str) -> str:
+    """Match complete bookmark titles, including a number split onto its own line."""
+    text = unicodedata.normalize('NFKC', text).strip().casefold()
+    text = re.sub(r'^(\d+(?:\.\d+)*)(?:\.(?=\s)|[、:：])', r'\1', text)
+    return re.sub(r'\s+', '', text).strip('.:：')
+
+
+def _outline_heading_starts(lines: list[tuple[int, str]], title: str) -> list[int]:
+    key = _outline_heading_key(title)
+    starts = []
+    for start, (_, line) in enumerate(lines):
+        if not line.strip():
+            continue
+        # Short, complete titles only. Never match a prefix inside a caption or
+        # search the whole document for an ordinary word such as "Model".
+        pieces = []
+        for _, text in lines[start:start+4]:
+            pieces.append(text)
+            candidate = _outline_heading_key(' '.join(pieces))
+            if candidate == key:
+                starts.append(start)
+                break
+            if len(candidate) > len(key):
+                break
+    return starts
+
+
 def _sections_from_outline(pages: list[Page], outline: list[tuple[int, str, int]],
                            max_level: int = 1) -> list[Section]:
-    """按大纲页码把正文切成章节；同页多条只取最浅的一条。"""
-    entries = [(lvl, title, page) for lvl, title, page in outline if lvl <= max_level]
+    """Locate bookmark headings within their physical page, without losing text.
+
+    Unlocatable/ambiguous same-page headings retain a combined, explicitly
+    approximate page range. No title is silently dropped or assigned an invented
+    character offset. Subheadings remain in their parent's original text.
+    """
+    eligible = {p.number: p for p in pages if not _is_contents_page(p)}
+    entries = [(lvl, title, page) for lvl, title, page in outline
+               if lvl <= max_level and page in eligible]
     if len(entries) < 3:
-        entries = [(lvl, title, page) for lvl, title, page in outline if lvl <= 2]
+        entries = [(lvl, title, page) for lvl, title, page in outline
+                   if lvl <= 2 and page in eligible]
     if len(entries) < 3:
         return []
-    by_page: dict[int, tuple[int, str, int]] = {}
+    by_page: dict[int, list[tuple[int, str, int]]] = {}
     for entry in entries:
-        by_page.setdefault(entry[2], entry)
-    ordered = [by_page[page] for page in sorted(by_page)]
-    last_page = max((p.number for p in pages), default=1)
+        if entry not in by_page.setdefault(entry[2], []):
+            by_page[entry[2]].append(entry)
+    lines, offsets, page_lines = [], {}, {}
+    for pg in pages:
+        if pg.number not in eligible:
+            continue
+        offsets[pg.number] = len(lines)
+        text = pg.reading_text if pg.reading_text is not None else pg.text
+        page_lines[pg.number] = [(pg.number, ln) for ln in text.split('\n')]
+        lines.extend(page_lines[pg.number])
 
-    def lines_between(start: int, end: int) -> list[tuple[int, str]]:
-        return [(p.number, ln) for p in pages if start <= p.number <= end and not _is_contents_page(p)
-                for ln in (p.reading_text if p.reading_text is not None else p.text).split('\n')]
+    anchors = []
+    for page, group in sorted(by_page.items()):
+        matches = [_outline_heading_starts(page_lines[page], title) for _, title, _ in group]
+        starts = [m[0] for m in matches if len(m) == 1]
+        if len(starts) == len(group) and all(a < b for a, b in zip(starts, starts[1:])):
+            for (level, title, _), start in zip(group, starts):
+                anchors.append((offsets[page]+start, title, _canonical_section(title) or '正文', level))
+        else:
+            name = ' / '.join(title for _, title, _ in group) + _OUTLINE_PAGE_RANGE
+            roles = {_canonical_section(title) for _, title, _ in group}
+            # A missing reference heading must not turn bibliography pages into
+            # scientific evidence. Keep that range excluded until located.
+            role = '参考文献' if '参考文献' in roles else '附录' if roles == {'附录'} else '正文'
+            anchors.append((offsets[page], name, role, min(e[0] for e in group)))
 
     sections: list[Section] = []
-    first = ordered[0][2]
-    if first > 1:
-        lines = lines_between(1, first - 1)
-        if lines:
-            sections.append(Section(name='正文', role='正文', start_page=1, lines=lines,
-                                    text=clean_text('\n'.join(t for _, t in lines))))
-    for index, (_lvl, title, page) in enumerate(ordered):
-        end = ordered[index + 1][2] - 1 if index + 1 < len(ordered) else last_page
-        if end < page:
-            end = page
-        lines = lines_between(page, end)
-        if not lines:
-            continue
-        canon = _canonical_section(title) or '正文'
-        sections.append(Section(name=title[:120], role=canon, start_page=page, lines=lines,
-                                text=clean_text('\n'.join(t for _, t in lines))))
+    if anchors[0][0] > 0:
+        anchors.insert(0, (0, '正文', '正文', 1))
+    for index, (start, name, role, level) in enumerate(anchors):
+        end = anchors[index+1][0] if index+1 < len(anchors) else len(lines)
+        body = lines[start:end]
+        text = clean_text('\n'.join(t for _, t in body))
+        if body and text:
+            sections.append(Section(name=name, role=role, level=level,
+                                    start_page=body[0][0], lines=body, text=text))
     return _structural_boundaries(sections)
 
 
@@ -668,6 +718,9 @@ def load_document(path: str | Path) -> Document:
     doc.arxiv_id = meta["arxiv_id"]
     doc.meta = meta["raw_meta"]
     doc.sections = detect_sections(pages, pdf_outline(p) if p.suffix.lower() == '.pdf' else None)
+    for section in doc.sections:
+        if _OUTLINE_PAGE_RANGE in section.name:
+            doc.warnings.append(f'第 {section.start_page} 页书签章节未能唯一定位，保留页级范围：{section.name}；章节归属需核对，原文未裁掉。')
     for page in pages:
         pending = sum(t['status'] == 'needs_review' for t in page.tables)
         if pending:

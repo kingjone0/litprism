@@ -1,13 +1,25 @@
 """对比响应的结构、引文与文献归属检查。"""
 from __future__ import annotations
 
-from .evidence import citation_issues
+from .evidence import citation_issues, citations_for, stored_excerpts
 from .textutil import parse_citations
+
+
+def source_issues(kb, excerpts):
+    """Compare publishes current materials; old chunks remain available for audit."""
+    try:
+        for source in stored_excerpts(kb, citations_for(excerpts)):
+            current = kb.get_paper(source['paper_id']) or {}
+            if source.get('material_id') != current.get('current_material_id'):
+                raise ValueError('对比生成期间原文材料已换版，请依据当前材料重新对比。')
+    except ValueError as exc:
+        return [str(exc)]
+    return []
 
 
 def check_comparison(data, papers, excerpts):
     if not isinstance(data, dict):
-        return {}, ['对比结果必须是 JSON 对象。']
+        return {'summary': '', 'dimensions': [], 'convergence': [], 'divergence': [], 'evidence_map': []}, ['对比结果必须是 JSON 对象。']
     issues = []
     doc_ids = {f'D{i}': p['id'] for i, p in enumerate(papers, 1)}
     by_tag = {e['tag']: e for e in excerpts}
@@ -22,10 +34,12 @@ def check_comparison(data, papers, excerpts):
     if not isinstance(dimensions, list):
         issues.append('dimensions 必须是数组。')
         dimensions = []
+    valid_dimensions = []
     for d in dimensions:
         if not isinstance(d, dict) or not isinstance(d.get('dimension'), str) or not isinstance(d.get('values'), dict):
             issues.append('对比维度格式错误。')
             continue
+        valid_dimensions.append(d)
         for tag, value in d['values'].items():
             if tag not in doc_ids:
                 issues.append(f'未知论文编号 {tag}。')
@@ -63,6 +77,6 @@ def check_comparison(data, papers, excerpts):
         issues.extend(citation_issues(' '.join('['+r.strip('[]')+']' for r in refs), excerpts))
     if not summary and not dimensions:
         issues.append('对比结果没有有效结论。')
-    data['dimensions'] = dimensions
+    data['dimensions'] = valid_dimensions
     data['evidence_map'] = evidence
     return data, list(dict.fromkeys(issues))

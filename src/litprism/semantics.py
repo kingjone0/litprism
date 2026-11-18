@@ -31,6 +31,13 @@ Select source tags; do not reproduce quotations, rewrite the claim, or extract n
 
 MAX_CROSS_FAILURES = 3
 
+COMPARE_REVIEW_SCOPE = '''For a claim with document_scope, interpret local wording such as "this batch"
+within that document only. Other papers cannot support or contradict its claims, including what the
+paper's supplied excerpts do not mention. Compare document_scope with the document labels in the
+excerpts. For every claim, use only candidate_sources as evidence. Return needs_review when the
+allowed evidence cannot establish the entire claim or a contradiction. A contradicted verdict must
+select evidence that actually states an incompatible assertion within the claim's scope.'''
+
 CROSS_SYSTEM = '''Find explicit incompatible assertions among these claims: same subject, metric and conditions,
 or an all/only/always claim opposed by a counterexample. Report only conflicts established by the text.
 Different conditions or metrics are NOT conflicts. Comparable performance does NOT mean identical values;
@@ -71,7 +78,7 @@ def merge_fragments(excerpts):
     return [merged[t] for t in order]
 
 
-def make_units(fields, excerpts, batch):
+def make_units(fields, excerpts, batch, *, comparison=False):
     """Server assigns IDs and source candidates; model cannot substitute text."""
     merged = merge_fragments(excerpts)
     by_tag = {e['tag']: e for e in merged}
@@ -80,6 +87,7 @@ def make_units(fields, excerpts, batch):
     for field, text, refs in fields:
         if not isinstance(text, str) or not text.strip():
             continue
+        document = field.rsplit('|', 1)[-1] if comparison and field.startswith('dimension|') else None
         fallback = {t for t, _ in parse_citations(' '.join('['+str(r).strip('[]')+']' for r in refs))}
         # Keep semicolon clauses until their sentence-local citations. Splitting
         # earlier detaches the claim and incorrectly falls back to every field ref.
@@ -89,13 +97,17 @@ def make_units(fields, excerpts, batch):
                 continue
             own = {t for t, _ in parse_citations(part)}
             tags = sorted((own or fallback) & by_tag.keys())
-            adjacent = _adjacent_for(tags, by_tag, successors)
+            if document:
+                tags = [tag for tag in tags if by_tag[tag].get('document_tag') == document]
+            adjacent = _adjacent_for(tags, by_tag, successors, limit=None if comparison else 3)
             identity = json.dumps([batch, field, len(units), part], ensure_ascii=False)
             units.append({'id': 'cl_'+hashlib.sha256(identity.encode()).hexdigest()[:16],
                           'field': field, 'text': part.strip(), 'batch': batch,
                           'candidate_tags': tags + adjacent, 'adjacent_tags': adjacent,
                           'status': 'needs_review', 'reason': '尚未完成语义核查。',
                           'quotes': [], 'facts': []})
+            if document:
+                units[-1]['document_scope'] = document
     return units
 
 
@@ -120,11 +132,11 @@ def _adjacent_for(tags, by_tag, successors, limit=3):
     `reading_batches` 按 chunk 切分，表格行、跨页段落会在 chunk 边界被切断：
     只给被引片段，模型看到的是半句话或半张表，于是把「证据不完整」判成
     「与原文不符」（真实短论文验收里已出现）。这里只补**同论文的下一段**，
-    且不突破每条陈述 3 个来源的上限；补足项会记在 `adjacent_tags`。
+    兼容入口按来源数限制，独立对比按实际消息窗口限制；补足项记在 `adjacent_tags`。
     """
     extra = []
     for tag in tags:
-        if len(tags) + len(extra) >= limit:
+        if limit is not None and len(tags) + len(extra) >= limit:
             break
         nxt = successors.get(tag)
         if not nxt or nxt in tags or nxt in extra:
@@ -177,24 +189,30 @@ def _facts(raw, unit, by_tag):
     return out
 
 
-def _claims_payload(units):
+def _claims_payload(units, *, comparison=False):
     claims = []
     for u in units:
         claim = {'id': u['id'], 'text': u['text']}
+        if comparison:
+            claim['candidate_sources'] = list(u['candidate_tags'])
+            if u.get('document_scope'):
+                claim['document_scope'] = u['document_scope']
         if u.get('adjacent_tags'):
             claim['adjacent_sources'] = list(u['adjacent_tags'])
         claims.append(claim)
     return claims
 
 
-def _messages(units, by_tag, system=REVIEW_SYSTEM, prefix=''):
+def _messages(units, by_tag, system=REVIEW_SYSTEM, prefix='', *, comparison=False):
     """构造复核消息。
 
     ``prefix`` 是提取阶段同一份全文序列化（``reading.excerpt_text``）。带上它有两个作用：
     复核不必只看被引片段，能读到上下文；并且与提取共用同一个前缀，才**有机会**命中前缀缓存
     （是否命中由服务端上报，这里不假定）。
     """
-    claims = _claims_payload(units)
+    claims = _claims_payload(units, comparison=comparison)
+    if comparison:
+        system += '\n\n' + COMPARE_REVIEW_SCOPE
     if prefix:
         tail = '\n\n【待核对陈述】只依据上文原文核对下列陈述，逐条返回 JSON：\n' + json.dumps(
             {'claims': claims}, ensure_ascii=False)
@@ -202,6 +220,9 @@ def _messages(units, by_tag, system=REVIEW_SYSTEM, prefix=''):
                 {'role': 'user', 'content': prefix + tail}]
     tags = sorted({t for u in units for t in u['candidate_tags']})
     sources = [{'tag': t, 'page': by_tag[t].get('page'), 'text': by_tag[t]['text']} for t in tags]
+    if comparison:
+        for source in sources:
+            source['document'] = by_tag[source['tag']].get('document_tag')
     return [{'role': 'system', 'content': system},
             {'role': 'user', 'content': json.dumps({'sources': sources, 'claims': claims}, ensure_ascii=False)}]
 
@@ -237,42 +258,50 @@ def _fulltext_prefix(excerpts, cfg):
     return excerpt_text(excerpts)
 
 
-def review_units(units, excerpts, cfg, llm, *, tracker=None):
+def review_units(units, excerpts, cfg, llm, *, tracker=None, comparison=False):
     by_tag = {e['tag']: e for e in merge_fragments(excerpts)}
     capacity = _capacity_mode(cfg)
     available = _review_capacity(cfg)
     prefix = _fulltext_prefix(excerpts, cfg)
-    if prefix and _cost(cfg, _messages([], by_tag, prefix=prefix)) > available:
+    def message(items, text_prefix):
+        return _messages(items, by_tag, prefix=text_prefix, comparison=comparison)
+
+    if prefix and _cost(cfg, message([], prefix)) > available:
         # 全文前缀本身装不下 → 退回候选片段模式；不截断原文蒙混过关。
         prefix = ''
     groups, current = [], []
+    current_prefix = prefix
     for unit in units:
         if not unit['candidate_tags']:
             unit['reason'] = '没有可核对的来源。'
             continue
-        if len(unit['candidate_tags']) > 3:
+        if not comparison and len(unit['candidate_tags']) > 3:
             unit['reason'] = '单条陈述关联超过 3 个来源，未删减证据；请拆分陈述或人工核对。'
             continue
-        if _cost(cfg, _messages([unit], by_tag, prefix=prefix)) > available:
+        unit_prefix = prefix
+        if comparison and unit_prefix and _cost(cfg, message([unit], unit_prefix)) > available:
+            unit_prefix = ''
+        if _cost(cfg, message([unit], unit_prefix)) > available:
             unit['reason'] = '核查预算不足，未删减证据后冒充已核查。'
             continue
         if capacity:
             # 已知窗口：按内容装，一次核对多条（批量大小由内容决定，不写死条数）。
-            if current and _cost(cfg, _messages(current+[unit], by_tag, prefix=prefix)) > available:
-                groups.append(current)
+            if current and (unit_prefix != current_prefix or _cost(cfg, message(current+[unit], current_prefix)) > available):
+                groups.append((current, current_prefix))
                 current = []
         elif current:
             # 能力未知的旧入口：保持一次一条，不改既有行为。
-            groups.append(current)
+            groups.append((current, current_prefix))
             current = []
         current.append(unit)
+        current_prefix = unit_prefix
     if current:
-        groups.append(current)
+        groups.append((current, current_prefix))
     from .tasks import checkpoint
-    for group_index, group in enumerate(groups):
+    for group_index, (group, group_prefix) in enumerate(groups):
         # 只保留**客户端**给的剩余调用数（真实成本约束）；不再有内置调用上限。
         if getattr(llm, 'remaining_calls', 1) <= 0:
-            for pending_group in groups[group_index:]:
+            for pending_group, _ in groups[group_index:]:
                 for unit in pending_group:
                     unit.update(review_error='call_budget', reason='客户端剩余调用数已用尽，未调用项待人工核对。')
             return units
@@ -280,10 +309,10 @@ def review_units(units, excerpts, cfg, llm, *, tracker=None):
         from .llm import OutputLimitError
         try:
             from .usage import tracked_json
-            raw = tracked_json(llm, _messages(group, by_tag, prefix=prefix), task='semantic_review', tracker=tracker)
+            raw = tracked_json(llm, message(group, group_prefix), task='semantic_review', tracker=tracker)
         except OutputLimitError:
             # No blind paid retries. Preserve candidates for explicit human review.
-            for pending_group in groups[group_index:]:
+            for pending_group, _ in groups[group_index:]:
                 for unit in pending_group:
                     unit['review_error'] = 'output_limit'
                     unit['reason'] = '复核达到输出/推理预算上限；已停止后续复核，待人工核对。'
@@ -322,12 +351,14 @@ def review_units(units, excerpts, cfg, llm, *, tracker=None):
                 if re.search(r'困惑度|perplexity', unit['text'], re.I) and re.search(r'百分点|percent(?:age)?\s*points?', unit['text'], re.I):
                     unit['status'] = 'needs_review'
                     unit['reason'] = '陈述同时使用困惑度与百分比点单位，需核对指标及单位，未自动放行。'
-            elif verdict == 'contradicted':
+            elif verdict == 'contradicted' and (not comparison or quotes):
                 unit['status'] = 'contradicted'
             else:
                 unit['status'] = 'needs_review'
             if verdict == 'supported' and not quotes:
                 unit['reason'] = '机器称支持，但没有通过逐字匹配的原文引句，未放行。'
+            if comparison and verdict == 'contradicted' and not quotes:
+                unit['reason'] = '机器提出不符，但没有本条范围内的有效反证，待核对。'
     return units
 
 
@@ -490,11 +521,11 @@ def reconcile(units, cfg, llm, *, tracker=None):
                                    'call_budget' if skipped and getattr(llm, 'remaining_calls', 1) <= 0 else None)}
 
 
-def run_review(fields_by_batch, excerpts, cfg, llm, *, tracker=None):
+def run_review(fields_by_batch, excerpts, cfg, llm, *, tracker=None, comparison=False):
     from .usage import UsageTracker
     usage = UsageTracker()
     try:
-        report = _run_review(fields_by_batch, excerpts, cfg, llm, usage)
+        report = _run_review(fields_by_batch, excerpts, cfg, llm, usage, comparison=comparison)
         report['usage'] = usage.to_dict()
         return report
     finally:
@@ -502,7 +533,7 @@ def run_review(fields_by_batch, excerpts, cfg, llm, *, tracker=None):
             tracker.merge(usage)
 
 
-def _run_review(fields_by_batch, excerpts, cfg, llm, tracker):
+def _run_review(fields_by_batch, excerpts, cfg, llm, tracker, *, comparison=False):
     if not getattr(llm, 'supports_semantic_review', False):
         return {'version': 1, 'status': 'not_run', 'passed': False, 'items': [], 'differences': [],
                 'note': '此模型未运行语义核查；引用存在不等于语义正确。'}
@@ -511,12 +542,12 @@ def _run_review(fields_by_batch, excerpts, cfg, llm, tracker):
     # 不再有内置复核次数上限：批量由窗口与内容决定，成本约束只来自客户端 remaining_calls。
 
     for batch, (fields, sources) in enumerate(fields_by_batch, 1):
-        items = make_units(fields, sources, batch)
+        items = make_units(fields, sources, batch, comparison=comparison)
         if limited:
             for item in items:
                 item.update(review_error='output_limit', reason='前批复核耗尽预算，后续复核已停止；待人工核对。')
         else:
-            review_units(items, sources, cfg, llm, tracker=tracker)
+            review_units(items, sources, cfg, llm, tracker=tracker, comparison=comparison)
         limited |= any(i.get('review_error') == 'output_limit' for i in items)
         units.extend(items)
     if limited:

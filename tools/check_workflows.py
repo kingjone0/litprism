@@ -30,6 +30,14 @@ class AcceptanceModel:
     reading_failed = False
 
     def chat_json(self, messages, *, task=None):
+        if task == 'qa' and 'partialreplymarker' in str(messages):
+            return {'answer_units': [
+                {'text': '原文明确未使用TriviaQA数据。[P1]', 'subject': '本模型的数据',
+                 'basis': 'direct', 'sources': ['P1'],
+                 'quotes': [{'source': 'P1', 'quote': 'We did not use TriviaQA data for this model.'}]},
+                {'text': '尚未定位该模型的GPU训练时间。', 'subject': 'GPU训练时间',
+                 'basis': 'not_located', 'sources': [], 'quotes': []}],
+                'insufficient_evidence': True, 'open_questions': ['GPU训练时间仍未知。']}
         if task == 'extract' and 'readingretrymarker' in str(messages) and not AcceptanceModel.reading_failed:
             AcceptanceModel.reading_failed = True
             raise TimeoutError('离线解读入口验收：一次故意未知结果')

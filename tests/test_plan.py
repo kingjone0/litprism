@@ -108,7 +108,7 @@ class TestDirectiveContent:
         plan = build_plan(PAPER, chunks, FakeMeter(), available_tokens=100_000)
         text = plan.directives[0].text
         assert "方法" in text and "结果" in text
-        assert "其余章节仅作上下文参考" in text
+        assert "未列入目标范围的原文仅作上下文参考" in text
 
     def test_expected_range_brackets_estimate(self):
         chunks = [chunk(1, "方法", chars=4000)]  # 1k token → 4.5 条
