@@ -86,6 +86,10 @@ async function refreshChatRuns(convId) {
   try {
     const d = await api('/api/conversations/'+encodeURIComponent(convId)+'/chat-runs');
     if (!panel.isConnected || S.activeConv !== convId || S.activeView !== 'chat') return;
+    if (d.items.length && S.convScope && !S.convScope.locked) {
+      S.convScope.locked = true;
+      renderLocation();
+    }
     const latest=d.items[0];
     const live=d.items.find(r=>r.active) || (latest&&!['completed','stale'].includes(latest.status) ? latest : null);
     if(live)observeChatStream(live.id,convId);
@@ -352,7 +356,10 @@ async function refreshCollections() {
   const value = filter.value;
   filter.innerHTML = '<option value="">全部分组</option>' + S.collections.map(c => `<option value="${esc(c.id)}">${esc(collectionLabel(c.id))}</option>`).join('');
   filter.value = S.collections.some(c => c.id === value) ? value : '';
-  if (S.activeView === 'chat' && S.convScope?.raw) {S.convScope=parseScope(S.convScope.raw);renderLocation();}
+  if (S.activeView === 'chat' && S.convScope?.raw) {
+    S.convScope = {...parseScope(S.convScope.raw), locked: S.convScope.locked};
+    renderLocation();
+  }
   $('#collectionChips').innerHTML = S.collections.map(c => `<button class="btn sm" draggable="true" data-group-chip="${esc(c.id)}">${esc(collectionLabel(c.id))}</button>`).join('');
   $$('[data-group-chip]').forEach(chip => {
     chip.onclick = () => { filter.value = chip.dataset.groupChip; loadLibrary(); };
@@ -408,10 +415,10 @@ async function editDeliverable(id) {
   } catch (e) { toast(e.message, true); }
 }
 
-function showConversationDialog() {
+function showConversationDialog({ changeScope = false } = {}) {
   const options = S.papers.map(p => `<option value="p:${esc(p.id)}">${esc(short(p.display_title || p.title, 42))}</option>`).join('') +
     S.collections.map(c => `<option value="g:${esc(c.id)}">分组：${esc(collectionLabel(c.id))}</option>`).join('');
-  workflowDialog('新建研究对话', `<label>对话名称<input class="input" name="title" value="新研究对话" required></label>
+  workflowDialog(changeScope ? '按其他范围新建对话' : '新建研究对话', `<label>对话名称<input class="input" name="title" value="新研究对话" required></label>
     <label>回答范围<select class="select" name="scope"><option value="">全库知识与联网（默认）</option>${S.selectedPapers.size ? '<option value="selected">知识库中勾选的文献</option>' : ''}${options}</select></label>
     <p class="source-intro">通常直接开始即可。主动选择文献或分组时，仅使用该范围，不额外联网。</p>`, async values => {
     let scope = {};
@@ -1152,10 +1159,11 @@ function sourceTime(value) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
 }
 
-async function showEvidence(ref) {
+async function showEvidence(ref, conceptOpener = null) {
   if (!confirmReviewLeave()) return;
   S.semanticRef = null;
   S.evidenceRef = ref;
+  S.evidenceConceptOpener = conceptOpener;
   S.inspectorTab = 'sources';
   $$('[data-insp]').forEach(b => b.classList.toggle('active', b.dataset.insp === 'sources'));
   $$('[data-insp-pane]').forEach(p => p.classList.toggle('active', p.dataset.inspPane === 'sources'));
@@ -1165,7 +1173,13 @@ async function showEvidence(ref) {
 function returnToSourceList() {
   if (!confirmReviewLeave()) return;
   S.evidenceRef = null;
-  if (S.activeView === 'knowledge') toggleInspector(false);
+  if (S.activeView === 'paper' && S.evidenceConceptOpener?.isConnected) {
+    const opener = S.evidenceConceptOpener;
+    S.evidenceConceptOpener = null;
+    toggleInspector(false, {restoreFocus:false});
+    opener.focus();
+  }
+  else if (S.activeView === 'knowledge') toggleInspector(false);
   else refreshInspector();
 }
 
@@ -1180,7 +1194,9 @@ async function loadEvidenceDetail(ref) {
     const kind = ({ paper: '论文原文', web: '网页摘要', knowledge: '知识条目' })[d.source_kind] || '来源';
     const url = safeSourceUrl(d.url || (d.doi ? 'https://doi.org/'+encodeURIComponent(d.doi) : ''));
     const canReview = d.source_kind !== 'paper' || (!d.citable && d.trust_level !== 'deleted');
-    box.innerHTML = `<button class="btn sm" id="btnSourceBack">${S.activeView === 'knowledge' ? '返回来源列表' : '查看本轮其他来源'}</button><h3>${esc(d.title || d.paper_title)}</h3>
+    const backLabel = S.evidenceConceptOpener?.isConnected ? '返回术语' :
+      S.activeView === 'knowledge' ? '返回来源列表' : '查看本轮其他来源';
+    box.innerHTML = `<button class="btn sm" id="btnSourceBack">${backLabel}</button><h3>${esc(d.title || d.paper_title)}</h3>
       <div class="source-intro">${esc(kind)} · ${esc(trustLabel(d.trust_level))} · ${d.page == null ? '无页码' : '第 '+esc(d.page)+' 页'}</div>
       ${d.dependency_status?.refs?.length || d.dependency_status?.issues?.length ? `<details open><summary>知识依据与当前状态</summary>${[...(d.dependency_status.issues || []),...(d.dependency_status.warnings || [])].map(s => `<p>${esc(s)}</p>`).join('')}${d.dependency_status.refs.map(s => `<p><a href="#evidence-${esc(s.chunk_id)}" data-evidence-ref="${esc(s.chunk_id)}">${esc(s.title || '上游来源已不可用')}${s.page == null ? '' : ' · p.'+esc(s.page)}</a>${s.historical ? ' · 历史材料' : ''}${s.issues.length ? ' · '+s.issues.map(esc).join('；') : ''}</p>`).join('')}</details>` : ''}
       ${d.acquired_at ? `<p class="source-intro">搜索摘要获取时间：${esc(sourceTime(d.acquired_at))}</p>` : ''}
@@ -1196,6 +1212,7 @@ async function loadEvidenceDetail(ref) {
       ${canReview ? `<form id="evidenceReview"><label>人工审核依据<textarea class="textarea" name="note" required placeholder="核对出处、原文与适用范围后填写"></textarea></label><div class="row wrap"><button class="btn primary" name="action" value="confirm" ${d.status === 'manual_confirmed' || d.citable ? 'disabled' : ''}>${d.citable ? '已加入可信知识库' : d.trust_level === 'needs_review' ? '依据失效，需修订知识' : '确认可信并加入知识库'}</button>${d.source_kind !== 'paper' ? `<button class="btn" name="action" value="reject" ${d.trust_level === 'rejected' ? 'disabled' : ''}>拒绝</button><button class="btn" name="action" value="revoke" ${d.status !== 'manual_confirmed' ? 'disabled' : ''}>撤销可信</button>` : ''}</div><p class="task-error" role="alert"></p></form>` : ''}
       ${(d.reviews || []).length ? `<details><summary>审核历史</summary>${d.reviews.map(r => `<p>${esc(sourceTime(r.created_at))} · ${esc(({confirm: '确认加入', reject: '拒绝', revoke: '撤销'})[r.action] || r.action)}<br>${esc(r.note)}</p>`).join('')}</details>` : ''}`;
     $('#btnSourceBack').onclick = returnToSourceList;
+    if (S.evidenceConceptOpener === document.activeElement) $('#btnSourceBack').focus();
     $('#evidenceReview')?.addEventListener('submit', async e => {
       e.preventDefault();
       const form = e.currentTarget;
@@ -1217,7 +1234,7 @@ async function loadEvidenceDetail(ref) {
     if (S.evidenceRef !== ref || loadSeq !== S.evidenceLoadSeq) return;
     box.innerHTML = `<p class="task-error" role="alert">${esc(error.message)}</p><div class="row wrap">
       <button class="btn" id="btnRetryEvidence">重新读取</button>
-      <button class="btn" id="btnSourceBack">返回来源列表</button></div>`;
+      <button class="btn" id="btnSourceBack">${S.evidenceConceptOpener?.isConnected ? '返回术语' : '返回来源列表'}</button></div>`;
     $('#btnRetryEvidence').onclick = () => loadEvidenceDetail(ref);
     $('#btnSourceBack').onclick = returnToSourceList;
   }
@@ -1233,7 +1250,7 @@ async function loadKnowledge() {
 document.addEventListener('click', e => {
   const link = e.target.closest('[data-evidence-ref]');
   if (!link) return;
-  e.preventDefault(); showEvidence(link.dataset.evidenceRef);
+  e.preventDefault(); showEvidence(link.dataset.evidenceRef, link.hasAttribute('data-concept-source') ? link : null);
 });
 
 $('#btnAddKnowledge').onclick = () => workflowDialog('保存待审核原文', '<label>类型<select class="select" name="kind"><option value="knowledge">知识条目</option><option value="web">网页片段</option></select></label><label>标题<input class="input" name="title" required></label><label>原始 URL（网页必填）<input class="input" name="url"></label><label>原文快照<textarea class="textarea" name="content" rows="8" required></textarea></label><p>保存为待审核候选；下一步在右栏核对后确认。</p>', async values => {

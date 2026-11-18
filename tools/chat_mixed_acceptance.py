@@ -280,8 +280,9 @@ def run(home):
                 if consecutive_failures >= 3:
                     break
                 if case.get('empty_scope'):
-                    changed = client.patch('/api/conversations/' + cid, json={'scope': {'paper_ids': [], 'mode': case.get('scope_mode', group.get('mode', 'focus'))}})
-                    changed.raise_for_status()
+                    cid = kb.add_conversation('N04 mixed ' + case['id'], scope={
+                        'paper_ids': [], 'mode': case.get('scope_mode', group.get('mode', 'focus')),
+                    })
                 def replay(_kb, _cfg, query):
                     if case.get('real_missing_search'):
                         events.append({'id': case['id'], 'mode': 'production_unconfigured_tavily'})

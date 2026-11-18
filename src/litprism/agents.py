@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from .config import Config
@@ -37,6 +38,7 @@ class QAAnswer:
     warnings: list[str] = field(default_factory=list)
     provider_usage: dict | None = None
     request_tokens: int = 0
+    context_input: dict | None = None
     reasoning: str = ''
     request_settings: dict = field(default_factory=dict)
     status: str = 'answered'
@@ -70,6 +72,7 @@ class QAAnswer:
             "warnings": self.warnings,
             'provider_usage': self.provider_usage,
             'request_tokens': self.request_tokens,
+            'context_input': self.context_input,
             'reasoning': self.reasoning,
             'request_settings': self.request_settings,
             'status': self.status,
@@ -105,7 +108,7 @@ class QAAgent:
     ) -> QAAnswer:
         from .context.dialogue import HISTORY_GUARD, DialogueContext, build_dialogue
         from .context.meter import Meter
-        from .usage import TrackedClient, UsageTracker
+        from .usage import TrackedClient, UsageTracker, normalize_usage
 
         tracker = UsageTracker()
         client = TrackedClient(self.llm, tracker)
@@ -128,44 +131,52 @@ class QAAgent:
             res.insufficient_evidence, res.confidence = True, 'none'
             return finish()
         top_k = top_k or self.cfg.retrieval.top_k
-        from .qa_retrieval import as_excerpts, material_text, retrieve
+        from .qa_retrieval import (
+            COMPLETE_PAPER_END, COMPLETE_PAPER_HEADER, DELIVERY_HEADER, EXCERPT_HEADER,
+            material_text, prompt_excerpts, retrieve,
+        )
         from .qa_evidence import manifest, material_risks
         scope = '全库可引用论文与人工确认知识，以及本轮取得的外部证据（如有；保留类型与审核状态）'
-        delivery = {}
         if paper_ids:
             titles = [self.kb.get_paper(p) for p in paper_ids]
             scope = ('仅限指定论文：' if strict_scope else '重点论文（同时补充相关可信知识及本轮外部证据）：')+'、'.join(truncate(t['title'], 40) for t in titles if t)
-        def messages_for(excerpts, history=''):
-            import json
-            nonlocal delivery
-            delivery = manifest(self.kb, excerpts)
-            system = QA_SYSTEM+'\n\n'+HISTORY_GUARD+'\n\n'+dialogue.memory.prompt_block()
-            if any(e.get('source_kind') != 'paper' for e in excerpts):
-                system += '\n部分片段为人工确认知识或本轮搜索摘要。必须按程序标记区分来源/审核状态；搜索摘要未必经人工审核，不能称为网页正文或核验论文。'
-            # Keep source bytes before changing history/question for caching.
-            content = (f'检索范围：{scope}\n\n【片段】\n'+material_text(excerpts)
-                       +'\n\n【程序送达记录】\n'+json.dumps(delivery, ensure_ascii=False)
-                       +'\n\n'+history+f'\n\n【问题】{question}\n\n'
-                       +'请仅依据上述片段作答，并在每条结论后只标注片段编号（如 [P1]），不生成页码；来源链接由程序展示真实页码。'
-                       +'未提供的论文或章节不能声称已读完，题录/摘要不等于全文。'
-                       +'证据不足应明确拒答，不能依据历史回答补事实。')
-            if not self.cfg.qa.evidence_anchor_trial:
-                content += '\n'+QA_QUOTE_CHECK
-            if self.cfg.qa.evidence_anchor_trial:
+        system = QA_SYSTEM+'\n\n'+HISTORY_GUARD
+        system += ('\n来源按程序标记区分类型和审核状态。搜索摘要可能未经人工审核，不能称为网页正文或核验论文。')
+        anchors_enabled = self.cfg.qa.evidence_anchor_trial
+        if anchors_enabled:
+            system += ('\n本轮开启原文锚点小范围试验。回答使用answer_units，每项保留text/subject/basis/sources结构；'
+                       'answer_units各项原文quotes优先只选择本轮目录中该来源的anchor_id，形如'
+                       '{"source":"P1","anchor_id":"qa_…"}，不要再复制quote。'
+                       '原文由程序按材料版本和字符范围回填，不得发明锚点或引用其他来源的锚点。'
+                       '程序记录仍使用metadata及实际完整字段。锚点位置正确不代表能支持陈述。'
+                       '优先选择覆盖实际依据的短句/短段锚点；需要多句或多个片段时分别列出各自锚点，'
+                       '不得把邻近内容自动当成依据，短段边界不认证语义完整。')
+        preferences = dialogue.memory.prompt_block()
+        task = (f'【问题】{question}\n\n'
+                '请仅依据上述片段作答，并在每条结论后只标注片段编号（如 [P1]），不生成页码；来源链接由程序展示真实页码。'
+                '未提供的论文或章节不能声称已读完，题录/摘要不等于全文。'
+                '证据不足应明确拒答，不能依据历史回答补事实。')
+        if not anchors_enabled:
+            task += '\n'+QA_QUOTE_CHECK
+
+        def messages_for(candidates, history=''):
+            excerpts, fixed_count, current = prompt_excerpts(
+                self.kb, candidates, paper_ids, reuse_complete=bool(self.cfg.llm.model_window_tokens),
+            )
+            delivery = manifest(self.kb, excerpts, current_chunks=current)
+            fixed = COMPLETE_PAPER_HEADER+material_text(excerpts[:fixed_count])+COMPLETE_PAPER_END if fixed_count else ''
+            dynamic = EXCERPT_HEADER+material_text(excerpts[fixed_count:])
+            dynamic += DELIVERY_HEADER+'\n'+json.dumps(delivery, ensure_ascii=False)
+            if anchors_enabled:
                 from .qa_anchors import catalog
-                content += '\n\n【试验定位锚点（程序生成，不是语义结论）】\n'+json.dumps(catalog(excerpts), ensure_ascii=False)
-                system += ('\n本轮开启原文锚点小范围试验。回答使用answer_units，每项保留text/subject/basis/sources结构；'
-                           'answer_units各项原文quotes优先只选择本轮目录中该来源的anchor_id，形如'
-                           '{"source":"P1","anchor_id":"qa_…"}，不要再复制quote。'
-                           '原文由程序按材料版本和字符范围回填，不得发明锚点或引用其他来源的锚点。'
-                           '程序记录仍使用metadata及实际完整字段。锚点位置正确不代表能支持陈述。')
-                system += ('优先选择覆盖实际依据的短句/短段锚点；需要多句或多个片段时分别列出各自锚点，'
-                           '不得把邻近内容自动当成依据，短段边界不认证语义完整。')
-            return [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]
+                dynamic += '\n\n【试验定位锚点（程序生成，不是语义结论）】\n'+json.dumps(catalog(excerpts), ensure_ascii=False)
+            content = '\n\n'.join(filter(None, (fixed, history, dynamic, f'检索范围：{scope}', preferences, task)))
+            messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]
+            return messages, excerpts, delivery, (fixed, dynamic)
         from .context.dialogue import is_followup
         hits, res.retrieval = retrieve(self.kb, question, dialogue.query(question, paper_ids), paper_ids=paper_ids,
                                       top_k=top_k, llm=client, search=search_local, cfg=self.cfg,
-                                      fits_full=lambda hs: sum(meter.estimate_message(m) for m in messages_for(as_excerpts(hs)))+8 <= self.cfg.context.available_tokens,
+                                      fits_full=lambda hs: sum(meter.estimate_message(m) for m in messages_for(hs)[0])+8 <= self.cfg.context.available_tokens,
                                       prior_refs=dialogue.evidence_refs if is_followup(question) else (),
                                       strict_scope=strict_scope, external=external)
 
@@ -183,14 +194,10 @@ class QAAgent:
                 TurnViewStore(self.kb).freeze(conversation_id, read_refs={'request': [], 'outcome': 'no_evidence', 'question': question})
             return finish()
 
-        excerpts = as_excerpts(hits)
-        res.excerpts = excerpts
-        material = material_text(excerpts)
-        messages = messages_for(excerpts)
+        messages, excerpts, delivery, evidence_sections = messages_for(hits)
 
-        meter = Meter(self.cfg)
         while sum(meter.estimate_message(m) for m in messages) + 8 > self.cfg.context.available_tokens:
-            if len(excerpts) <= 1:
+            if len(hits) <= 1:
                 res.answer = '当前上下文预算不足以容纳问题与原文证据，请缩小范围或增加窗口预算。'
                 res.insufficient_evidence = True
                 res.excerpts = []
@@ -198,13 +205,12 @@ class QAAgent:
                 res.status = 'budget_exceeded'
                 freeze_refusal('evidence_over_budget', messages)
                 return finish()
-            excerpts.pop()
-            material = material_text(excerpts)
-            messages = messages_for(excerpts)
+            hits.pop()
+            messages, excerpts, delivery, evidence_sections = messages_for(hits)
         remaining = max(0, self.cfg.context.available_tokens - sum(meter.estimate_message(m) for m in messages) - 8)
         history, history_refs = dialogue.prompt(meter, remaining)
         if history:
-            messages = messages_for(excerpts, history)
+            messages, excerpts, delivery, evidence_sections = messages_for(hits, history)
         from copy import deepcopy
         attempts = []
         error = None
@@ -227,12 +233,12 @@ class QAAgent:
                     break
                 if history:
                     history, history_refs = '', []
-                elif len(excerpts) > 1:
-                    excerpts.pop()
-                    material = material_text(excerpts)
+                elif len(hits) > 1:
+                    hits.pop()
                 else:
                     break
-                messages = messages_for(excerpts, history)
+                messages, excerpts, delivery, evidence_sections = messages_for(hits, history)
+        res.excerpts = excerpts
         res.request_tokens = sum(meter.estimate_message(m) for m in messages)
         res.retrieval.update(delivered_chunks=len(excerpts),
                              delivered_chunk_ids=[e['chunk_id'] for e in excerpts],
@@ -244,6 +250,25 @@ class QAAgent:
         res.retrieval['full_material_paper_ids'] = [p['paper_id'] for p in delivery['papers']
                                                   if p['complete_current_material']]
         res.provider_usage = getattr(self.llm, 'last_usage', None) if error is None else None
+        if error is None:
+            system_tokens = meter.estimate_message(messages[0])
+            history_tokens = meter.estimate_text(history)
+            evidence_tokens = meter.estimate_text(''.join(evidence_sections))
+            provider_usage = res.provider_usage or {}
+            provider_input = provider_usage.get('prompt_tokens', provider_usage.get('input_tokens'))
+            res.context_input = {
+                'model': res.model,
+                'window_tokens': self.cfg.context.window_tokens,
+                'estimated_tokens': res.request_tokens,
+                'provider_input_tokens': (normalize_usage(provider_usage)['input']
+                                          if type(provider_input) is int and provider_input >= 0 else None),
+                'parts': {
+                    'system': system_tokens,
+                    'history': history_tokens,
+                    'evidence': evidence_tokens,
+                    'question': res.request_tokens - system_tokens - history_tokens - evidence_tokens,
+                },
+            }
         res.reasoning = getattr(self.llm, 'last_reasoning', '') if error is None else ''
         res.request_settings = dict(getattr(self.llm, 'last_request_settings', {}) or {})
         if conversation_id:
@@ -255,7 +280,7 @@ class QAAgent:
                            'request': messages, 'request_attempts': attempts, 'model': res.model,
                            'outcome': 'error' if error else 'submitted',
                            'preferences': [m.to_dict() for m in dialogue.memory.resident]},
-                retrieved_tokens=meter.estimate_text(material),
+                retrieved_tokens=meter.estimate_text(material_text(excerpts)),
             )
         if error:
             from .llm import safe_failure

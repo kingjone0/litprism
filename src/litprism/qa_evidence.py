@@ -21,7 +21,7 @@ def source_metadata(excerpt):
     return fields
 
 
-def manifest(kb, excerpts):
+def manifest(kb, excerpts, *, current_chunks=None):
     groups = {}
     for e in excerpts:
         if e.get('source_kind', 'paper') != 'paper' or not e.get('paper_id'):
@@ -30,7 +30,7 @@ def manifest(kb, excerpts):
     papers = []
     for pid, sources in groups.items():
         paper = kb.get_paper(pid) or {}
-        current = {c['id'] for c in kb.get_chunks(pid)}
+        current = set(current_chunks[pid]) if current_chunks is not None else {c['id'] for c in kb.get_chunks(pid)}
         provided = {s.get('chunk_id') for s in sources}
         papers.append({'paper_id': pid, 'title': paper.get('title', ''),
                        'material_level': paper.get('material_level', 'unknown'),

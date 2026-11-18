@@ -21,7 +21,7 @@ from .usage import UsageTracker
 
 # 阶段调用预算已取消：保留字段只为兼容旧记录与用量展示，0 表示不限制。
 DEFAULT_BUDGETS = {'extract': 0, 'concepts': 0, 'semantic_review': 0, 'semantic_cross_review': 0}
-PIPELINE_VERSION = 'analysis-journal-v2-materials'
+PIPELINE_VERSION = 'analysis-journal-v4-term-anchors'
 
 
 class RunStopped(RuntimeError):

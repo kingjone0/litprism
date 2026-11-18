@@ -1,7 +1,7 @@
 """对话文献范围的可见可改（M04 缺口 1）。
 
 三条底线：
-1. 严格限定时，改范围后证据只来自新范围；默认重点模式允许补充；
+1. 首次发送前可调整范围。严格限定时，证据来自选定范围；
 2. 范围含不存在/已删除文献时明确报错，**不得静默扩为全库**；
 3. 聊天 ``paper_ids: []`` 表示不限定；批量操作的空列表仍不操作任何文献。
 """
@@ -32,14 +32,11 @@ def make(kb, client, scope=None):
 
 class TestPatch:
     def test_scope_changes_evidence(self, env):
-        """⭐ 改范围后，同一问题的证据只来自新范围。"""
+        """尚无对话时，改范围后首题证据来自新范围。"""
         _, kb, _, client = env
         a = paper(kb, title='A', text='aaa evidence')
         b = paper(kb, title='B', text='bbb evidence')
         conv = make(kb, client, {'paper_ids': [a], 'mode':'strict'})
-
-        first = client.post(f'/api/chat/{conv}', json={'question': 'bbb'}).json()
-        assert first['insufficient_evidence'] and first['sources'] == []
 
         r = client.patch(f'/api/conversations/{conv}', json={'scope': {'paper_ids': [b], 'mode':'strict'}})
         assert r.status_code == 200 and r.json()['paper_count'] == 1
@@ -58,16 +55,25 @@ class TestPatch:
         result = client.post(f'/api/chat/{conv}', json={'question': 'bbb'}).json()
         assert cited_papers(client, conv) == {b}
 
-    def test_history_preserved(self, env):
-        """改范围不动历史消息 —— 否则用户等于被迫重建会话。"""
+    def test_first_turn_locks_scope_but_title_can_change(self, env):
         _, kb, _, client = env
         a = paper(kb, title='A', text='aaa evidence')
-        conv = make(kb, client, {'paper_ids': [a]})
-        client.post(f'/api/chat/{conv}', json={'question': 'aaa'})
-        before = client.get(f'/api/conversations/{conv}/messages').json()['items']
-        client.patch(f'/api/conversations/{conv}', json={'scope': None})
-        after = client.get(f'/api/conversations/{conv}/messages').json()['items']
-        assert len(after) == len(before) and len(before) >= 2
+        b = paper(kb, title='B', text='bbb evidence')
+        conv = make(kb, client, {'paper_ids': [a], 'mode': 'strict'})
+        url = f'/api/conversations/{conv}'
+        assert client.get(url+'/messages').json()['scope_locked'] is False
+        assert client.post(f'/api/chat/{conv}', json={'question': 'aaa'}).status_code == 200
+        before = client.get(url+'/messages').json()
+        assert before['scope_locked'] is True
+        rejected = client.patch(url, json={'scope': None, 'title': '不应写入'})
+        assert rejected.status_code == 409 and '新建对话' in rejected.json()['detail']
+        assert client.get(url+'/messages').json() == before
+        assert client.patch(url, json={'title': '已改名', 'pinned': True}).status_code == 200
+        followup = client.post(f'/api/chat/{conv}', json={'question': 'bbb'}).json()
+        assert followup['insufficient_evidence'] and not followup['sources']
+        other = make(kb, client, {'paper_ids': [b], 'mode': 'strict'})
+        assert client.post(f'/api/chat/{other}', json={'question': 'bbb'}).status_code == 200
+        assert cited_papers(client, other) == {b}
 
     def test_unknown_paper_rejected(self, env):
         """⭐ 未知文献不得被静默忽略成"全部"。"""

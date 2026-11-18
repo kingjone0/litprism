@@ -228,12 +228,14 @@ def create_app(cfg: Config) -> FastAPI:
             payload.setdefault('concepts', kb.list_concepts(p['id']) if not version_id else [])
             p.pop("full_text", None)
             from ..candidate_snapshots import pending
+            from ..concepts import concept_details
             candidate = pending(kb, p['id'], analysis) if not version_id else None
             from ..materials import reading_status
             return {
                 "paper": p,
                 'reading': reading_status(kb, p),
                 "analysis": payload,
+                'concept_details': concept_details(kb, p, payload, (analysis or {}).get('material_id')),
                 'candidate_analysis': (candidate or {}).get('payload'),
                 "markdown": format_analysis(p, payload) if payload else "",
                 "chunks": len(kb.get_chunks(p["id"])),
@@ -494,9 +496,12 @@ def create_app(cfg: Config) -> FastAPI:
         if conv is None:
             raise HTTPException(404, "会话不存在")
         items = kb.get_messages(conv["id"])
+        context_input = None
         # 每条消息附带 segments（组件已由框架注入核验状态与页码）
         for m in items:
             meta = json.loads(m.get('meta') or '{}')
+            if m['role'] == 'assistant' and meta.get('context_input'):
+                context_input = meta['context_input']
             check = json.loads(m.get('citation_check') or '{}')
             saved_cites = json.loads(m.get('citations') or '[]')
             if m['role'] == 'assistant' and saved_cites:
@@ -537,7 +542,9 @@ def create_app(cfg: Config) -> FastAPI:
             m['segments'] = genui_process(m.get('content') or '', kb).segments
             m['source_links'] = audit_links
         latest = next((m for m in reversed(items) if m["role"] == "assistant"), {})
-        return {"conversation": conv, "items": items, "sources": citation_sources(latest.get("citations"))}
+        return {"conversation": conv, "items": items, "sources": citation_sources(latest.get("citations")),
+                "scope_locked": any(m['role'] in ('user', 'assistant') and m['kind'] != 'compact-checkpoint' for m in items),
+                "context_input": context_input}
 
     @app.post("/api/chat/{conv_id}")
     def chat(conv_id: str, req: dict):
@@ -566,19 +573,26 @@ def create_app(cfg: Config) -> FastAPI:
         except (ValueError, TypeError):
             raise HTTPException(400, '召回数必须在 1–50 之间。') from None
 
-        scope = conv.get('scope') or {}
-        if isinstance(scope, str):
-            scope = json.loads(scope)
         from ..scope import chat_paper_scope, chat_strict
-        try:
-            paper_ids = chat_paper_scope(kb, scope)
-            strict_scope = chat_strict(scope, question)
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        scope_snapshot = {'scope': scope, 'paper_ids': paper_ids, 'strict': strict_scope}
         chat_llm = execution['client'] if execution else task_llm()
         chat_cfg = getattr(chat_llm, 'runtime_config', cfg)
-        user_msg = execution['user'] if execution else kb.append_message(conv["id"], "user", question, meta={'scope_snapshot': scope_snapshot})
+        with kb.tx():
+            # The first message and scope capture serialize with scope edits.
+            conv = kb.resolve_conversation(conv["id"])
+            if conv is None:
+                raise HTTPException(404, '会话不存在')
+            scope = conv.get('scope') or {}
+            if isinstance(scope, str):
+                scope = json.loads(scope)
+            try:
+                paper_ids = chat_paper_scope(kb, scope)
+                strict_scope = chat_strict(scope, question)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            scope_snapshot = {'scope': scope, 'paper_ids': paper_ids, 'strict': strict_scope}
+            user_msg = execution['user'] if execution else kb.append_message(
+                conv["id"], "user", question, meta={'scope_snapshot': scope_snapshot},
+            )
         candidates, source_warning, external = [], '', []
         if req.get('web_search') and strict_scope:
             source_warning = '本轮明确限制来源，未进行联网补充。'
@@ -687,6 +701,7 @@ def create_app(cfg: Config) -> FastAPI:
                 'status': ans.status,
                 'usage': ans.usage,
                 'retrieval': ans.retrieval,
+                'context_input': ans.context_input,
             }
 
         with kb.tx():
@@ -699,6 +714,7 @@ def create_app(cfg: Config) -> FastAPI:
                 conv["id"], "assistant", content,
                 citations=cites, citation_check=check_dict,
                 meta={'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens,
+                      'context_input': ans.context_input,
                       'reasoning': ans.reasoning, 'request_settings': ans.request_settings,
                       'status': ans.status, 'usage': ans.usage, 'retrieval': ans.retrieval,
                       'guard_issues': ans.guard_issues, 'audit_warnings': ans.evidence_audit.get('warnings', []),

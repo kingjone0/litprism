@@ -102,7 +102,10 @@ def test_changed_inputs_block_resume_without_sending(env, monkeypatch, change):
     if change == 'source':
         kb.add_chunks(pid, [{'text':'replacement','page':2}], level='fulltext')
     elif change == 'scope':
-        client.patch('/api/conversations/'+cid, json={'scope':{}})
+        assert client.patch('/api/conversations/'+cid, json={'scope':{}}).status_code == 409
+        # Simulate an out-of-band change to verify the run binding independently.
+        with kb.tx() as con:
+            con.execute('UPDATE conversations SET scope=NULL WHERE id=?', (cid,))
     elif change == 'history':
         kb.append_message(cid,'user','new question')
     elif change == 'model':

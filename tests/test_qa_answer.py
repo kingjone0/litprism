@@ -65,7 +65,8 @@ def test_api_units_persist_exact_answer_and_fine_anchor_with_source_revoke_guard
     cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
     def respond(messages, task='', **kwargs):
         model.calls.append((task, messages))
-        catalog = json.loads(messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n')[1])
+        catalog, _ = json.JSONDecoder().raw_decode(
+            messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n', 1)[1])
         selected = next(a for a in catalog if 'original source.' in a['preview'])
         u = unit('原文中的实际方法。[P1]')
         u['quotes'] = [{'source': selected['source'], 'anchor_id': selected['anchor_id']}]

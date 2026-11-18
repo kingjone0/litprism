@@ -138,13 +138,17 @@ def turn(home, case_id):
         cid = manifest['conversation_id']
         if case_id == 'restricted':
             pid = next(p['id'] for p in manifest['papers'] if p['title']=='Attention Is All You Need')
-            r=client.patch('/api/conversations/'+cid,json={'scope':{'paper_ids':[pid],'mode':'strict'}}); r.raise_for_status()
+            r = client.post('/api/conversations', json={
+                'title': 'N04 fixed restricted turn', 'scope': {'paper_ids': [pid], 'mode': 'strict'},
+            })
+            r.raise_for_status()
+            cid = r.json()['id']
         stamp=time.monotonic()
         response=client.post('/api/conversations/'+cid+'/chat-runs',json={
             'question':case['question'],'request_id':manifest.get('request_namespace','default-fixed-')+case_id,'web_search':case_id!='restricted'})
         response.raise_for_status()
         rid=response.json()['run_id']
-        write(folder/'run.json', {'run_id':rid})
+        write(folder/'run.json', {'run_id':rid, 'conversation_id':cid})
         state=wait(client,rid,stamp)
         row=inspect_result(kb,client,cid,rid,dict(case,expect='Useful grounded response; optional knowledge controls and actual source lifecycle'),state,time.monotonic()-stamp)
         if row['review']:

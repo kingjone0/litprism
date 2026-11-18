@@ -10,6 +10,7 @@ from litprism.agents import QAAgent
 from litprism.evidence import stored_excerpts
 from litprism.knowledge import create_source, get_source, review_source, search_knowledge
 from litprism.provenance import availability
+from litprism.qa_retrieval import prompt_material
 
 
 def confirmed(kb, text='alphatopic correctedknowledge', dependencies=None):
@@ -27,7 +28,7 @@ def model_reply(model, phrases):
         model.calls.append((task,messages))
         if task == 'expand':
             return {'terms':['alphatopic']}
-        content = messages[-1]['content'].split('【片段】',1)[-1].split('【程序送达记录】')[0]
+        content = prompt_material(messages[-1]['content'])
         blocks = re.findall(r'\[(P\d+)\] [^\n]+\n(.*?)(?=\n\n---|$)',content,re.S)
         tags = [tag for phrase in phrases for tag,text in blocks if phrase in text]
         assert tags, (phrases,content)

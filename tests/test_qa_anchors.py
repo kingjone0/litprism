@@ -125,7 +125,8 @@ def test_api_trial_persists_backfilled_bytes_and_keeps_review_revoke_guard(env, 
     cfg.llm.model_window_tokens = cfg.context.window_tokens = 1000000
     def respond(messages, task='', **kwargs):
         model.calls.append((task, messages))
-        data = json.loads(messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n')[1])
+        data, _ = json.JSONDecoder().raw_decode(
+            messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n', 1)[1])
         a = data[0]
         text = f'原文中的转述结果。[{a["source"]}]'
         return {'answer': text, 'evidence_map': [{'claim': text, 'subject': '结果', 'basis': 'direct',

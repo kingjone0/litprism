@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+from .concepts import normalize_concepts
 from .config import Config
 from .db import KnowledgeBase
 from .prompts import CONCEPTS_SYSTEM, EXTRACT_SYSTEM
@@ -121,7 +122,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     window_info = apply_active_window(cfg, kb)
     extract_system = EXTRACT_SYSTEM + '\n每个非空字段必须在 field_evidence 提供原文标记列表；无依据留空。'
     extract_system += '\n每个独立句子就地附其直接依据，不把多个分号连接的结论统一在段末附一串引用；每句最多 3 个直接来源，复杂内容分成多句。'
-    concept_system = CONCEPTS_SYSTEM + '\n每条 definition 必须含本批原文引用 [P# p.N]；无页码不写页码，无依据不生成。'
+    concept_system = CONCEPTS_SYSTEM
+    concept_instruction = '只抽取本批原文出现的术语；分别说明文中定义、用法和证据缺口。'
     # 较长的指令作为分批预算基准，确保两类请求都容纳得下。
     system = max([extract_system, concept_system], key=len)
     instruction = '仅分析本批原文。未读取部分不能称为原文未提及。'
@@ -148,7 +150,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         texts = [repair_text(d, 0) for d in plan.directives]
         candidates = [(extract_system, text) for text in texts]
         if with_concepts:
-            candidates.append((concept_system, '只抽取本批原文出现的术语，逐条给出定义并附原文引用。'))
+            candidates.append((concept_system, concept_instruction))
         if any(sum(meter.estimate_message(m) for m in build_messages(sys, full_ctx, text))
                > cfg.context.available_tokens for sys, text in candidates):
             plan.mode, plan.directives = 'batched', []
@@ -185,6 +187,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     structure_failures: list[dict] = []
     structure_failures: list[dict] = []
     repair_attempts: list[dict] = []
+    full_terms_attempted = False
     for index, (directive, excerpts) in enumerate(units, 1):
         unit_label = directive.id if directive is not None else f'b{index}'
         checkpoint(f'解读原文第 {index}/{len(units)} 段')
@@ -225,19 +228,17 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
                                  for field, _ in _FIELDS], scope))
         if isinstance(data.get('field_notes'), str) and data['field_notes'].strip():
             batch_notes.append({'batch': index, 'text': data['field_notes'], 'status': 'unreviewed_model_note'})
-        if with_concepts:
+        if with_concepts and (shared_ctx is None or not full_terms_attempted):
+            # Whole-paper directives share the exact terms prompt. Once attempted,
+            # don't send it again at a different extraction step, even on failure.
+            full_terms_attempted = shared_ctx is not None
             try:
                 from .usage import tracked_json
-                cdata = tracked_json(llm,
-                    build_messages(concept_system, ctx, '只抽取本批原文出现的术语，逐条给出定义并附原文引用。'),
-                    task='concepts', tracker=tracker,
-                )
-                concepts = cdata.get('concepts') or []
-                if not isinstance(concepts, list):
-                    raise ValueError('concepts 必须是数组。')
-                all_concepts.extend(c for c in concepts if isinstance(c, dict)
-                                    and isinstance(c.get('term'), str) and isinstance(c.get('definition'), str)
-                                    and not citation_issues(c['definition'], excerpts))
+                messages = build_messages(concept_system, ctx, concept_instruction)
+                if sum(meter.estimate_message(m) for m in messages) > cfg.context.available_tokens:
+                    raise ValueError('术语请求超出原文窗口，未发送。')
+                cdata = tracked_json(llm, messages, task='concepts', tracker=tracker)
+                all_concepts.extend(normalize_concepts(cdata.get('concepts', []), excerpts))
             except Exception as exc:
                 if getattr(exc, 'stop_analysis_run', False):
                     raise
@@ -364,7 +365,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     merged['_model'] = getattr(llm, 'name', 'unknown')
     if not isinstance(merged.get('field'), str) or citation_issues(merged.get('field') or '', all_excerpts):
         merged['field'] = ''
-    unique = {(c['term'], c['definition']): c for c in all_concepts}
+    unique = {(c['term'], c['definition'], tuple((s['kind'], s.get('quote'), s['text'])
+                                               for s in c.get('sections', []))): c for c in all_concepts}
     merged['concepts'] = list(unique.values())
     if concept_errors:
         merged['_concepts_error'] = '；'.join(concept_errors)

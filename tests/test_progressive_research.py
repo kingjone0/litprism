@@ -46,7 +46,8 @@ def test_followup_select_confirm_retrieve_and_revoke_through_persistent_web(requ
         assert task == 'qa'
         content = messages[-1]['content']
         question = content.split('【问题】', 1)[1].split('\n', 1)[0]
-        anchors = json.loads(content.split('【试验定位锚点（程序生成，不是语义结论）】\n')[1])
+        anchors, _ = json.JSONDecoder().raw_decode(
+            content.split('【试验定位锚点（程序生成，不是语义结论）】\n', 1)[1])
 
         def unit(phrase, text):
             choices = [a for a in anchors if phrase in a['preview']]
@@ -116,7 +117,8 @@ def test_followup_select_confirm_retrieve_and_revoke_through_persistent_web(requ
     assert reused['status'] == 'answered'
     assert any(s.get('ref') in knowledge_chunks for s in reused['assistant']['source_links'])
     last_qa = next(messages for task, messages in reversed(model.calls) if task == 'qa')
-    material = last_qa[-1]['content'].split('【片段】', 1)[1].split('【程序送达记录】', 1)[0]
+    from litprism.qa_retrieval import prompt_material
+    material = prompt_material(last_qa[-1]['content'])
     assert 'reviewedprediction' in material and '另一个未选入库的描述' not in material
 
     # A new conversation has no answer history to carry this knowledge across.

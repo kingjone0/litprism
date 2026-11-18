@@ -43,7 +43,8 @@ class AcceptanceModel:
             raise TimeoutError('离线解读入口验收：一次故意未知结果')
         question = messages[-1]['content'].split('【问题】', 1)[-1] if task == 'qa' else ''
         if task == 'qa' and ('anchortrialmarker' in question or 'unboundmappingmarker' in question or 'unitreviewmarker' in question or 'unitknowledgefollowmarker' in question):
-            anchors = json.loads(messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n')[1])
+            anchors, _ = json.JSONDecoder().raw_decode(
+                messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n', 1)[1])
             a = next((a for a in anchors if 'unitknowledgefollowmarker' in a['preview']), anchors[0]) if 'unitknowledgefollowmarker' in question else anchors[0]
             text = f'隔离试验中选定原文的转述。[{a["source"]}]'
             mapped = {'subject': '离线流程试验', 'basis': 'direct', 'sources': [a['source']],
@@ -64,7 +65,8 @@ class AcceptanceModel:
                 'basis': 'metadata', 'sources': [tag], 'quotes': [{'source': tag, 'quote': '获取时间：'+stamp}]}]}
         if task == 'qa' and ('mixedwebmarker' in question or 'mixedcorrectedmarker' in question):
             import re
-            content = messages[-1]['content'].split('【片段】',1)[-1].split('【程序送达记录】')[0]
+            from litprism.qa_retrieval import prompt_material
+            content = prompt_material(messages[-1]['content'])
             phrase = 'mixedwebfixture' if 'mixedwebmarker' in question else 'mixedcorrectedmarker'
             blocks = re.findall(r'\[(P\d+)\] [^\n]+\n(.*?)(?=\n\n---|$)',content,re.S)
             tag = next(tag for tag,text in blocks if phrase in text)
