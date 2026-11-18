@@ -89,6 +89,46 @@ def test_saved_response_survives_publication_failure_without_another_model_call(
     assert data['usage']['calls'] == calls
 
 
+def test_preflight_checkpoint_is_reused_when_publishing_saved_reply(env, monkeypatch):
+    from litprism import qa_reviews
+    from litprism.context.restore import Restorer
+
+    cfg, kb, model, client = env
+    cfg.context.window_tokens = cfg.llm.model_window_tokens = 60_000
+    cfg.context.output_reserve_tokens = 24_000
+    pid = paper(kb, text='alphatopic evidence. ' + 'x' * 111_000)
+    cid = kb.add_conversation('Durable pressure', scope={'paper_ids': [pid], 'mode': 'strict'})
+    for i in range(8):
+        kb.append_message(cid, 'user', f'QUESTION_{i} ' + 'u' * 6_000)
+        kb.append_message(cid, 'assistant', f'REPLY_{i} ' + 'a' * 6_000)
+    original = qa_reviews.save
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('interrupted before publishing')
+
+    monkeypatch.setattr(qa_reviews, 'save', fail)
+    rid = client.post(f'/api/conversations/{cid}/chat-runs', json={
+        'question': 'alphatopic', 'request_id': 'pressure_publication',
+    }).json()['run_id']
+    assert wait(client, rid)['status'] == 'failed'
+    first = Restorer(kb, cfg).list_blocks(cid)
+    assert len(first) == 1 and first[0]['direct_refs'][0] == 'm00003'
+    calls = [messages for task, messages in model.calls if task == 'qa']
+    assert len(calls) == 1
+    content = calls[0][1]['content']
+    assert '历史摘要:' in content and 'QUESTION_7' in content and 'REPLY_7' in content
+
+    monkeypatch.setattr(qa_reviews, 'save', original)
+    assert client.post(f'/api/chat-runs/{rid}/resume', json={}).status_code == 200
+    assert wait(client, rid)['status'] == 'completed'
+    assert len([task for task, _ in model.calls if task == 'qa']) == 1
+    assert Restorer(kb, cfg).list_blocks(cid) == first
+    result = client.get(f'/api/chat-runs/{rid}/result').json()
+    assert result['auto_compact']['block_id'] == first[0]['id']
+    assert result['auto_compact']['phase'] == 'before_send'
+    assert len(kb.get_messages(cid)) == 19
+
+
 @pytest.mark.parametrize('change', ['source', 'scope', 'history', 'model', 'memory'])
 def test_changed_inputs_block_resume_without_sending(env, monkeypatch, change):
     from litprism import qa_reviews

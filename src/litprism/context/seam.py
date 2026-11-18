@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -35,7 +36,7 @@ from ..invariants import (
 )
 from ..refs import make_ref, parse_ref
 from .meter import Meter
-from .policy import SelectionResult
+from .policy import SelectionResult, complete_turn, dialogue_turns
 from .summarizer import SummaryResult, parse_summary
 
 
@@ -115,11 +116,10 @@ class Seam:
         if not selection.ok or selection.start_seq is None or selection.end_seq is None:
             return None, "changed"
 
-        if self.open_tx(conversation_id):
-            return None, "busy"
-
         tx_id = _new_id("tx_")
         with self.kb.tx() as con:
+            if self.open_tx(conversation_id):
+                return None, "busy"
             con.execute(
                 """INSERT INTO compaction_tx
                    (id, conversation_id, source_command, status, start_seq, end_seq,
@@ -154,6 +154,10 @@ class Seam:
         recheck_citations: Any = None,
     ) -> CommitResult:
         """提交压缩。前置校验不通过则**不写任何数据**。"""
+        with self.kb._tx_lock:
+            return self._commit(tx_id, summary, citation_before, citation_after, recheck_citations)
+
+    def _commit(self, tx_id, summary, citation_before, citation_after, recheck_citations):
         tx = self._get_tx(tx_id)
         if tx is None:
             return CommitResult(
@@ -185,6 +189,23 @@ class Seam:
                 ok=False, compaction_id=tx_id, status="failed",
                 failure_code="changed", message="区间内已无消息，历史可能已变化",
             )
+
+        selected = set(shadowed_refs)
+        for turn in dialogue_turns(self.kb.get_messages(conversation_id)):
+            refs = {m['ref'] for m in turn}
+            if refs & selected and (not complete_turn(turn) or not refs <= selected):
+                detail = '压缩区间必须覆盖完整问答。'
+                self.fail(tx_id, 'invariant', detail)
+                return CommitResult(False, tx_id, 'failed', failure_code='invariant', message=detail)
+
+        blocks = self.kb._con.execute(
+            'SELECT direct_refs FROM compaction_blocks WHERE conversation_id=? AND active=1',
+            (conversation_id,),
+        )
+        if any(selected.intersection(json.loads(row['direct_refs'])) for row in blocks):
+            detail = '选中消息已被其他检查点覆盖。'
+            self.fail(tx_id, 'changed', detail)
+            return CommitResult(False, tx_id, 'failed', failure_code='changed', message=detail)
 
         # ---- 不变量校验（含 LitPrism 特有第 9 条）----
         ctx = CompactContext(
@@ -228,7 +249,7 @@ class Seam:
         handles = self._collect_citation_handles(messages)
 
         try:
-            with self.kb.tx() as con:
+            with self._write() as con:
                 con.execute(
                     """INSERT INTO compaction_blocks
                        (id, conversation_id, tier, topic, summary, direct_refs, effective_refs,
@@ -321,10 +342,24 @@ class Seam:
     def _load_messages(self, conversation_id: str, start_seq: int, end_seq: int) -> list[dict]:
         rows = self.kb._con.execute(
             "SELECT seq, ref, role, content, citations, kind FROM messages"
-            " WHERE conversation_id = ? AND seq BETWEEN ? AND ? ORDER BY seq",
+            " WHERE conversation_id = ? AND seq BETWEEN ? AND ? AND kind!='compact-checkpoint' ORDER BY seq",
             (conversation_id, start_seq, end_seq),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    @contextmanager
+    def _write(self):
+        # The run binding and checkpoint share an outer transaction during
+        # preflight. Roll back partial block writes before recording a failure.
+        with self.kb.tx() as con:
+            con.execute('SAVEPOINT compaction_write')
+            try:
+                yield con
+            except Exception:
+                con.execute('ROLLBACK TO compaction_write')
+                raise
+            finally:
+                con.execute('RELEASE compaction_write')
 
     def _next_seq(self, conversation_id: str) -> int:
         row = self.kb._con.execute(

@@ -39,6 +39,7 @@ class QAAnswer:
     provider_usage: dict | None = None
     request_tokens: int = 0
     context_input: dict | None = None
+    auto_compact: dict | None = None
     reasoning: str = ''
     request_settings: dict = field(default_factory=dict)
     status: str = 'answered'
@@ -105,6 +106,7 @@ class QAAgent:
         before_seq: int | None = None,
         strict_scope: bool = True,
         external: tuple | list = (),
+        compact_history=None,
     ) -> QAAnswer:
         from .context.dialogue import HISTORY_GUARD, DialogueContext, build_dialogue
         from .context.meter import Meter
@@ -209,6 +211,12 @@ class QAAgent:
             messages, excerpts, delivery, evidence_sections = messages_for(hits)
         remaining = max(0, self.cfg.context.available_tokens - sum(meter.estimate_message(m) for m in messages) - 8)
         history, history_refs = dialogue.prompt(meter, remaining)
+        if compact_history and remaining and len(history_refs) < len(dialogue.history):
+            res.auto_compact = compact_history(dialogue, remaining)
+            if res.auto_compact:
+                dialogue = build_dialogue(self.kb, self.cfg, conversation_id, before_seq,
+                                          checkpoint_ref=res.auto_compact['checkpoint_ref'])
+                history, history_refs = dialogue.prompt(meter, remaining)
         if history:
             messages, excerpts, delivery, evidence_sections = messages_for(hits, history)
         from copy import deepcopy

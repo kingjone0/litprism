@@ -125,12 +125,15 @@ class Meter:
         """混排文本的 token 估算。中文与拉丁文用各自系数。"""
         if not text:
             return 0
+        return max(1, int(self.text_weight(text) + 0.5))
+
+    def text_weight(self, text: str) -> float:
+        """Unrounded cost for a piece of a joined prompt."""
         cjk = len(_CJK_RE.findall(text))
         other = max(0, len(text) - cjk)
         cjk_ratio = max(0.5, self.cfg.cjk_chars_per_token)
         latin_ratio = max(1.0, self.cfg.latin_chars_per_token)
-        tokens = cjk / cjk_ratio + other / latin_ratio
-        return max(1, int(tokens + 0.5))
+        return cjk / cjk_ratio + other / latin_ratio
 
     def estimate_message(self, msg: Mapping[str, Any]) -> int:
         """单条消息的定价（含固定开销与结构化附件）。"""

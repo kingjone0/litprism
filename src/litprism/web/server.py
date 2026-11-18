@@ -613,12 +613,30 @@ def create_app(cfg: Config) -> FastAPI:
                     from ..analysis_runs import RunConflict
                     raise RunConflict(str(exc)) from exc
                 raise HTTPException(409, str(exc)) from exc
+        from ..context.compaction import compact_dialogue
+
+        def compact_history(dialogue, budget):
+            from ..analysis_runs import RunConflict
+
+            def prepare():
+                return compact_dialogue(kb, chat_cfg, conv_id, user_msg['seq'],
+                                        dialogue=dialogue, history_budget=budget)
+            try:
+                if execution:
+                    return execution['compact'](prepare)
+                with kb.tx():
+                    return prepare()
+            except RunConflict:
+                raise
+            except Exception:  # noqa: BLE001 - continue with the budgeted history
+                return None
+
         try:
             ans = QAAgent(kb, chat_cfg, chat_llm).ask(
                 question, top_k=top_k,
                 conversation_id=conv["id"], before_seq=user_msg["seq"],
                 paper_ids=paper_ids,
-                strict_scope=strict_scope, external=external,
+                strict_scope=strict_scope, external=external, compact_history=compact_history,
             )
         except Exception as e:  # noqa: BLE001
             if execution:
@@ -677,7 +695,7 @@ def create_app(cfg: Config) -> FastAPI:
         qa_review_id = ('qr_'+uuid.uuid4().hex[:16]) if ans.draft_answer and ans.excerpts and ans.status in (
             'answered', 'needs_review', 'invalid_citation', 'refused') else None
         proc = genui_process(content, kb)
-        auto_compact = None
+        auto_compact = ans.auto_compact
         def result_payload():
             from ..qa_unit_reviews import display_units
             from ..qa_claims import presentation_warnings
@@ -726,6 +744,11 @@ def create_app(cfg: Config) -> FastAPI:
             if qa_review_id:
                 from ..qa_reviews import save as save_qa_review
                 save_qa_review(kb, qa_review_id, asst, conv['id'], question, ans, scope_snapshot)
+            if auto_compact is None:
+                try:
+                    auto_compact = compact_dialogue(kb, chat_cfg, conv['id'], asst['seq'])
+                except Exception:  # noqa: BLE001 - background compaction cannot fail the reply
+                    auto_compact = None
             if execution:
                 execution['publish'](result_payload())
         last_request = {'model': ans.model, 'provider_usage': ans.provider_usage, 'estimated_input': ans.request_tokens,
@@ -733,55 +756,6 @@ def create_app(cfg: Config) -> FastAPI:
         with kb.tx() as con:
             con.execute("INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                         ('last_request:'+conv['id'], json.dumps(last_request)))
-
-        proc = genui_process(content, kb)
-
-        # ---- 自动压缩：策略判定达到阈值就折，不让用户操心 ----
-        # 手动 /compact 仍保留在 CLI 作为逃生门，但界面不暴露主动入口 ——
-        # 用户不应该需要理解「上下文占用」才能正常使用。
-        auto_compact = None
-        try:
-            from ..context.policy import Policy
-            from ..context.seam import Seam
-            from ..context.summarizer import ExtractiveSummarizer, Summarizer
-            from ..context.telemetry import Telemetry
-
-            meter = Telemetry(kb, chat_cfg).meter
-            policy = Policy(chat_cfg)
-            fresh_conv = kb.resolve_conversation(conv["id"])
-            msgs = kb.get_messages(conv["id"])
-            meas = meter.measure(kb, conv["id"])
-            zones = policy.protected_zones(meas, msgs)
-            decision = policy.decide_trigger(
-                meas,
-                anchor_seq=int((fresh_conv or {}).get("compact_anchor_seq") or 0),
-                messages=msgs,
-                protected=zones,
-            )
-            if decision.should_compact:
-                sel = policy.select(meas, messages=msgs, aggressive=decision.emergency_truncate)
-                if sel.ok:
-                    seam = Seam(kb, chat_cfg)
-                    tx_id, _ = seam.begin(conv["id"], decision.trigger, sel)
-                    if tx_id:
-                        in_range = [m for m in msgs if sel.start_seq <= m["seq"] <= sel.end_seq]
-                        summary = Summarizer(
-                            chat_cfg, chat_llm, backend=ExtractiveSummarizer()
-                        ).summarize(in_range, sel.shadowed_tokens)
-                        if summary.ok:
-                            res = seam.commit(tx_id, summary)
-                            if res.ok:
-                                auto_compact = {
-                                    "trigger": decision.trigger,
-                                    "range": sel.range_text,
-                                    "shadowed_tokens": sel.shadowed_tokens,
-                                    "saved_per_turn": (res.ledger or {}).get("saved_per_turn", 0),
-                                    "block_id": res.block_id,
-                                }
-                        else:
-                            seam.fail(tx_id, "summary", summary.error)
-        except Exception:  # noqa: BLE001 - 自动压缩失败绝不能影响回答
-            auto_compact = None
 
         return result_payload()
 
@@ -847,7 +821,8 @@ def create_app(cfg: Config) -> FastAPI:
         tx_id, code = seam.begin(conv["id"], decision.trigger or "manual", sel)
         if not tx_id:
             return {"ok": False, "stage": "begin", "failure_code": code}
-        in_range = [m for m in msgs if sel.start_seq <= m["seq"] <= sel.end_seq]
+        refs = set(sel.shadowed_refs)
+        in_range = [m for m in msgs if m['ref'] in refs]
         summary = Summarizer(cfg, task_llm(), backend=ExtractiveSummarizer()).summarize(
             in_range, sel.shadowed_tokens
         )
