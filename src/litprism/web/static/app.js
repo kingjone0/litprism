@@ -771,9 +771,12 @@ async function loadLibrary(offset = 0) {
             <span>${esc((p.authors || []).slice(0, 3).join('、') || '作者未知')}${(p.authors || []).length > 3 ? ' 等' : ''}</span>
             <span>${p.year || '年份未知'}</span>
             ${p.venue ? `<span>${esc(p.venue)}</span>` : ''}
+          </div>
+          <div class="list-status">
             ${badgeOf(p.verify_level)}
-          <span>材料：${esc(paperMaterialLabel(p.current_material_level || p.material_level))}</span>
-          <span>${p.analysis_state === 'current' ? '已有解读' : p.analysis_state === 'historical' ? '有历史解读' : '尚未解读'}</span>
+            <span>材料：${esc(paperMaterialLabel(p.current_material_level || p.material_level))}</span>
+            <span class="analysis-state">${p.analysis_state === 'current' ? '已有解读' : p.analysis_state === 'historical' ? '有历史解读' : '尚未解读'}</span>
+          </div>
           </div>
         </button>
         <span class="paper-open" aria-hidden="true">${icon('arrow')}</span>
@@ -1529,41 +1532,51 @@ function readingModeNote(cov) {
   const tokens = plan.context_tokens;
   const window = win.window;
 
-  const parts = [];
+  // V3 两层结构：摘要行只露模式/窗口占比/调用次数，其余收进可展开详情（P-1 降噪）
+  const modeBadge = plan.mode === 'whole' ? `<span class="badge ok">全文驻留</span>`
+    : plan.mode === 'batched' ? `<span class="badge warn">分批读取</span>` : '';
+  const pct = tokens && window ? Math.round(tokens / window * 100) : null;
+  const u = cov.usage || {};
+  const summaryParts = [
+    modeBadge,
+    pct != null ? `<span class="mono">${pct}% 窗口</span>` : (tokens ? `<span class="mono">${fmtNum(tokens)} token</span>` : ''),
+    u.calls ? `<span class="muted">${u.calls} 次调用</span>` : '',
+  ].filter(Boolean).join(' ');
+
+  const detailParts = [];
   if (plan.mode === 'whole') {
-    parts.push(`<span class="badge ok">全文驻留</span>`);
-    parts.push(`<span>${(plan.directives || []).length} 条指令共享同一上下文前缀</span>`);
+    detailParts.push(`<span>${(plan.directives || []).length} 条指令共享同一上下文前缀</span>`);
   } else if (plan.mode === 'batched') {
-    parts.push(`<span class="badge warn">分批读取</span>`);
-    parts.push(`<span>${cov.batches || '?'} 批（窗口不足，缓存前缀不可复用）</span>`);
+    detailParts.push(`<span>${cov.batches || '?'} 批（窗口不足，缓存前缀不可复用）</span>`);
   }
   if (tokens && window) {
-    parts.push(`<span class="mono muted">${fmtNum(tokens)} / ${fmtNum(window)} token（${Math.round(tokens / window * 100)}%）</span>`);
+    detailParts.push(`<span class="mono muted">${fmtNum(tokens)} / ${fmtNum(window)} token（${pct}%）</span>`);
   } else if (tokens) {
-    parts.push(`<span class="mono muted">${fmtNum(tokens)} token</span>`);
+    detailParts.push(`<span class="mono muted">${fmtNum(tokens)} token</span>`);
   }
-  if (cov.total_chunks) parts.push(`<span class="muted">${cov.total_chunks} 块</span>`);
+  if (cov.total_chunks) detailParts.push(`<span class="muted">${cov.total_chunks} 块</span>`);
 
   // 缓存命中率是"上下文是否真的固定"的体检指标
-  const u = cov.usage || {};
   if (u.calls) {
     if (u.cached_ratio == null) {
-      parts.push(`<span class="muted" title="提供商未报告缓存字段">缓存命中率不可知</span>`);
+      detailParts.push(`<span class="muted" title="提供商未报告缓存字段">缓存命中率不可知</span>`);
     } else {
       const r = Math.round(u.cached_ratio * 100);
       const cls = r >= 50 ? 'ok' : r >= 10 ? 'warn' : 'danger';
-      parts.push(`<span class="badge ${cls}">缓存命中 ${r}%</span>`);
+      detailParts.push(`<span class="badge ${cls}">缓存命中 ${r}%</span>`);
     }
-    parts.push(`<span class="mono muted">${u.calls} 次调用 · 已报告 ${fmtNum(u.input)} 入 / ${fmtNum(u.output)} 出</span>`);
+    detailParts.push(`<span class="mono muted">已报告 ${fmtNum(u.input)} 入 / ${fmtNum(u.output)} 出</span>`);
     if (u.unknown_usage_calls) {
-      parts.push(`<span class="badge warn">${u.unknown_usage_calls} 次用量未知 · 总计不完整</span>`);
+      detailParts.push(`<span class="badge warn">${u.unknown_usage_calls} 次用量未知 · 总计不完整</span>`);
     }
-    if (u.failed_calls) parts.push(`<span class="muted">含 ${u.failed_calls} 次失败调用</span>`);
+    if (u.failed_calls) detailParts.push(`<span class="muted">含 ${u.failed_calls} 次失败调用</span>`);
   }
 
-  let html = `<div class="row wrap" style="gap:8px;margin-top:8px;font-size:11.5px;color:var(--text-2)">
-    ${parts.join('<span class="muted">·</span>')}
-  </div>`;
+  let html = `<details class="run-detail"><summary class="run-detail-summary">${summaryParts}
+    <span class="run-detail-toggle">运行详情</span></summary>
+  <div class="row wrap run-detail-body" style="gap:8px;color:var(--text-2)">
+    ${detailParts.join('<span class="muted">·</span>')}
+  </div></details>`;
 
   // 跨指令重复：条数正常但内容全是别人的
   const overlaps = cov.overlaps || [];
@@ -1894,6 +1907,9 @@ function renderMessage(m, fresh = false) {
     body = `<div style="font-family:var(--mono);font-size:11.5px;color:var(--text-2);white-space:pre-wrap">${esc(short(m.content, 400))}</div>`;
   } else {
     body = LitUI.md(m.content || '');
+    // V3 引用标记呈现层 chip 化（只包装已转义的 [Pn …] 字面文本，数据不变）
+    if (!isUser) body = body.replace(/\[(P\d+)((?:[^\[\]<])*)\]/g,
+      '<span class="cite-chip">[$1$2]</span>');
   }
 
   const checkWarn = (!isUser && check && check.passed === false)

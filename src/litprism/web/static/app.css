@@ -870,6 +870,16 @@ details.card > summary::before,
   gap: 6px 10px;
   flex-wrap: wrap;
 }
+/* V3 库列表分层：作者/年份一行，核验与材料/解读状态独立成行 */
+.list-status {
+  margin-top: var(--space-1);
+  font-size: var(--fs-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  flex-wrap: wrap;
+}
+.list-status .analysis-state { color: var(--muted); }
 
 /* ---------------- 对话气泡 ---------------- */
 .chat-avatar {
@@ -1561,16 +1571,17 @@ details.card > summary::before,
   pointer-events: none;
 }
 .toast {
-  padding: 9px 16px;
-  border-radius: 999px;
-  background: var(--text);
-  color: var(--bg);
-  font-size: 12.5px;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-size: var(--fs-sm);
   font-weight: 500;
   box-shadow: var(--shadow-2);
   animation: toast-in .18s ease-out;
 }
-.toast.err { background: var(--danger); color: #fff; }
+.toast.err { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
 
 .skeleton {
@@ -1901,6 +1912,20 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
 }
 .context-meter summary:hover .context-meter-chip,
 .context-meter[open] .context-meter-chip { color: var(--text); }
+
+/* ---------------- V3 回答内引用标记 chip 化（呈现层，不改数据） ---------------- */
+.cite-chip {
+  display: inline-block;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
 .context-meter-panel {
   position: absolute;
   z-index: 4;
@@ -2598,3 +2623,29 @@ details.card .card-body > details > summary {
 }
 .overflow-item:hover { background: var(--panel-2); }
 .overflow-item.danger { color: var(--danger, #b3261e); }
+
+/* ---------------- V3 运行详情折叠条（详情页 meta 两层化） ---------------- */
+.run-detail { margin-top: var(--space-2); min-width: 0; }
+.run-detail-summary {
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+  min-height: 26px; padding: 0 var(--space-2);
+  border-radius: var(--radius-xs); cursor: pointer; list-style: none;
+  font-size: var(--fs-xs); color: var(--text-2);
+  transition: background-color var(--dur-fast) var(--ease);
+}
+.run-detail-summary::-webkit-details-marker { display: none; }
+.run-detail-summary:hover { background: var(--panel-2); color: var(--text); }
+.run-detail-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.run-detail-toggle {
+  margin-inline-start: auto;
+  font-size: var(--fs-xs); color: var(--muted);
+}
+.run-detail[open] .run-detail-toggle::after { content: ' ▾'; }
+.run-detail:not([open]) .run-detail-toggle::after { content: ' ▸'; }
+.run-detail-body {
+  padding: var(--space-2) var(--space-3);
+  margin-top: var(--space-1);
+  border-inline-start: 2px solid var(--border);
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+}
