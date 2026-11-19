@@ -14,8 +14,10 @@ def test_verify_input_enter_is_ime_safe():
     text = _read('app.js')
     # 纯 Enter 提交必须跳过 IME 组词期（isComposing + keyCode 229 兜底）
     assert 'if (e.isComposing || e.keyCode === 229) return;' in text
-    # 聊天框是 Ctrl/Cmd+Enter 组合键，指南明确组合键不与组词确认冲突，不得误加阻止
-    assert re.search(r"e\.ctrlKey \|\| e\.metaKey\) && e\.key === 'Enter'", text)
+    # 聊天 Ctrl+Enter 同样需要守卫：macOS Chromium 组词期携带真实 key 值（审计 F4）
+    # 锚守卫代码本身（不锚注释措辞），count>=2 覆盖 verifyInput 与聊天两处
+    assert re.search(r"e\.key === 'Enter'\) \{[^}]*?if \(e\.isComposing \|\| e\.keyCode === 229\) return;", text, re.S)
+    assert text.count('if (e.isComposing || e.keyCode === 229) return;') >= 2
 
 
 def test_toasts_are_announced_by_screen_readers():

@@ -81,7 +81,7 @@ Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
 |---|---|
 | `tools/_probe.js` | 运行时缺口探针：起 sidecar、走遍所有视图与设置面板，收集控制台报错/失败请求/未处理拒绝 |
 | `tools/_shot.js`、`tools/window_shot.py` | 出图：前者抓页面，后者用 ctypes 抓桌面窗口（外壳渲染是否有内容只能靠看） |
-| `tools/check_workbench.cjs` | 无窗口的前端交互验收（与 `check_workflows` 覆盖面不同，需要 playwright） |
+| `tools/check_workbench.cjs` | 无窗口的前端交互验收（与 `check_workflows` 覆盖面不同，需要 playwright）。**已失真待重建**：durable-chat/搜索 mock 已部分修复（2026-11-20），但更早的界面断言（inspector 显隐等）仍与当前应用漂移，脚本跑不完；验收以 `check_workflows`/`check_n10` 为准，不要引用本脚本通过记录 |
 | `tools/_empty_state_check.cjs`、`tools/_theme_check.cjs` | 空态按钮点击、四套主题明暗与分层校验（需运行中的实例与 `BASE_URL`） |
 
 ## 阅读标注

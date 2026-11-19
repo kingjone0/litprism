@@ -6,9 +6,11 @@
 <meta name="color-scheme" content="light dark">
 <title>文献棱镜 LitPrism</title>
 <script>
-/* 首帧防闪烁：样式表生效前按存储主题设置属性；仅此用途，主题切换逻辑仍在 app.js */
+/* 首帧防闪烁：样式表生效前按存储主题设置属性；仅此用途，主题切换逻辑仍在 app.js。
+   legacy dark 值在此映射为 paper-dark（light 默认即 paper，无需显式映射）。 */
 try {
   var storedTheme = localStorage.getItem('litprism-theme');
+  if (storedTheme === 'dark') storedTheme = 'paper-dark';
   if (['paper', 'paper-dark', 'minimal', 'glass'].indexOf(storedTheme) >= 0) {
     document.documentElement.setAttribute('data-theme', storedTheme);
   }

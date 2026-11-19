@@ -18,12 +18,17 @@ const THEME_IDS = THEMES.map(t => t.id);
 function themeOf(id) {
   return THEMES.find(t => t.id === id) || THEMES[0];
 }
-/** 旧版本只存 light/dark，读到时迁移一次，避免升级后主题丢失 */
+/** 旧版本只存 light/dark，读到时迁移并写回归一，避免升级后每次启动重复迁移 */
 function readTheme() {
   const stored = localStorage.getItem('litprism-theme');
-  if (stored === 'light') return 'paper';
-  if (stored === 'dark') return 'paper-dark';
-  return THEME_IDS.includes(stored) ? stored : 'paper';
+  let theme = 'paper';
+  if (stored === 'light') theme = 'paper';
+  else if (stored === 'dark') theme = 'paper-dark';
+  else if (THEME_IDS.includes(stored)) theme = stored;
+  if (theme !== stored) {
+    try { localStorage.setItem('litprism-theme', theme); } catch (_) {}
+  }
+  return theme;
 }
 const S = {
   status: null,
@@ -309,7 +314,7 @@ function applyTheme() {
 function setTheme(id) {
   if (!THEME_IDS.includes(id)) return;
   S.theme = id;
-  localStorage.setItem('litprism-theme', id);
+  try { localStorage.setItem('litprism-theme', id); } catch (_) {}
   applyTheme();
   if (S.activeView === 'settings') loadSettings();
 }
@@ -342,7 +347,7 @@ function toggleInspector(show = !S.inspector, { restoreFocus = true } = {}) {
   const wasOpen = S.inspector;
   if (show && !wasOpen) inspectorReturnFocus = document.activeElement;
   S.inspector = show;
-  localStorage.setItem('litprism-evidence-panel', show ? '1' : '0');
+  try { localStorage.setItem('litprism-evidence-panel', show ? '1' : '0'); } catch (_) {}
   applyInspector();
   if (show) refreshInspector();
   else if (wasOpen && restoreFocus) {
@@ -359,7 +364,7 @@ function applySidebar() {
 }
 function toggleSidebar() {
   S.sidebar = !S.sidebar;
-  localStorage.setItem('litprism-sidebar', S.sidebar ? '1' : '0');
+  try { localStorage.setItem('litprism-sidebar', S.sidebar ? '1' : '0'); } catch (_) {}
   applySidebar();
 }
 function refreshInspector() {
@@ -1573,11 +1578,14 @@ function analysisSection(label, text) {
 /* ==========================================================================
    对话
    ========================================================================== */
-/* 草稿跨刷新：内存 Map 为主读写路径，localStorage 直写镜像（litprism-* 命名约定）。
-   存储不可用（隐私模式等）时静默降级为仅内存，不阻断界面。草稿只存客户端，不进事实/知识。 */
+/* 草稿跨刷新：内存 Map 为最新真值（本会话内输入即时写入），localStorage 为跨刷新镜像。
+   Map 优先读取——某次镜像写入失败（配额/隐私模式）时不会回读旧值。
+   存储不可用时静默降级为仅内存；草稿只存客户端，不进事实/知识。 */
 const CHAT_DRAFT_PREFIX = 'litprism-chat-draft:';
+const CHAT_DRAFT_LIMIT = 64 * 1024;  // 超长稿只存内存：防止把 localStorage 配额吃满殃及主题等设置
 function setChatDraft(convId, text) {
   S.chatDrafts.set(convId, text);
+  if (text.length > CHAT_DRAFT_LIMIT) return;
   try { localStorage.setItem(CHAT_DRAFT_PREFIX + convId, text); } catch (_) {}
 }
 function clearChatDraft(convId) {
@@ -1585,11 +1593,12 @@ function clearChatDraft(convId) {
   try { localStorage.removeItem(CHAT_DRAFT_PREFIX + convId); } catch (_) {}
 }
 function getChatDraft(convId) {
+  if (S.chatDrafts.has(convId)) return S.chatDrafts.get(convId);
   try {
     const stored = localStorage.getItem(CHAT_DRAFT_PREFIX + convId);
     if (stored != null) return stored;
   } catch (_) {}
-  return S.chatDrafts.get(convId) || '';
+  return '';
 }
 function rememberChatDraft() {
   const input = $('#chatInput');
@@ -1723,7 +1732,11 @@ async function loadChat() {
     const send = () => askQuestion();
     $('#btnSend').onclick = send;
     input.onkeydown = e => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); send(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        // macOS Chromium 组词期 Ctrl+Enter 携带真实 key 值，会误发未确认的拼音原文
+        if (e.isComposing || e.keyCode === 229) return;
+        e.preventDefault(); send();
+      }
     };
     input.focus();
 
@@ -1746,8 +1759,9 @@ async function askQuestion() {
   const empty = stream.querySelector('.empty');
   if (empty) empty.remove();
 
-  // 乐观插入用户消息
+  // 乐观插入用户消息（保留节点引用：未提交失败时移除，避免气泡与恢复的输入框双份呈现）
   stream.insertAdjacentHTML('beforeend', renderMessage({ role: 'user', content: q }));
+  const optimisticBubble = stream.lastElementChild;
   stream.insertAdjacentHTML('beforeend', `
     <div id="pending" style="margin-bottom:14px;display:flex;gap:10px">
       <div class="chat-avatar">AI</div>
@@ -1762,8 +1776,10 @@ async function askQuestion() {
   stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
 
   let completed = false;
+  let submitted = false;  // 拿到创建回执=请求已提交，失败走运行面板重试；未提交则恢复草稿
   try {
     const r = await startDurableChat(convId, { question: q, web_search: S.convScope?.raw?.mode !== 'strict' });
+    submitted = true;
     completed = true;
     if (S.activeConv !== convId || S.activeView !== 'chat' || !stream.isConnected) return;
     S.messages.push(r.user, r.assistant);
@@ -1784,6 +1800,15 @@ async function askQuestion() {
     refreshInspector();
     loadSidebar();
   } catch (e) {
+    // 请求未提交（无创建回执）：恢复草稿与输入框，避免问题文本丢失（审计 F2）。
+    // 输入框已有新输入（POST 窗口期内用户继续打字）时以新输入为准，不回填旧 q；
+    // 乐观气泡一并移除，防止同一问题出现两份。
+    if (!submitted) {
+      const inp = $('#chatInput');
+      if (!inp || !inp.value) setChatDraft(convId, q);
+      if (stream.isConnected && inp && !inp.value) inp.value = q;
+      optimisticBubble?.remove();
+    }
     if (!stream.isConnected) return;
     $('#pending')?.remove();
     stream.insertAdjacentHTML('beforeend', `
@@ -2214,8 +2239,9 @@ async function doVerify() {
           且会保留确认当时的自动判定。
         </div>
         <label for="wlReason">人工确认依据</label>
-        <textarea class="textarea" id="wlReason" rows="2"
+        <textarea class="textarea" id="wlReason" rows="2" aria-describedby="wlReasonError"
           placeholder="例如：在 NeurIPS 2024 会议论文集里见过这篇，且作者组有相关前期工作"></textarea>
+        <p class="field-error" id="wlReasonError" role="alert" hidden></p>
         <div class="row" style="margin-top:9px;gap:8px">
           <span class="muted" style="font-size:11.5px">放行后徽章显示为「🔵人工确认」，与「✅已核验」区分。</span>
           <span style="flex:1"></span>
@@ -2229,7 +2255,14 @@ async function doVerify() {
     if (btn) btn.onclick = async () => {
       if (!current() || !btn.isConnected || btn.disabled) return;
       const reason = $('#wlReason').value.trim();
-      if (reason.length < 4) { toast('请填写确认依据（至少 4 个字）', true); return; }
+      // 校验错误内联留存并回焦（WCAG 3.3.1），不能只靠 3.2s 即逝的 toast
+      const err = $('#wlReasonError');
+      if (reason.length < 4) {
+        if (err) { err.textContent = '请填写确认依据（至少 4 个字）。'; err.hidden = false; }
+        $('#wlReason')?.focus();
+        return;
+      }
+      if (err) { err.hidden = true; }
       btn.disabled = true;
       let confirmed = false;
       try {
