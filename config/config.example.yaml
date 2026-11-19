@@ -43,8 +43,12 @@ sources:
     enabled: false                        # 需要免费 API Key，见 https://www.semanticscholar.org/product/api
     api_key: ""                           # ENV: S2_API_KEY
   unpaywall:
+    # 开放全文索引：填真实邮箱后开启（占位邮箱会被跳过，不入礼貌池）
     enabled: false
     email: "your_email@example.com"
+  europepmc:
+    # 生物医学开放全文，无需密钥
+    enabled: false
 
 verification:
   # 标题相似度阈值（归一化后按字符级相似度计算，0~1）

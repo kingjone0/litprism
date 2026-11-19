@@ -119,6 +119,7 @@ class SourcesConfig:
     arxiv: SourceConfig = field(default_factory=SourceConfig)
     semantic_scholar: SourceConfig = field(default_factory=lambda: SourceConfig(enabled=False))
     unpaywall: SourceConfig = field(default_factory=lambda: SourceConfig(enabled=False))
+    europepmc: SourceConfig = field(default_factory=lambda: SourceConfig(enabled=False))
 
     def get(self, name: str) -> SourceConfig:
         return getattr(self, name, SourceConfig(enabled=False))

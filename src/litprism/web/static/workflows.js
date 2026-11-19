@@ -1464,10 +1464,14 @@ function poolRow(item) {
   const title = item.in_library && item.library_paper_id
     ? `<a href="#paper-${esc(item.library_paper_id)}" data-pool-open="${esc(item.library_paper_id)}">${esc(item.title)}</a>`
     : `<a href="${esc(item.url || '#')}" target="_blank" rel="noreferrer">${esc(item.title)}</a>`;
+  const doi = (item.doi || '').trim();
+  const land = doi ? `https://doi.org/${encodeURI(doi)}` : (item.url || '');
   const acts = [];
-  if (!item.in_library && arxiv) acts.push(`<button class="btn sm primary" data-pool-fetch="${esc(item.id)}">取全文</button>`);
-  // 非 arXiv 的论文只能导题录；网页候选不冒充论文，保持忽略/拒绝
-  if (!item.in_library && !arxiv && item.kind === 'paper') acts.push(`<button class="btn sm" data-pool-import="${esc(item.id)}">导入题录</button>`);
+  // arXiv 或带 DOI 的候选都可以尝试取全文：后者查开放副本，查不到会明确报错
+  if (!item.in_library && (arxiv || doi)) acts.push(`<button class="btn sm primary" data-pool-fetch="${esc(item.id)}">取全文</button>`);
+  if (!item.in_library && land) acts.push(`<a class="btn sm" href="${esc(land)}" target="_blank" rel="noreferrer">打开原文</a>`);
+  // 没有 DOI 的论文只能导题录；网页候选不冒充论文，保持忽略/拒绝
+  if (!item.in_library && !arxiv && !doi && item.kind === 'paper') acts.push(`<button class="btn sm" data-pool-import="${esc(item.id)}">导入题录</button>`);
   if (item.in_library && item.library_paper_id) acts.push(`<button class="btn sm" data-pool-open="${esc(item.library_paper_id)}">打开论文</button>`);
   if (!item.in_library && item.status === 'new') {
     acts.push(`<button class="btn sm" data-pool-ignore="${esc(item.id)}">忽略</button>`);
@@ -1490,7 +1494,7 @@ async function loadCandidates() {
   if (!box) return;
   const filter = S.poolFilter || 'open';
   const isCurrent = () => request === candidateRequest && filter === (S.poolFilter || 'open');
-  box.innerHTML = `<div class="pool-head"><h2>候选池</h2><p class="pool-sub">检索到的东西先落在这里；arXiv 可直接取全文，其余请手动导入。</p></div>
+  box.innerHTML = `<div class="pool-head"><h2>候选池</h2><p class="pool-sub">检索到的东西先落在这里；arXiv 与开放获取文献可直接取全文，订阅文献请打开原文下载后拖入窗口。</p></div>
     <p class="pool-meta" role="status">正在读取候选…</p>`;
   const query = filter === 'open' ? '?hide_in_library=1&status=new'
     : filter === 'library' ? '?status=imported' : '?limit=100';
@@ -1538,7 +1542,7 @@ async function loadCandidates() {
       <label>arXiv ID<input class="input" name="arxiv_id" placeholder="1607.01759，可留空"></label>
       <label>链接<input class="input" name="url" placeholder="https://…"></label>
       <div class="row"><button class="btn primary sm">加入候选</button><button class="btn sm" type="button" data-pool-cancel>取消</button></div>
-      <p class="pool-hint">只有带 arXiv ID 的候选能自动取全文；其他来源请手动下载后在知识库导入。</p>
+      <p class="pool-hint">arXiv 与开放获取文献能自动取全文；订阅文献请用「打开原文」下载后在知识库导入。</p>
       <p class="task-error" role="alert"></p>
     </form>
     ${list}`;

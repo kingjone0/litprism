@@ -80,6 +80,18 @@ Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
 | `tools/check_workbench.cjs` | 无窗口的前端交互验收（与 `check_workflows` 覆盖面不同，需要 playwright） |
 | `tools/_empty_state_check.cjs`、`tools/_theme_check.cjs` | 空态按钮点击、四套主题明暗与分层校验（需运行中的实例与 `BASE_URL`） |
 
+## 取全文
+
+arXiv 走官方直链；其余文献按顺序查**合法开放副本**：
+`sources.unpaywall`（需填真实邮箱，占位邮箱跳过）→ `sources.openalex` → `sources.semantic_scholar`（可选 key）→ `sources.europepmc`（生物医学，免密钥）。
+命中后把 provider / url / license / retrieved_at 写进候选 `extra.fulltext` 供审计。
+
+- 只认直链 PDF：只有落地页时判 `no_oa`，不去抓 HTML 再猜链接
+- 失败分 `no_oa` / `paywalled` / `network_error` / `no_doi`，不能把"没拿到"记成"不存在"
+- 下载前校验公网 http(s)、拒绝内网地址；下载后验 `%PDF` 与 80MB 上限
+- **不绕过付费墙、不使用任何账户凭据**；订阅文献由用户自行下载后导入（候选池给「打开原文」链接）
+- 导入时开放副本取不回（403/HTML/解析失败）会退回题录导入；「取全文」按钮则明确报错
+
 ## 打包
 
 打安装包只有一条命令：`python packaging/release.py`（sidecar → 冒烟 → 安装包 → 校验）。

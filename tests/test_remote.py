@@ -142,7 +142,7 @@ def test_candidate_without_arxiv_id_is_rejected_before_network(tmp_path, monkeyp
         cid = save_candidates(kb, [{'title': 'Web only', 'url': 'https://example.com/a'}], kind='web')['added'][0]
         called = []
         monkeypatch.setattr(remote, 'download_pdf', lambda *a, **k: called.append(1))
-        with pytest.raises(ValueError, match='没有 arXiv 标识'):
+        with pytest.raises(ValueError, match='没有可自动获取的全文'):
             remote.fetch_candidate_pdf(kb, cfg, _Verifier(), cid)
         assert called == []
     finally:
@@ -168,6 +168,9 @@ def test_import_non_arxiv_candidate_requires_verification(tmp_path, monkeypatch)
     try:
         cid = save_candidates(kb, [{'title': 'Deep Residual Learning', 'doi': '10.1109/CVPR.2016.90',
                                     'year': 2016}], query='q')['added'][0]
+        # 单元测试不联网：显式声明没有开放副本，验证回退到题录导入
+        from litprism.fulltext import Lookup
+        monkeypatch.setattr(remote, 'resolve_open_copy', lambda *a, **k: Lookup('no_oa', detail='test'))
         result = remote.import_candidate(kb, cfg, _ImportVerifier(), cid)
         assert result['paper_id'] and result['material_level'] == '仅题录与摘要'
         paper = kb.get_paper(result['paper_id'])
@@ -230,6 +233,9 @@ def test_import_non_arxiv_candidate_requires_verification(tmp_path, monkeypatch)
     try:
         cid = save_candidates(kb, [{'title': 'Deep Residual Learning', 'doi': '10.1109/CVPR.2016.90',
                                     'year': 2016}], query='q')['added'][0]
+        # 单元测试不联网：显式声明没有开放副本，验证回退到题录导入
+        from litprism.fulltext import Lookup
+        monkeypatch.setattr(remote, 'resolve_open_copy', lambda *a, **k: Lookup('no_oa', detail='test'))
         result = remote.import_candidate(kb, cfg, _ImportVerifier(), cid)
         assert result['paper_id'] and result['material_level'] == '仅题录与摘要'
         paper = kb.get_paper(result['paper_id'])
@@ -269,5 +275,25 @@ def test_import_rejects_web_candidate(tmp_path):
         cid = save_candidates(kb, [{'title': 'A blog', 'url': 'https://example.com/x'}], kind='web')['added'][0]
         with pytest.raises(ValueError, match='只有论文类候选'):
             remote.import_candidate(kb, cfg, _ImportVerifier(), cid)
+    finally:
+        kb.close()
+
+
+def test_import_falls_back_when_open_copy_download_fails(tmp_path, monkeypatch):
+    """开放副本找到了但下载失败（403/HTML），导入应退回题录而不是整体失败。"""
+    cfg, kb = kb_of(tmp_path)
+    try:
+        cid = save_candidates(kb, [{'title': 'Deep Residual Learning', 'doi': '10.1109/CVPR.2016.90',
+                                    'year': 2016}], query='q')['added'][0]
+        from litprism.fulltext import Lookup, OpenCopy
+        monkeypatch.setattr(remote, 'resolve_open_copy',
+                            lambda *a, **k: Lookup('ok', copy=OpenCopy('https://x.example/a.pdf', 'openalex')))
+
+        def boom(*a, **k):
+            raise ValueError('下载内容不是 PDF')
+
+        monkeypatch.setattr(remote, 'download_pdf', boom)
+        result = remote.import_candidate(kb, cfg, _ImportVerifier(), cid)
+        assert result['material_level'] == '仅题录与摘要'
     finally:
         kb.close()
