@@ -110,6 +110,8 @@ class QAAgent:
     ) -> QAAnswer:
         from .context.dialogue import HISTORY_GUARD, DialogueContext, build_dialogue
         from .context.meter import Meter
+        from .config import LLMConfig
+        from .llm import estimate_request_tokens, request_budget
         from .usage import TrackedClient, UsageTracker, normalize_usage
 
         tracker = UsageTracker()
@@ -120,6 +122,19 @@ class QAAgent:
             return res
         dialogue = build_dialogue(self.kb, self.cfg, conversation_id, before_seq) if conversation_id else DialogueContext()
         meter = Meter(self.cfg)
+        input_limit = self.cfg.context.available_tokens
+        budget = request_budget(getattr(self.llm, 'cfg', self.cfg.llm),
+                                protocol=getattr(self.llm, 'protocol', None), task='qa')
+        if budget is not None:
+            # Preserve the nominal input share for full evidence. Near the
+            # window edge, let the uncertainty use some of the output share,
+            # while retaining room for an ordinary response or a smaller model ceiling.
+            output_reserve = min(budget.output_ceiling, LLMConfig.max_tokens)
+            input_limit = min(input_limit, budget.input_limit(output_reserve))
+
+        def request_cost(messages):
+            return estimate_request_tokens(messages, meter=meter)
+
         def freeze_refusal(outcome, request):
             if conversation_id:
                 from .memory.view import TurnViewStore
@@ -127,7 +142,7 @@ class QAAgent:
                     **dialogue.memory.read_refs(), 'question': question, 'request': request,
                     'outcome': outcome, 'model': getattr(self.llm, 'name', 'unknown'),
                     'preferences': [m.to_dict() for m in dialogue.memory.resident]})
-        if meter.estimate_text(question) > self.cfg.context.available_tokens // 2:
+        if meter.estimate_text(question) > input_limit // 2:
             freeze_refusal('question_over_budget', [])
             res.answer, res.status = '问题过长，请缩短后重试。', 'budget_exceeded'
             res.insufficient_evidence, res.confidence = True, 'none'
@@ -178,7 +193,7 @@ class QAAgent:
         from .context.dialogue import is_followup
         hits, res.retrieval = retrieve(self.kb, question, dialogue.query(question, paper_ids), paper_ids=paper_ids,
                                       top_k=top_k, llm=client, search=search_local, cfg=self.cfg,
-                                      fits_full=lambda hs: sum(meter.estimate_message(m) for m in messages_for(hs)[0])+8 <= self.cfg.context.available_tokens,
+                                      fits_full=lambda hs: request_cost(messages_for(hs)[0]) <= input_limit,
                                       prior_refs=dialogue.evidence_refs if is_followup(question) else (),
                                       strict_scope=strict_scope, external=external)
 
@@ -198,7 +213,7 @@ class QAAgent:
 
         messages, excerpts, delivery, evidence_sections = messages_for(hits)
 
-        while sum(meter.estimate_message(m) for m in messages) + 8 > self.cfg.context.available_tokens:
+        while request_cost(messages) > input_limit:
             if len(hits) <= 1:
                 res.answer = '当前上下文预算不足以容纳问题与原文证据，请缩小范围或增加窗口预算。'
                 res.insufficient_evidence = True
@@ -209,7 +224,8 @@ class QAAgent:
                 return finish()
             hits.pop()
             messages, excerpts, delivery, evidence_sections = messages_for(hits)
-        remaining = max(0, self.cfg.context.available_tokens - sum(meter.estimate_message(m) for m in messages) - 8)
+        # The base and history are rounded separately, so allow for joining them.
+        remaining = max(0, input_limit - request_cost(messages) - 1)
         history, history_refs = dialogue.prompt(meter, remaining)
         if compact_history and remaining and len(history_refs) < len(dialogue.history):
             res.auto_compact = compact_history(dialogue, remaining)
