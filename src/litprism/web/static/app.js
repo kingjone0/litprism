@@ -588,7 +588,7 @@ async function loadSidebar({ moreConversations = false } = {}) {
     try {
       await api(`/api/conversations/${encodeURIComponent(cid)}`, { method: 'DELETE' });
       if (S.activeConv === cid) { S.activeConv = null; openView('library', {discardReview:true}); }
-      S.chatDrafts.delete(cid);
+      clearChatDraft(cid);
       S.chatRunViews.delete(cid);
       toast('已删除');
       loadSidebar();
@@ -1518,9 +1518,27 @@ function analysisSection(label, text) {
 /* ==========================================================================
    对话
    ========================================================================== */
+/* 草稿跨刷新：内存 Map 为主读写路径，localStorage 直写镜像（litprism-* 命名约定）。
+   存储不可用（隐私模式等）时静默降级为仅内存，不阻断界面。草稿只存客户端，不进事实/知识。 */
+const CHAT_DRAFT_PREFIX = 'litprism-chat-draft:';
+function setChatDraft(convId, text) {
+  S.chatDrafts.set(convId, text);
+  try { localStorage.setItem(CHAT_DRAFT_PREFIX + convId, text); } catch (_) {}
+}
+function clearChatDraft(convId) {
+  S.chatDrafts.delete(convId);
+  try { localStorage.removeItem(CHAT_DRAFT_PREFIX + convId); } catch (_) {}
+}
+function getChatDraft(convId) {
+  try {
+    const stored = localStorage.getItem(CHAT_DRAFT_PREFIX + convId);
+    if (stored != null) return stored;
+  } catch (_) {}
+  return S.chatDrafts.get(convId) || '';
+}
 function rememberChatDraft() {
   const input = $('#chatInput');
-  if (input?.dataset.convId) S.chatDrafts.set(input.dataset.convId, input.value);
+  if (input?.dataset.convId) setChatDraft(input.dataset.convId, input.value);
 }
 
 function renderChatContextInput(input) {
@@ -1640,13 +1658,13 @@ async function loadChat() {
         $('summary', event.currentTarget).focus();
       }
     });
-    input.value = S.chatDrafts.get(convId) || '';
-    input.oninput = () => S.chatDrafts.set(convId, input.value);
+    input.value = getChatDraft(convId);
+    input.oninput = () => setChatDraft(convId, input.value);
     LitUI.bind(box);
     await refreshChatRuns(convId);
     loadModels();
 
-    $$('.starter', box).forEach(b => b.onclick = () => { input.value = b.dataset.question; input.focus(); });
+    $$('.starter', box).forEach(b => b.onclick = () => { setChatDraft(convId, b.dataset.question); input.value = b.dataset.question; input.focus(); });
     const send = () => askQuestion();
     $('#btnSend').onclick = send;
     input.onkeydown = e => {
@@ -1684,7 +1702,7 @@ async function askQuestion() {
       </div>
     </div>`);
   input.value = '';
-  S.chatDrafts.delete(convId);
+  clearChatDraft(convId);
   $('#btnSend').disabled = true;
   stream.scrollIntoView({ block: 'end', behavior: 'smooth' });
 

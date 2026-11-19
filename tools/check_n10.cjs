@@ -1678,6 +1678,29 @@ const path = require('node:path');
         if(other)await call('/api/conversations/'+other,'DELETE');
       }
     });
+    await check('chat-draft-survives-refresh-and-clears-after-send', async () => {
+      // 草稿跨刷新（G05其余）：localStorage 镜像；发送后立即清除且刷新不复活
+      const seed = process.env.LITPRISM_ACCEPTANCE_SEED;
+      const conv = (await call('/api/conversations','POST',{title:'草稿跨刷新',scope:{paper_ids:[seed],mode:'strict'}})).id;
+      try {
+        await page.evaluate(()=>loadSidebar());
+        await page.locator(`[data-conv="${conv}"]`).click();
+        await expect(page.locator('#chatInput')).toBeVisible();
+        await page.locator('#chatInput').fill('刷新后应保留的草稿内容');
+        await page.reload();
+        await page.locator(`[data-conv="${conv}"]`).click();
+        await expect(page.locator('#chatInput')).toHaveValue('刷新后应保留的草稿内容');
+        await page.locator('#btnSend').click();
+        await expect.poll(async()=> (await call('/api/conversations/'+conv+'/chat-runs')).items[0]?.status).toBe('completed');
+        await expect(page.locator('#chatInput')).toHaveValue('');
+        await page.reload();
+        await page.locator(`[data-conv="${conv}"]`).click();
+        await expect(page.locator('#chatInput')).toHaveValue('');
+        assert.equal(await page.evaluate(cid=>localStorage.getItem('litprism-chat-draft:'+cid),conv),null);
+      } finally {
+        await call('/api/conversations/'+conv,'DELETE');
+      }
+    });
     results.push({ name: 'no-browser-errors-or-external-requests', passed: !errors.length && !external.length, errors, external });
     fs.writeFileSync(path.join(output, 'summary.json'), JSON.stringify({ results }, null, 2));
     for (const r of results) console.log(`${r.passed ? 'PASS' : 'FAIL'} ${r.name}${r.error ? ': ' + r.error : ''}`);
