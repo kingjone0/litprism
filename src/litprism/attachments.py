@@ -4,6 +4,8 @@
 attachments 表把「材料版本 ↔ 原件」关联起来，同一文件重复导入复用同一 blob。
 不回填历史材料：v17 之前导入的版本如实显示"无原件记录"。
 归档失败不应让导入本身失败：调用方捕获 AttachmentError 后显式回告用户。
+已知边界：blob 发布（tmp.replace）与 DB 登记两步非原子，登记失败会留下孤儿 blob
+（无任何行引用）；孤儿无害且在 no-GC 边界内，不做自动回收（回收与并发登记有竞态）。
 """
 from __future__ import annotations
 
@@ -49,7 +51,8 @@ def register(kb, cfg, paper_id: str, material_id: str, src_path, *,
     sha = _sha256_file(src)
     dest = blob_path(cfg, sha)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
+    existed_before = dest.exists()
+    if existed_before:
         if dest.stat().st_size != size:
             raise AttachmentError('附件库中同哈希文件大小不一致，疑为损坏，未归档；请检查 data/attachments。')
     else:
@@ -66,6 +69,8 @@ def register(kb, cfg, paper_id: str, material_id: str, src_path, *,
             tmp.unlink(missing_ok=True)
     row_id = 'att_' + hashlib.sha256(f'{paper_id}:{material_id}:{sha}'.encode('utf-8')).hexdigest()[:24]
     from .knowledge import now
+    # 失败不回收 blob：回收前的"无其他行引用同 sha"检查与并发登记存在 TOCTOU 竞态
+    # （可能删掉并发流程刚发布的 blob）；孤儿 blob 本就在 no-GC 边界内，代价可接受。
     with kb.tx() as con:
         if not con.execute('SELECT 1 FROM materials WHERE id=? AND paper_id=?',
                            (material_id, paper_id)).fetchone():
@@ -74,7 +79,14 @@ def register(kb, cfg, paper_id: str, material_id: str, src_path, *,
         con.execute('INSERT OR IGNORE INTO attachments VALUES (?,?,?,?,?,?,?,?,?)',
                     (row_id, paper_id, material_id, sha, size,
                      name, src.suffix.lower() or None, source, now()))
-    return {'id': row_id, 'sha256': sha, 'size': size, 'original_name': name, 'source': source}
+        # 返回库内实际行：OR IGNORE 命中已有行时（同内容不同文件名重注册），
+        # 库里的 original_name/ext 才是事实
+        row = con.execute('SELECT * FROM attachments WHERE id=?', (row_id,)).fetchone()
+    if row is None:
+        return {'id': row_id, 'sha256': sha, 'size': size,
+                'original_name': original_name or src.name, 'source': source}
+    return {'id': row['id'], 'sha256': row['sha256'], 'size': row['size'],
+            'original_name': row['original_name'], 'source': row['source']}
 
 
 def list_for_paper(kb, pid) -> list[dict]:

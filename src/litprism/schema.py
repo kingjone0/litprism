@@ -605,14 +605,6 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE chunks SET section_role=section WHERE section_role IS NULL")
 
 
-def _migrate_v13(conn: sqlite3.Connection) -> None:
-    """章节区分「原文标题」与「归类」：靠标题才能按真实结构分步解读。"""
-    if not _column_exists(conn, 'chunks', 'section_role'):
-        conn.execute("ALTER TABLE chunks ADD COLUMN section_role TEXT")
-    # 老数据只有规范名，role 就等于原 section
-    conn.execute("UPDATE chunks SET section_role=section WHERE section_role IS NULL")
-
-
 def _migrate_v14(conn: sqlite3.Connection) -> None:
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS chat_runs (

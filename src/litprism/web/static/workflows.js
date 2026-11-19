@@ -1476,7 +1476,7 @@ async function uploadForCandidate(input) {
   fd.append('files', file);
   try {
     toast('正在导入已下载文件…');
-    const resp = await fetch('/api/upload?analyze=false&verify=true', { method: 'POST', body: fd });
+    const resp = await fetch('/api/upload?analyze=false', { method: 'POST', body: fd });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.detail || `导入失败（HTTP ${resp.status}）`);
     const first = (data.results || [])[0] || {};

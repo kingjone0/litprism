@@ -14,6 +14,8 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 直传单文件上限；此前直传无上限且全量读内存
+
 from ..agents import CompareAgent, QAAgent, RecommendAgent, render_comparison, render_recommendation
 from ..config import Config, config_to_dict, load_config
 from ..db import KnowledgeBase
@@ -286,8 +288,10 @@ def create_app(cfg: Config) -> FastAPI:
 
     # ---------------------------------------------------------------- 导入
     @app.post("/api/upload")
-    async def upload(files: Annotated[list[UploadFile], File()], analyze: bool = True, verify: bool = True,
-                     material_policy: str = 'replace'):
+    def upload(files: Annotated[list[UploadFile], File()], analyze: bool = True,
+               material_policy: str = 'replace'):
+        # 同步路由：FastAPI 自动放入线程池——解析/联网核验/解读不再阻塞事件循环
+        # （此前 async def 内跑可达数分钟的 analyze，/api/ping 与任务轮询全部冻结）。
         if material_policy not in ('replace', 'keep_both'):
             raise HTTPException(400, '材料策略必须为 replace 或 keep_both。')
         results = []
@@ -298,10 +302,21 @@ def create_app(cfg: Config) -> FastAPI:
             if suffix not in SUPPORTED_EXT:
                 results.append({"file": f.filename, "ok": False, "error": f"不支持的格式 {suffix}"})
                 continue
-            with tempfile.NamedTemporaryFile(prefix='litprism_', suffix=suffix, delete=False) as upload_file:
-                upload_file.write(await f.read())
-                tmp = Path(upload_file.name)
+            tmp = None
             try:
+                # 流式落盘并限额；读取/写盘抛错时 tmp 已赋值，finally 必能清理
+                with tempfile.NamedTemporaryFile(prefix='litprism_', suffix=suffix, delete=False) as upload_file:
+                    tmp = Path(upload_file.name)
+                    received = 0
+                    while True:
+                        chunk = f.file.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if received > MAX_UPLOAD_BYTES:
+                            # 逐文件语义：记入 results 而非整体 413（前序文件已入库，结果不能丢）
+                            raise ValueError('单个文件超过 100 MB 上限，请分批导入。')
+                        upload_file.write(chunk)
                 doc = load_document(tmp)
                 try:
                     from ..enrich import enrich_document
@@ -334,11 +349,13 @@ def create_app(cfg: Config) -> FastAPI:
                         verify_confidence=v_conf, verify_evidence=v_ev,
                     )
                     chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
-                    mid = kb.add_chunks(pid, chunks, policy=material_policy, level='fulltext', source='local_pdf',
-                                        origin=f.filename, full_text=doc.full_text)
+                    snap = kb.add_material_snapshot(pid, chunks, policy=material_policy, level='fulltext',
+                                                    source='local_pdf', origin=f.filename, full_text=doc.full_text)
+                    mid = snap['material_id']
                 entry = {
                     "file": f.filename, "ok": True, "paper_id": pid,
-                    "title": doc.title, "pages": doc.page_count, "chunks": len(chunks),
+                    "title": doc.title, "pages": doc.page_count, "chunks": snap['chunk_count'],
+                    "material_deduped": snap['deduped'], "material_activated": snap['activated'],
                     "verify_level": v_level, "verify_confidence": v_conf,
                     "warnings": doc.warnings,
                 }
@@ -361,10 +378,11 @@ def create_app(cfg: Config) -> FastAPI:
             except Exception as e:  # noqa: BLE001
                 results.append({"file": f.filename, "ok": False, "error": str(e)})
             finally:
-                try:
-                    tmp.unlink()
-                except Exception:
-                    pass
+                if tmp is not None:
+                    try:
+                        tmp.unlink()
+                    except Exception:
+                        pass
         return {"results": results}
 
     # ---------------------------------------------------------------- 问答

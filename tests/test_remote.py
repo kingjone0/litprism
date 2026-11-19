@@ -49,7 +49,8 @@ def test_download_rejects_non_pdf_body(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='不是 PDF'):
         remote.download_pdf('https://arxiv.org/pdf/1607.01759', tmp_path / 'x.pdf')
     assert not (tmp_path / 'x.pdf').exists()
-    assert not (tmp_path / 'x.part').exists()
+    # 临时名带进程/uuid 后缀，用通配断言捕获任何泄漏
+    assert not list(tmp_path.glob('*.part'))
 
 
 def test_download_rejects_redirect_to_other_host(tmp_path, monkeypatch):

@@ -67,7 +67,7 @@ def test_local_upload_blocks_unverified_even_when_verify_flag_false(env, monkeyp
     _, kb, _, client = env
     monkeypatch.setattr(PaperVerifier, 'verify', lambda *a, **kw: VerificationResult(level=level))
     monkeypatch.setattr('litprism.enrich.enrich_document', lambda *a: None)
-    r = client.post('/api/upload?verify=false&analyze=false', files={'files': ('a.md', b'# Audit\n\n' + b'content '*90)})
+    r = client.post('/api/upload?analyze=false', files={'files': ('a.md', b'# Audit\n\n' + b'content '*90)})
     assert r.status_code == 200 and not r.json()['results'][0]['ok']
     assert not kb.list_papers() and kb.count_chunks() == 0
 

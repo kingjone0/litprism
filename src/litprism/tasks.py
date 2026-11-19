@@ -110,13 +110,14 @@ def register_tasks(app):
             if total > 100*1024*1024:
                 raise HTTPException(413, '本批文件超过 100 MB，请分批导入。')
             blobs.append((f.filename, data))
-        async def invoke():
+        def invoke():
+            # /api/upload 已改为同步路由（线程池执行），这里同步调用即可
             uploads = [UploadFile(filename=name, file=io.BytesIO(data)) for name, data in blobs]
             try:
-                return await endpoint('/api/upload')(uploads, analyze=False, verify=True)
+                return endpoint('/api/upload')(uploads, analyze=False)
             finally:
                 for upload in uploads:
-                    await upload.close()
+                    upload.file.close()
         return manager.submit(invoke)
 
     @app.get('/api/tasks/{tid}')

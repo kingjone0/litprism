@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
+import os
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -93,34 +97,36 @@ def download_pdf(url: str, dest: Path, *, timeout: int = 60, allow_public: bool 
     check = _check_public_url if allow_public else _check_arxiv_host
     check(url)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix('.part')
+    # 进程唯一临时名：两进程并发导入同一候选时不再共用 .part 互相踩踏
+    tmp = dest.with_suffix(f'.{os.getpid()}.{uuid.uuid4().hex[:8]}.part')
     try:
-        resp = requests.get(url, stream=True, timeout=timeout,
-                            headers=_DOWNLOAD_HEADERS)
-    except requests.RequestException as exc:
-        raise ValueError(f'下载失败：网络错误（{exc.__class__.__name__}）') from exc
-    with resp:
-        if resp.status_code >= 400:
-            raise ValueError(f'下载失败：HTTP {resp.status_code}')
-        final = getattr(resp, 'url', url) or url
-        check(final)  # 防重定向到别处
-        size = 0
-        with tmp.open('wb') as fh:
-            for chunk in resp.iter_content(64 * 1024):
-                if not chunk:
-                    continue
-                size += len(chunk)
-                if size > MAX_BYTES:
-                    fh.close()
-                    tmp.unlink(missing_ok=True)
-                    raise ValueError('文件超过 80 MB 上限，已中止。')
-                fh.write(chunk)
-    head = tmp.open('rb').read(5)
-    if not head.startswith(b'%PDF'):
+        try:
+            resp = requests.get(url, stream=True, timeout=timeout,
+                                headers=_DOWNLOAD_HEADERS)
+        except requests.RequestException as exc:
+            raise ValueError(f'下载失败：网络错误（{exc.__class__.__name__}）') from exc
+        with resp:
+            if resp.status_code >= 400:
+                raise ValueError(f'下载失败：HTTP {resp.status_code}')
+            final = getattr(resp, 'url', url) or url
+            check(final)  # 防重定向到别处
+            size = 0
+            with tmp.open('wb') as fh:
+                for chunk in resp.iter_content(64 * 1024):
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > MAX_BYTES:
+                        raise ValueError('文件超过 80 MB 上限，已中止。')
+                    fh.write(chunk)
+        head = tmp.open('rb').read(5)
+        if not head.startswith(b'%PDF'):
+            raise ValueError('下载内容不是 PDF（缺少 %PDF 头），已丢弃。')
+        tmp.replace(dest)
+        return dest
+    finally:
+        # 网络中途断开/校验失败等任何路径都清理临时文件；成功 replace 后此行幂等
         tmp.unlink(missing_ok=True)
-        raise ValueError('下载内容不是 PDF（缺少 %PDF 头），已丢弃。')
-    tmp.replace(dest)
-    return dest
 
 
 def _record_provenance(kb: KnowledgeBase, cid: str, *, provider: str, url: str,
@@ -153,6 +159,41 @@ def _target_name(candidate: dict, arxiv_id: str | None, doi: str | None) -> str:
     return 'title_' + hashlib.sha1(basis.encode('utf-8')).hexdigest()[:16] + '.pdf'
 
 
+def _reuse_downloaded(target: Path, url: str) -> bool:
+    """已下载文件只有在可信时才复用：%PDF 头 + 元数据来源一致。
+
+    此前 ``target.exists() and size>0`` 就跳过下载：arXiv 无版本号的候选重定向到
+    最新版，本地却可能是旧版字节；同名杂物文件也会被静默当全文入库。
+    """
+    try:
+        if not target.is_file() or target.stat().st_size == 0:
+            return False
+        with target.open('rb') as fh:
+            if fh.read(5)[:4] != b'%PDF':
+                return False
+        meta = json.loads(target.with_suffix('.meta.json').read_text(encoding='utf-8'))
+        return meta.get('url') == url
+    except Exception:
+        return False
+
+
+def _record_download_meta(target: Path, url: str) -> None:
+    """下载来源记录（缓存元数据）；写失败只影响下次是否复用，不阻断导入。"""
+    def _sha_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, 'rb') as fh:
+            for block in iter(lambda: fh.read(1024 * 1024), b''):
+                digest.update(block)
+        return digest.hexdigest()
+
+    try:
+        meta = {'url': url, 'sha256': _sha_file(target), 'size': target.stat().st_size,
+                'retrieved_at': datetime.now(timezone.utc).isoformat()}
+        target.with_suffix('.meta.json').write_text(json.dumps(meta, ensure_ascii=False), encoding='utf-8')
+    except Exception:
+        pass
+
+
 def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str, *, material_policy: str = 'replace') -> dict:
     """把一条候选取成可解读的论文：下载 → 解析 → 建论文/原文块 → 回链候选。
 
@@ -178,9 +219,10 @@ def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str, *, m
         license = lookup.copy.license
 
     target = Path(cfg.data_path) / 'papers' / _target_name(candidate, arxiv_id, doi)
-    reused = target.exists() and target.stat().st_size > 0
+    reused = _reuse_downloaded(target, url)
     if not reused:
         download_pdf(url, target, allow_public=not arxiv_id)
+        _record_download_meta(target, url)
 
     from .ingest import chunk_document, load_document
 
@@ -211,9 +253,10 @@ def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str, *, m
             verify_confidence=float(result.confidence), verify_evidence=result.to_dict(),
         )
         chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
-        mid = kb.add_chunks(pid, chunks, policy=material_policy, level='fulltext', source=provider,
-                            origin=url, full_text=doc.full_text)
-        added = len(kb.get_chunks(pid, material_id=mid))
+        snap = kb.add_material_snapshot(pid, chunks, policy=material_policy, level='fulltext', source=provider,
+                                        origin=url, full_text=doc.full_text)
+        mid = snap['material_id']
+        added = snap['chunk_count']
     set_candidate_status(kb, cid, 'imported', paper_id=pid)
     _record_provenance(kb, cid, provider=provider, url=url, license=license)
     # G07：下载的原件逐版本归档；失败不阻断导入，结果中显式报告
@@ -231,6 +274,7 @@ def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str, *, m
             'source_url': url, 'chunks': added, 'pages': len(doc.pages),
             'verify_level': result.level, 'material_level': material_label('fulltext'),
             'title': doc.title or candidate['title'], 'warnings': doc.warnings,
+            'material_deduped': snap['deduped'], 'material_activated': snap['activated'],
             'attachment_id': attachment_id, 'attachment_error': attachment_error}
 
 

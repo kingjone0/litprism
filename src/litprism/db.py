@@ -379,6 +379,21 @@ class KnowledgeBase:
         reading still uses exactly one material. Lower-level imports stay archived.
         Returns the material version id the chunks landed in (new or deduped).
         """
+        return self.add_material_snapshot(paper_id, chunks, policy=policy, source=source,
+                                          origin=origin, level=level,
+                                          full_text=full_text)['material_id']
+
+    def add_material_snapshot(self, paper_id: str, chunks: list[dict], *, policy: str = 'replace',
+                              source: str | None = None, origin: str | None = None,
+                              level: str | None = None, full_text: str | None = None) -> dict:
+        """add_chunks with dedupe/activation signals for import endpoints.
+
+        papers.material_level keeps the historical high-water mark of imported
+        levels: an identical re-import may dedupe onto an archived version and
+        raise its level without activating it, so the current material can stay
+        lower than material_level (see N12). Returns
+        {'material_id', 'deduped', 'activated', 'chunk_count'}.
+        """
         from .materials import content_hash
         if policy not in ('replace', 'keep_both'):
             raise ValueError('材料策略必须为 replace 或 keep_both。')
@@ -402,7 +417,9 @@ class KnowledgeBase:
                     con.execute('UPDATE materials SET level=? WHERE id=?', (level, existing['id']))
                 if material_rank(level) > material_rank(paper.get('material_level')):
                     con.execute('UPDATE papers SET material_level=? WHERE id=?', (level, paper_id))
-                return existing['id']
+                return {'material_id': existing['id'], 'deduped': True,
+                        'activated': existing['id'] == paper.get('current_material_id'),
+                        'chunk_count': len(self.get_chunks(paper_id, material_id=existing['id']))}
             mid = _new_id('mat_')
             activate = current is None or material_rank(level) >= material_rank(current['level'])
             con.execute('INSERT INTO materials VALUES (?,?,?,?,?,?,?,?)',
@@ -433,7 +450,7 @@ class KnowledgeBase:
                             (mid, full_text if full_text is not None else '\n\n'.join(c['text'] for c in clean), _now(), paper_id))
             if material_rank(level) > material_rank(paper.get('material_level')):
                 con.execute('UPDATE papers SET material_level=? WHERE id=?', (level, paper_id))
-        return mid
+        return {'material_id': mid, 'deduped': False, 'activated': activate, 'chunk_count': len(clean)}
 
     @_locked
     def list_materials(self, paper_id: str) -> list[dict]:

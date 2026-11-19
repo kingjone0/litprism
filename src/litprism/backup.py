@@ -125,6 +125,10 @@ def _database_content(path):
         if con.execute('''SELECT 1 FROM papers p LEFT JOIN materials m ON m.id=p.current_material_id
                           WHERE p.current_material_id IS NOT NULL AND (m.id IS NULL OR m.paper_id<>p.id) LIMIT 1''').fetchone():
             raise BackupError('当前材料归属无效。')
+        # attachments（v17）同样按「归属论文一致」校验：FK 只保证材料存在，不保证同属一篇
+        if con.execute('''SELECT 1 FROM attachments a LEFT JOIN materials m ON m.id=a.material_id
+                          WHERE m.id IS NULL OR m.paper_id<>a.paper_id LIMIT 1''').fetchone():
+            raise BackupError('附件材料归属无效。')
         return {'schema_version': version, 'schema_hash': hashlib.sha256(_json(objects)).hexdigest(), 'tables': stats}
     except sqlite3.DatabaseError as exc:
         raise BackupError('不是完整有效的 LitPrism 数据库。') from exc
@@ -180,6 +184,8 @@ def create_backup(kb, cfg: Config, output, *, include_originals=False):
     if cfg.data_path.resolve().is_relative_to(cfg.notes_path.resolve()):
         raise BackupError('笔记目录不能包含整个数据根，请先为笔记指定独立子目录。')
     output.parent.mkdir(parents=True, exist_ok=True)
+    # 排除的是"即将被拷贝的树"：zip 放进去会被递归卷入自身。数据根本身不在拷贝
+    # 范围（只拷子树），zip 落在数据根内不会递归，故不加入清单（B8 审计项评估后不采纳）。
     for root in (cfg.notes_path, cfg.data_path/'skills', cfg.data_path/'papers', cfg.data_path/'attachments'):
         if output.resolve().is_relative_to(root.resolve()):
             raise BackupError('备份文件不能放入即将备份的笔记、技能或原文目录。')
@@ -232,7 +238,9 @@ def _valid_name(info):
             any(p in ('', '.', '..') for p in name.split('/')) or info.is_dir() or
             stat.S_ISLNK(info.external_attr >> 16)):
         raise BackupError('备份含不安全的文件路径或链接。')
-    if name not in ('manifest.json', 'litprism.db', 'settings.json') and path.parts[0] not in ('notes', 'skills', 'papers', 'attachments'):
+    if name not in ('manifest.json', 'litprism.db', 'settings.json') and (
+            len(path.parts) < 2 or path.parts[0] not in ('notes', 'skills', 'papers', 'attachments')):
+        # 顶层同名"文件"（如名为 attachments 的文件而非目录内容）会让恢复目录无法 ensure_dirs
         raise BackupError('备份含不支持的文件。')
     if any(p in SECRET_NAMES for p in path.parts):
         raise BackupError('备份不得包含本机密钥文件。')
