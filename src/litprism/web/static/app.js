@@ -357,7 +357,7 @@ const VIEW_TITLES = {
   library: '知识库', paper: '论文', chat: '对话', compare: '对比',
   recommend: '发现文献', memories: '研究偏好', trash: '回收站',
   verify: '核验', deliverables: '交付物', skills: 'Skill', settings: '设置',
-  knowledge: '来源与知识',
+  knowledge: '来源与知识', annotations: '阅读标注',
 };
 
 function openView(view, opts = {}) {
@@ -403,7 +403,7 @@ function openView(view, opts = {}) {
     library: loadLibrary, paper: loadPaperDetail, chat: loadChat,
     deliverables: loadDeliverables, skills: loadSkills, verify: loadVerify,
     compare: loadComparison, memories: loadMemories, trash: loadTrash,
-    knowledge: loadKnowledge, recommend: loadCandidates,
+    knowledge: loadKnowledge, recommend: loadCandidates, annotations: loadAllAnnotations,
   }[view];
   if (loader) loader().catch(e => toast(e.message, true));
   refreshInspector();
@@ -795,6 +795,7 @@ async function loadPaperDetail(versionId = null) {
           <button class="active" data-ptab="analysis">解读</button>
           <button data-ptab="text">原文</button>
           <button data-ptab="concepts">术语 (${concepts.length})</button>
+          <button data-ptab="annotations">标注</button>
         </div>
         ${(d.analysis_history || []).length ? `<div class="material-controls"><label>分析记录<select class="select" id="analysisVersionSelect" aria-label="选择分析记录">
           <option value="">最新分析</option>
@@ -853,6 +854,11 @@ async function loadPaperDetail(versionId = null) {
       <div data-ppane="concepts" style="display:none">
         ${renderPaperConcepts(concepts, a, !!versionId)}
       </div>
+
+      <div data-ppane="annotations" style="display:none">
+        <div class="card"><div class="card-body" id="paperAnnotations">
+          <div class="skeleton" style="width:50%"></div></div></div>
+      </div>
     `;
 
     // ---- 标签切换 ----
@@ -860,8 +866,10 @@ async function loadPaperDetail(versionId = null) {
       $$('#paperTabs [data-ptab]').forEach(x => x.classList.toggle('active', x === b));
       $$('[data-ppane]').forEach(x => x.style.display = x.dataset.ppane === b.dataset.ptab ? '' : 'none');
       if (b.dataset.ptab === 'text') loadPaperText(S.activePaper, $('#paperMaterialSelect')?.value);
+      if (b.dataset.ptab === 'annotations') refreshAnnotations(S.activePaper);
     });
     $('#paperMaterialSelect').onchange = e => loadPaperText(p.id, e.target.value);
+    refreshAnnotations(p.id);
     const versionSelect = $('#analysisVersionSelect');
     if (versionSelect) versionSelect.onchange = e => loadPaperDetail(e.target.value || null);
 
@@ -961,14 +969,205 @@ async function loadPaperText(pid, materialId) {
           ${pg.page === null ? '无页码' : `第 ${pg.page} 页`}
         </div>
         ${pg.chunks.map(c => `
-          <div style="margin-bottom:10px">
+          <div style="margin-bottom:10px" data-chunk="${esc(c.chunk_id || '')}" data-page="${pg.page ?? ''}">
             ${c.section ? `<div style="font-size:11.5px;color:var(--accent);font-weight:550;margin-bottom:3px">${esc(c.section)}</div>` : ''}
             <div style="font-size:13px;line-height:1.8;white-space:pre-wrap">${esc(c.text)}</div>
           </div>`).join('')}
       </div>`).join('');
+    bindAnnotationSelection(body, pid);
   } catch (e) {
     if (request !== paperTextRequest || body !== $('#paperTextBody')) return;
     body.innerHTML = `<div class="empty"><div class="desc">${esc(e.message)}</div></div>`;
+  }
+}
+
+function bindAnnotationSelection(body, pid) {
+  let fab = document.getElementById('annotationFab');
+  const hide = () => { if (fab) fab.style.display = 'none'; };
+  const show = (x, y, chunkId, page) => {
+    if (!fab) {
+      fab = document.createElement('button');
+      fab.id = 'annotationFab';
+      fab.className = 'btn sm primary';
+      fab.textContent = '标注这段';
+      fab.style.position = 'fixed';
+      fab.style.zIndex = '80';
+      fab.style.boxShadow = '0 6px 18px rgba(0,0,0,.18)';
+      document.body.appendChild(fab);
+    }
+    fab.style.left = Math.max(8, Math.min(x, window.innerWidth - 130)) + 'px';
+    fab.style.top = Math.max(8, y - 46) + 'px';
+    fab.style.display = '';
+    fab.onmousedown = ev => ev.preventDefault();
+    fab.onclick = async () => {
+      const sel = window.getSelection();
+      const quote = (sel ? sel.toString() : '').trim();
+      hide();
+      if (!quote) return;
+      const note = prompt('为这段原文写批注（可留空）', '');
+      if (note === null) return;
+      const payload = { quote, note, chunk_id: chunkId || null,
+                        page: page === '' ? null : Number(page) };
+      try {
+        await api(`/api/paper/${encodeURIComponent(pid)}/annotations`, { method: 'POST', body: payload });
+        if (sel) sel.removeAllRanges();
+        toast('已添加标注');
+        refreshAnnotations(pid);
+      } catch (e) { toast(e.message, true); }
+    };
+  };
+  body.onmouseup = () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) { hide(); return; }
+    if (!(sel.toString() || '').trim()) { hide(); return; }
+    const range = sel.getRangeAt(0);
+    const node = range.startContainer.nodeType === 1
+      ? range.startContainer : range.startContainer.parentElement;
+    if (!node || !body.contains(node)) { hide(); return; }
+    const holder = node.closest('[data-chunk]');
+    if (!holder) { hide(); return; }
+    const rect = range.getBoundingClientRect();
+    show(rect.left + rect.width / 2 - 48, rect.top, holder.dataset.chunk, holder.dataset.page);
+  };
+}
+
+async function loadAllAnnotations() {
+  const box = $('#annotationsList');
+  if (!box) return;
+  box.innerHTML = '<div class="skeleton" style="width:50%"></div>';
+  try {
+    const d = await api('/api/annotations?limit=200');
+    const items = d.items || [];
+    if (!items.length) {
+      box.innerHTML = `<div class="empty"><div class="title">还没有任何标注</div>
+        <div class="desc">打开一篇论文，在「原文」里选中一段话，点「标注这段」即可。</div>
+        <div class="empty-actions"><button class="btn primary" data-goto-library>去知识库</button></div></div>`;
+      $('[data-goto-library]', box).onclick = () => openView('library');
+      return;
+    }
+    box.innerHTML = `<p class="muted" style="margin-bottom:10px">共 ${items.length} 条标注</p>` + items.map(a => {
+      const title = a.paper_display_title || a.paper_title || a.paper_id;
+      return `<div class="card" style="margin-bottom:10px"><div class="card-body" style="padding:14px 16px">
+        <div class="row" style="gap:10px;align-items:baseline;margin-bottom:8px">
+          <a href="#" data-ann-open="${esc(a.paper_id)}" style="font-weight:600">${esc(title)}</a>
+          <span class="muted" style="font-size:12px">${a.page ? '第 ' + a.page + ' 页' : '无页码'} · ${esc((a.created_at || '').slice(0, 10))}</span>
+        </div>
+        <blockquote style="margin:0 0 8px;padding-left:10px;border-left:3px solid var(--accent);
+          font-size:13px;line-height:1.7;color:var(--muted);white-space:pre-wrap">${esc(a.quote)}</blockquote>
+        ${a.note ? `<p style="margin:6px 0 8px;font-size:13.5px;line-height:1.7">${esc(a.note)}</p>` : ''}
+        <div class="row" style="justify-content:flex-end">
+          <button class="btn sm" data-ann-jump="${esc(a.chunk_id || '')}" data-ann-paper="${esc(a.paper_id)}"
+            ${a.chunk_id ? '' : 'disabled'}>回到原文</button>
+        </div>
+      </div></div>`;
+    }).join('');
+    $$('[data-ann-open]', box).forEach(el => el.onclick = ev => {
+      ev.preventDefault();
+      openView('paper', { paperId: el.dataset.annOpen });
+    });
+    $$('[data-ann-jump]', box).forEach(b => b.onclick = () => {
+      gotoAnnotation(b.dataset.annPaper, b.dataset.annJump);
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="empty"><div class="desc">${esc(e.message)}</div></div>`;
+  }
+}
+
+function gotoAnnotation(pid, chunkId) {
+  if (!openView('paper', { paperId: pid })) return;
+  setTimeout(() => {
+    const tab = $('#paperTabs [data-ptab="text"]');
+    if (tab) tab.click();
+    setTimeout(() => {
+      const el = document.querySelector(`[data-chunk="${CSS.escape(chunkId)}"]`);
+      if (!el) return;
+      el.scrollIntoView({ block: 'center' });
+      el.style.background = 'var(--accent-soft)';
+      setTimeout(() => { el.style.background = ''; }, 2000);
+    }, 500);
+  }, 700);
+}
+
+async function downloadFile(url, filename) {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`导出失败（HTTP ${resp.status}）`);
+    const blob = await resp.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function refreshAnnotations(pid) {
+  const box = $('#paperAnnotations');
+  if (!box) return;
+  const tab = $('#paperTabs [data-ptab="annotations"]');
+  try {
+    const d = await api(`/api/paper/${encodeURIComponent(pid)}/annotations`);
+    const items = d.items || [];
+    if (tab) tab.textContent = `标注 (${items.length})`;
+    if (!items.length) {
+      box.innerHTML = `<div class="empty"><div class="title">还没有标注</div>
+        <div class="desc">切到「原文」选中一段话，点「标注这段」记下你的理解；之后会在这里汇总。</div></div>`;
+      return;
+    }
+    box.innerHTML = `<div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:4px">
+        <button class="btn sm" data-ann-export="md">导出 Markdown</button>
+        <button class="btn sm" data-ann-export="csv">导出 CSV</button>
+      </div>` + items.map(a => `
+      <div style="padding:12px 0;border-bottom:1px solid var(--line)">
+        <blockquote style="margin:0 0 6px;padding-left:10px;border-left:3px solid var(--accent);
+          font-size:13px;line-height:1.7;color:var(--muted);white-space:pre-wrap">${esc(a.quote)}</blockquote>
+        ${a.note ? `<p style="margin:6px 0;font-size:13.5px;line-height:1.7">${esc(a.note)}</p>` : ''}
+        <div class="row" style="gap:8px;align-items:center">
+          <span class="muted" style="font-size:12px">${a.page ? '第 ' + a.page + ' 页' : '无页码'}</span>
+          <span style="flex:1"></span>
+          ${a.chunk_id ? `<button class="btn sm" data-ann-goto="${esc(a.chunk_id)}">回到原文</button>` : ''}
+          <button class="btn sm" data-ann-edit="${esc(a.id)}">编辑</button>
+          <button class="btn sm danger" data-ann-del="${esc(a.id)}">删除</button>
+        </div>
+      </div>`).join('');
+    $$('[data-ann-goto]', box).forEach(b => b.onclick = () => {
+      const textTab = $('#paperTabs [data-ptab="text"]');
+      if (textTab) textTab.click();
+      setTimeout(() => {
+        const cid = b.dataset.annGoto;
+        const el = document.querySelector(`[data-chunk="${CSS.escape(cid)}"]`);
+        if (!el) return;
+        el.scrollIntoView({ block: 'center' });
+        el.style.background = 'var(--accent-soft)';
+        setTimeout(() => { el.style.background = ''; }, 2000);
+      }, 450);
+    });
+    $$('[data-ann-edit]', box).forEach(b => b.onclick = async () => {
+      const current = (items.find(x => x.id === b.dataset.annEdit) || {}).note || '';
+      const next = prompt('修改批注（可留空）', current);
+      if (next === null) return;
+      try {
+        await api(`/api/annotations/${encodeURIComponent(b.dataset.annEdit)}`, { method: 'PATCH', body: { note: next } });
+        toast('批注已更新');
+        refreshAnnotations(pid);
+      } catch (e) { toast(e.message, true); }
+    });
+    $$('[data-ann-export]', box).forEach(b => b.onclick = () => {
+      const fmt = b.dataset.annExport;
+      downloadFile(`/api/paper/${encodeURIComponent(pid)}/annotations/export?format=${fmt}`,
+                   `annotations.${fmt}`);
+    });
+    $$('[data-ann-del]', box).forEach(b => b.onclick = async () => {
+      if (!confirm('删除这条标注？')) return;
+      try {
+        await api(`/api/annotations/${encodeURIComponent(b.dataset.annDel)}`, { method: 'DELETE' });
+        toast('已删除标注');
+        refreshAnnotations(pid);
+      } catch (e) { toast(e.message, true); }
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="empty"><div class="desc">${esc(e.message)}</div></div>`;
   }
 }
 

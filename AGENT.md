@@ -80,6 +80,17 @@ Remove-Item Env:LITPRISM_HOME -ErrorAction SilentlyContinue
 | `tools/check_workbench.cjs` | 无窗口的前端交互验收（与 `check_workflows` 覆盖面不同，需要 playwright） |
 | `tools/_empty_state_check.cjs`、`tools/_theme_check.cjs` | 空态按钮点击、四套主题明暗与分层校验（需运行中的实例与 `BASE_URL`） |
 
+## 阅读标注
+
+表 `annotations`（schema v16）存用户自己选的原文片段与批注：`paper_id / material_id / chunk_id / page / quote / note`，
+软删除（`deleted_at`）默认不返回。接口在 `web/annotation_routes.py`：
+`GET|POST /api/paper/{pid}/annotations`、`PATCH|DELETE /api/annotations/{aid}`。
+
+- 只存用户选中/输入的文本，**不生成、不改写原文**
+- 摘录与批注都有长度上限（4000 / 8000），超出截断而非报错
+- 前端：阅读页选中文字 → 浮出「标注这段」；「标注」标签页汇总，可回跳原文或删除
+- 导出（Markdown/CSV）尚未做，属 v2
+
 ## 取全文
 
 arXiv 走官方直链；其余文献按顺序查**合法开放副本**：

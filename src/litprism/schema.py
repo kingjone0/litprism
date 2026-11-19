@@ -648,6 +648,25 @@ def _migrate_v15(conn):
     ''')
 
 
+def _migrate_v16(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS annotations (
+          id TEXT PRIMARY KEY,
+          paper_id TEXT NOT NULL,
+          material_id TEXT,
+          chunk_id TEXT,
+          page INTEGER,
+          quote TEXT NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          deleted_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_annotations_paper
+          ON annotations(paper_id, deleted_at);
+    """)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
@@ -664,6 +683,7 @@ MIGRATIONS: list[Migration] = [
     Migration(13, '章节保留原文标题 + 归类 section_role', _migrate_v13),
     Migration(14, '对话请求、逐次响应与显式续验', _migrate_v14),
     Migration(15, '知识来源依赖与本轮外部证据授权', _migrate_v15),
+    Migration(16, '阅读标注：原文摘录与批注', _migrate_v16),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

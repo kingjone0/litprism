@@ -312,7 +312,8 @@ def test_backup_roundtrip_preserves_web_grants_and_transitive_dependencies(env,m
     try:
         monkeypatch.setattr(server,'KnowledgeBase',lambda _:other)
         restored_client=TestClient(server.create_app(other.cfg))
-        assert other._con.execute('PRAGMA user_version').fetchone()[0]==15
+        from litprism.schema import SCHEMA_VERSION
+        assert other._con.execute('PRAGMA user_version').fetchone()[0]==SCHEMA_VERSION
         assert other._con.execute('SELECT count(*) FROM chat_evidence_grants').fetchone()[0]==1
         assert get_source(other,sid)['dependency_status']['refs'][0]['accepted_pending']
         assert restored_client.get('/api/chat-reviews/'+rid).json()['sources'][0]['citable']

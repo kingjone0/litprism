@@ -1178,6 +1178,8 @@ def create_app(cfg: Config) -> FastAPI:
     register_workflows(app, kb, cfg, task_llm, verifier)
     from .evidence_routes import register_evidence
     register_evidence(app, kb, cfg, verifier)
+    from .annotation_routes import register_annotations
+    register_annotations(app, kb)
     from .semantic_routes import register_semantics
     register_semantics(app, kb)
     from ..qa_reviews import register_qa_reviews
