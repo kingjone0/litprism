@@ -149,5 +149,5 @@ arXiv 走官方直链；其余文献按顺序查**合法开放副本**：
 ## 专项验证与历史
 
 - `npm run test:desktop`：31项Node窗口几何/文件/事件模拟，无需运行Electron。
-- `tools/check_workflows.py --suite n10`：当前55组无窗口界面专项；指定隔离`LITPRISM_HOME`及本地`LITPRISM_UI_OUTPUT`。完整研究流程仍用默认suite；既往72页面组合另计，不与55组相加冒算测试项数。
+- `tools/check_workflows.py --suite n10`：当前56组无窗口界面专项；指定隔离`LITPRISM_HOME`及本地`LITPRISM_UI_OUTPUT`。完整研究流程仍用默认suite；既往72页面组合另计，不与56组相加冒算测试项数。
 - N10实机/安装边界见[专项报告](docs/N10体验与管理验收-2026-10-25.md)，N09集成边界见[专项报告](docs/N09配置与集成验收-2026-10-24.md)。旧推进记录见[归档](docs/history/N04与N10阶段推进记录-2026-10-25.md)；其中旧“下一步”不覆盖当前主计划。

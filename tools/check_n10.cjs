@@ -1701,6 +1701,24 @@ const path = require('node:path');
         await call('/api/conversations/'+conv,'DELETE');
       }
     });
+    await check('composer-input-grows-with-content-and-caps', async () => {
+      // field-sizing:content 渐进增强：多行内容增高输入框，max-height 180px 封顶
+      const seed = process.env.LITPRISM_ACCEPTANCE_SEED;
+      const conv = (await call('/api/conversations','POST',{title:'输入框增高',scope:{paper_ids:[seed],mode:'strict'}})).id;
+      try {
+        await page.evaluate(()=>loadSidebar());
+        await page.locator(`[data-conv="${conv}"]`).click();
+        await expect(page.locator('#chatInput')).toBeVisible();
+        const before = await page.locator('#chatInput').evaluate(el => el.clientHeight);
+        await page.locator('#chatInput').fill('多行内容压测\n'.repeat(30));
+        const after = await page.locator('#chatInput').evaluate(el => el.clientHeight);
+        assert(after > before, `输入多行后输入框未增高：${before} -> ${after}`);
+        assert(after <= 181, `输入框超出上限：${after}`);
+      } finally {
+        await call('/api/conversations/'+conv,'DELETE');
+        await page.evaluate(cid=>localStorage.removeItem('litprism-chat-draft:'+cid),conv);
+      }
+    });
     results.push({ name: 'no-browser-errors-or-external-requests', passed: !errors.length && !external.length, errors, external });
     fs.writeFileSync(path.join(output, 'summary.json'), JSON.stringify({ results }, null, 2));
     for (const r of results) console.log(`${r.passed ? 'PASS' : 'FAIL'} ${r.name}${r.error ? ': ' + r.error : ''}`);

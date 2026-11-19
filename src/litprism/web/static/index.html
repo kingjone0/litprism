@@ -1,9 +1,19 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="paper">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
 <title>文献棱镜 LitPrism</title>
+<script>
+/* 首帧防闪烁：样式表生效前按存储主题设置属性；仅此用途，主题切换逻辑仍在 app.js */
+try {
+  var storedTheme = localStorage.getItem('litprism-theme');
+  if (['paper', 'paper-dark', 'minimal', 'glass'].indexOf(storedTheme) >= 0) {
+    document.documentElement.setAttribute('data-theme', storedTheme);
+  }
+} catch (_) {}
+</script>
 <link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/lit-ui.css">
 </head>
@@ -283,7 +293,7 @@
   </div>
 </div>
 
-<div class="toast-wrap" id="toasts"></div>
+<div class="toast-wrap" id="toasts" role="region" aria-label="通知" aria-live="polite"></div>
 
 <!-- ==================== 设置弹窗 ==================== -->
 <dialog class="modal-backdrop" id="settingsModal" aria-labelledby="settingsTitle">

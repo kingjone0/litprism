@@ -163,8 +163,7 @@ function short(s, n = 60) {
 
 /* Electron 加载后台同源页面，token 来自 URL fragment。
    保留显式预置环境的兼容入口，在解析完成后再发请求。 */
-let resolveEnv;
-const ENV_READY = new Promise(res => { resolveEnv = res; });
+const { promise: ENV_READY, resolve: resolveEnv } = Promise.withResolvers();
 
 window.__setLitPrismEnv = function (cfg) {
   window.__LITPRISM__ = cfg || {};
@@ -209,6 +208,7 @@ function toast(msg, isErr = false) {
   const wrap = $('#toasts');
   const node = document.createElement('div');
   node.className = 'toast' + (isErr ? ' err' : '');
+  if (isErr) node.setAttribute('role', 'alert');
   node.textContent = msg;
   wrap.appendChild(node);
   setTimeout(() => node.remove(), 3200);
@@ -1427,7 +1427,7 @@ async function openClaimForm(pid) {
     if (!picked) { toast('请先在原文里选中一句话', true); return; }
     $('#claimQuote').value = picked;
   };
-  $('#btnCancelClaim').onclick = () => { wrap.innerHTML = ''; };
+  $('#btnCancelClaim').onclick = () => { wrap.replaceChildren(); };
   $('#btnSaveClaim').onclick = async () => {
     const body = {
       field: $('#claimField').value,
@@ -1439,7 +1439,7 @@ async function openClaimForm(pid) {
     try {
       await api(`/api/paper/${encodeURIComponent(pid)}/semantic/claims`, {method: 'POST', body});
       toast('已补录');
-      wrap.innerHTML = '';
+      wrap.replaceChildren();
       await loadManualClaims(pid);
       loadQuality(pid);            // 补录数量变了，质量面板必须跟着更新
     } catch (e) { toast(e.message, true); }
@@ -3267,7 +3267,12 @@ function bindGlobal() {
 
   // 核验
   $('#btnVerify').onclick = doVerify;
-  $('#verifyInput').onkeydown = e => { if (e.key === 'Enter') doVerify(); };
+  $('#verifyInput').onkeydown = e => {
+    if (e.key !== 'Enter') return;
+    // IME 组词中的 Enter 用于确认候选词，不能触发提交；keyCode 229 兜底组词期乱序事件
+    if (e.isComposing || e.keyCode === 229) return;
+    doVerify();
+  };
   $('#verifyInput').oninput = () => {
     invalidateVerification();
     $('#verifyInput').removeAttribute('aria-invalid');

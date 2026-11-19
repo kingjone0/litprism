@@ -162,11 +162,14 @@ function workflowDialog(title, body, submit, action = '确定') {
   dialog.id = 'researchTask';
   dialog.className = 'task-dialog';
   dialog.setAttribute('aria-labelledby', 'researchTaskTitle');
-  dialog.innerHTML = `<form><header><h2 id="researchTaskTitle">${esc(title)}</h2><button type="button" data-cancel aria-label="关闭">${icon('close')}</button></header>
+  dialog.innerHTML = `<form><header><h2 id="researchTaskTitle">${esc(title)}</h2><button type="button" data-cancel command="close" commandfor="researchTask" aria-label="关闭">${icon('close')}</button></header>
     <div class="task-body">${body}</div><p class="task-error" role="alert" tabindex="-1"></p>
-    <footer><button type="button" class="btn" data-cancel>取消</button>${submit ? `<button class="btn primary" type="submit">${esc(action)}</button>` : ''}</footer></form>`;
+    <footer><button type="button" class="btn" data-cancel command="close" commandfor="researchTask">取消</button>${submit ? `<button class="btn primary" type="submit">${esc(action)}</button>` : ''}</footer></form>`;
   document.body.appendChild(dialog);
-  $$('[data-cancel]', dialog).forEach(b => b.onclick = () => dialog.close());
+  // 旧内核无 Invoker Commands 时退回 JS 绑定；支持的浏览器由 commandfor 声明式关闭
+  if (!('commandForElement' in HTMLButtonElement.prototype)) {
+    $$('[data-cancel]', dialog).forEach(b => b.onclick = () => dialog.close());
+  }
   dialog.addEventListener('close', () => {
     dialog.remove();
     applyOverlayFocus();
@@ -289,7 +292,7 @@ async function analysisRunDialog(pid, run = null) {
         const inspect = document.createElement('button'); inspect.type='button'; inspect.className='btn'; inspect.textContent='查看运行记录';
         inspect.onclick=()=>{dialog.close();if(current())loadPaperDetail();};
         $('.task-body',dialog).append(inspect);
-        throw new Error(error.message+' 请先查看运行记录，再决定恢复或新建。');
+        throw new Error(error.message+' 请先查看运行记录，再决定恢复或新建。', { cause: error });
       }
       try {
         if (current()) await loadAnalysisRuns(pid);
@@ -469,7 +472,7 @@ async function loadComparison() {
     return;
   }
   box.innerHTML = '<div class="insp-note">正在读取原文并对比，完成后检查引用…</div>';
-  const key = [...ids].sort().join(',');
+  const key = ids.toSorted().join(',');
   if (S.compareKey !== key) {
     const revision = S.libraryRevision || 0;
     try {
@@ -899,7 +902,7 @@ async function loadChatReview(ref, openUnitId = null) {
     if (S.semanticRef !== ref || seq !== S.evidenceLoadSeq) return;
     const last = d.reviews.at(-1);
     const confirmed = last?.action === 'confirm';
-    const sources = [...d.sources].sort((a,b) => Number(b.cited)-Number(a.cited));
+    const sources = d.sources.toSorted((a,b) => Number(b.cited)-Number(a.cited));
     const unitList = d.units?.length ? `<section class="qa-unit-list" aria-label="逐条核对与入库"><h4>逐条整理（${d.units.length} 条）</h4>
       <p class="source-intro">展开条目核对证据，按需保存为可信知识。</p>
       <p class="source-intro qa-review-progress" role="status" data-review-summary-state="${esc(d.review_summary.state)}">${esc(d.review_summary.label || `尚未整理 · ${d.units.length} 条可选入库`)}</p>
@@ -1037,7 +1040,7 @@ async function loadChatUnitReview(ref, uid, target = null) {
     const actionName = {confirm:'确认入库',revise:'修订入库',reject:'拒绝',revoke:'撤销'};
     const preferredTags = [...new Set([...d.suggested_evidence.map(q => q.source), ...d.original_evidence.map(q => q.source), ...d.sources])];
     const priority = s => preferredTags.includes(s.tag) ? preferredTags.indexOf(s.tag) : preferredTags.length;
-    const available = [...d.sources_available].sort((a,b) => priority(a)-priority(b));
+    const available = d.sources_available.toSorted((a,b) => priority(a)-priority(b));
     box.innerHTML = `<button class="btn sm" id="btnUnitReviewBack">${target ? '收起此条' : '返回回复审核'}</button>
       ${target ? '' : `<h3>单元人工核对</h3><h4>原回答</h4><blockquote class="reading-text qa-unit-original">${esc(d.text)}</blockquote>`}
       <p class="source-intro">状态：${esc(actionName[d.decision] || '未审核')}${d.knowledge_status ? ' · '+esc(trustLabel(d.knowledge_status)) : ''}</p>
