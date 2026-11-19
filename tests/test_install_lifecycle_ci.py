@@ -29,3 +29,11 @@ def test_desktop_app_supports_quit_flag():
     block = block[:block.index('});')]
     assert "'--quit'" in block, '主进程没有处理 --quit'
     assert 'app.quit()' in block, '--quit 没有走正常退出路径'
+
+
+def test_cross_version_upgrade_step_exists():
+    text = WORKFLOW.read_text(encoding='utf-8')
+    assert '跨版本升级（v0.1.0 → 当前 tag）' in text, '缺少跨版本升级步骤'
+    assert 'gh release download v0.1.0' in text, '没有下载旧版作为对照'
+    assert 'ci-upgrade.marker' in text, '没有断言升级后数据保留'
+    assert "inputs.release_tag != 'v0.1.0'" in text, '用旧 tag 触发时不应跑升级对照'
