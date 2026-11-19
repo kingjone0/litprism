@@ -186,6 +186,19 @@ def sync_library(kb: KnowledgeBase) -> dict:
     return {'checked': len(rows), 'linked': linked}
 
 
+def attach_paper(kb: KnowledgeBase, cid: str, paper_id: str) -> dict:
+    """把候选与"用户自己下载后导入"的论文关联起来，标成已入库。
+
+    只接受真实存在的论文 ID：否则候选会显示已入库但没有对应内容。
+    """
+    row = kb._con.execute('SELECT * FROM source_candidates WHERE id=?', (cid,)).fetchone()
+    if row is None:
+        raise ValueError('候选不存在。')
+    if not kb.get_paper(paper_id):
+        raise ValueError('论文不存在，未关联。')
+    return set_candidate_status(kb, cid, 'imported', paper_id=paper_id)
+
+
 def set_candidate_status(kb: KnowledgeBase, cid: str, status: str, *, paper_id: str | None = None) -> dict:
     if status not in STATUSES:
         raise ValueError(f'未知候选状态：{status}')

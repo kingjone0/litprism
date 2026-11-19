@@ -1,5 +1,6 @@
 """候选池：去重、留档、状态流转。"""
 from litprism.candidates import (
+    attach_paper,
     candidate_fingerprint,
     list_candidates,
     normalize_url,
@@ -159,5 +160,59 @@ def test_sync_library_backfills_candidates_added_before_paper(tmp_path):
         assert result['linked'] == 1
         row = list_candidates(kb)[0]
         assert row['status'] == 'imported' and row['paper_id'] == pid
+    finally:
+        kb.close()
+
+
+def test_attach_links_existing_paper(tmp_path):
+    cfg, kb = kb_of(tmp_path)
+    try:
+        cid = save_candidates(kb, [{'title': 'Attach me', 'doi': '10.1234/att'}], kind='paper')['added'][0]
+        pid = kb.add_paper(title='Attach me', doi='10.1234/att')
+        attach_paper(kb, cid, pid)
+        row = kb._con.execute('SELECT status, paper_id FROM source_candidates WHERE id=?', (cid,)).fetchone()
+        assert row['status'] == 'imported'
+        assert row['paper_id'] == pid
+    finally:
+        kb.close()
+
+
+def test_attach_rejects_missing_paper(tmp_path):
+    import pytest
+
+    cfg, kb = kb_of(tmp_path)
+    try:
+        cid = save_candidates(kb, [{'title': 'No paper', 'doi': '10.1234/none'}], kind='paper')['added'][0]
+        with pytest.raises(ValueError, match='论文不存在'):
+            attach_paper(kb, cid, 'p_missing')
+        row = kb._con.execute('SELECT status FROM source_candidates WHERE id=?', (cid,)).fetchone()
+        assert row['status'] != 'imported'
+    finally:
+        kb.close()
+
+
+def test_attach_links_existing_paper(tmp_path):
+    cfg, kb = kb_of(tmp_path)
+    try:
+        cid = save_candidates(kb, [{'title': 'Attach me', 'doi': '10.1234/att'}], kind='paper')['added'][0]
+        pid = kb.add_paper(title='Attach me', doi='10.1234/att')
+        attach_paper(kb, cid, pid)
+        row = kb._con.execute('SELECT status, paper_id FROM source_candidates WHERE id=?', (cid,)).fetchone()
+        assert row['status'] == 'imported'
+        assert row['paper_id'] == pid
+    finally:
+        kb.close()
+
+
+def test_attach_rejects_missing_paper(tmp_path):
+    import pytest
+
+    cfg, kb = kb_of(tmp_path)
+    try:
+        cid = save_candidates(kb, [{'title': 'No paper', 'doi': '10.1234/none'}], kind='paper')['added'][0]
+        with pytest.raises(ValueError, match='论文不存在'):
+            attach_paper(kb, cid, 'p_missing')
+        row = kb._con.execute('SELECT status FROM source_candidates WHERE id=?', (cid,)).fetchone()
+        assert row['status'] != 'imported'
     finally:
         kb.close()

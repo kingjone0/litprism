@@ -238,3 +238,19 @@ def test_provenance_is_recorded_on_candidate(tmp_path):
         assert data['retrieved_at']
     finally:
         kb.close()
+
+
+def test_candidate_pool_offers_manual_upload():
+    js = (ROOT / 'src' / 'litprism' / 'web' / 'static' / 'workflows.js').read_text(encoding='utf-8')
+    assert '导入已下载' in js, '候选池缺少手工导入入口'
+    assert 'data-pool-upload' in js and '/attach' in js, '上传后没有把候选与论文关联'
+    routes = (ROOT / 'src' / 'litprism' / 'web' / 'evidence_routes.py').read_text(encoding='utf-8')
+    assert "/api/candidates/{cid}/attach" in routes
+
+
+def test_candidate_pool_offers_manual_upload():
+    js = (ROOT / 'src' / 'litprism' / 'web' / 'static' / 'workflows.js').read_text(encoding='utf-8')
+    assert '导入已下载' in js, '候选池缺少手工导入入口'
+    assert 'data-pool-upload' in js and '/attach' in js, '上传后没有把候选与论文关联'
+    routes = (ROOT / 'src' / 'litprism' / 'web' / 'evidence_routes.py').read_text(encoding='utf-8')
+    assert "/api/candidates/{cid}/attach" in routes

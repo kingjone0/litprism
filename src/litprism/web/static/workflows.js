@@ -1470,6 +1470,7 @@ function poolRow(item) {
   // arXiv 或带 DOI 的候选都可以尝试取全文：后者查开放副本，查不到会明确报错
   if (!item.in_library && (arxiv || doi)) acts.push(`<button class="btn sm primary" data-pool-fetch="${esc(item.id)}">取全文</button>`);
   if (!item.in_library && land) acts.push(`<a class="btn sm" href="${esc(land)}" target="_blank" rel="noreferrer">打开原文</a>`);
+  if (!item.in_library && item.kind === 'paper') acts.push(`<button class="btn sm" data-pool-upload="${esc(item.id)}">导入已下载</button>`);
   // 没有 DOI 的论文只能导题录；网页候选不冒充论文，保持忽略/拒绝
   if (!item.in_library && !arxiv && !doi && item.kind === 'paper') acts.push(`<button class="btn sm" data-pool-import="${esc(item.id)}">导入题录</button>`);
   if (item.in_library && item.library_paper_id) acts.push(`<button class="btn sm" data-pool-open="${esc(item.library_paper_id)}">打开论文</button>`);
@@ -1488,6 +1489,35 @@ function poolRow(item) {
 }
 
 let candidateRequest = 0;
+async function uploadForCandidate(input) {
+  const file = input.files && input.files[0];
+  const cid = S.poolUploadCid;
+  input.value = '';
+  if (!file || !cid) return;
+  const fd = new FormData();
+  fd.append('files', file);
+  try {
+    toast('正在导入已下载文件…');
+    const resp = await fetch('/api/upload?analyze=false&verify=true', { method: 'POST', body: fd });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `导入失败（HTTP ${resp.status}）`);
+    const first = (data.results || [])[0] || {};
+    if (!first.ok) throw new Error(first.error || '导入失败');
+    const link = await fetch(`/api/candidates/${encodeURIComponent(cid)}/attach`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paper_id: first.paper_id }),
+    });
+    if (!link.ok) {
+      const err = await link.json().catch(() => ({}));
+      throw new Error(err.detail || '已导入，但关联候选失败');
+    }
+    toast('已导入并关联到候选');
+    loadCandidates();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
 async function loadCandidates() {
   const request = ++candidateRequest;
   const box = $('#candidatePool');
@@ -1542,6 +1572,7 @@ async function loadCandidates() {
       <label>arXiv ID<input class="input" name="arxiv_id" placeholder="1607.01759，可留空"></label>
       <label>链接<input class="input" name="url" placeholder="https://…"></label>
       <div class="row"><button class="btn primary sm">加入候选</button><button class="btn sm" type="button" data-pool-cancel>取消</button></div>
+      <input type="file" id="poolFile" hidden accept=".pdf,.docx,.html,.htm,.md,.tex,.txt">
       <p class="pool-hint">arXiv 与开放获取文献能自动取全文；订阅文献请用「打开原文」下载后在知识库导入。</p>
       <p class="task-error" role="alert"></p>
     </form>
@@ -1557,6 +1588,11 @@ async function loadCandidates() {
   $$('[data-pool-reject]', box).forEach(b => b.onclick = () => poolAct(b, `/api/candidates/${encodeURIComponent(b.dataset.poolReject)}/status`, { status: 'rejected' }));
   $$('[data-pool-fetch]', box).forEach(b => b.onclick = () => poolAct(b, `/api/candidates/${encodeURIComponent(b.dataset.poolFetch)}/fetch`, {}, '正在下载并解析…'));
   $$('[data-pool-import]', box).forEach(b => b.onclick = () => poolAct(b, `/api/candidates/${encodeURIComponent(b.dataset.poolImport)}/import`, {}, '正在核验并导入…'));
+  $$('[data-pool-upload]', box).forEach(b => b.onclick = () => {
+    S.poolUploadCid = b.dataset.poolUpload;
+    $('#poolFile', box).click();
+  });
+  $('#poolFile', box).onchange = ev => uploadForCandidate(ev.target);
   $('[data-pool-sync]', box).onclick = async ev => {
     const btn = ev.currentTarget; btn.disabled = true;
     try {

@@ -105,6 +105,15 @@ def register_evidence(app, kb, cfg, verifier):
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f'导入失败：{type(exc).__name__}') from exc
 
+    @app.post('/api/candidates/{cid}/attach')
+    def candidates_attach(cid: str, body: dict):
+        from ..candidates import attach_paper
+        paper_id = (body or {}).get('paper_id') or ''
+        try:
+            return attach_paper(kb, cid, paper_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     @app.post('/api/candidates/{cid}/fetch')
     def candidates_fetch(cid: str, material_policy: str = 'replace'):
         from ..remote import fetch_candidate_pdf
