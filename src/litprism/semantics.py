@@ -24,10 +24,18 @@ Some sources are listed in a claim's adjacent_sources: they are the neighbouring
 fragment whose text was cut at a paragraph or table boundary. Use them to read the rest of a sentence,
 table row or list. An incomplete cited fragment is NOT evidence of contradiction: if the claim could be
 settled by the adjacent text, judge with it; only report contradicted when the text states something
-incompatible.
-Return only JSON: {"reviews":[{"id":"exact claim ID","verdict":"supported|contradicted|needs_review",
-"reason":"brief explanation","evidence":["existing source tag, e.g. P1"]}]}.
-Select source tags; do not reproduce quotations, rewrite the claim, or extract numeric facts.'''
+incompatible.'''
+
+REVIEW_RESPONSE = '''Return only JSON: {"reviews":[{"id":"exact claim ID","verdict":"supported|contradicted|needs_review",
+"reason":"brief explanation","evidence":["existing source tag, e.g. P1"]}]}.'''
+
+READING_COUNTEREVIDENCE = '''Use only candidate_sources for each claim. For contradicted, add
+"counterevidence":{"tag":"P1","quote":"short verbatim excerpt"} to that review. The quote must
+be one contiguous span in that tag and explicitly state a conflicting value, negation or assertion
+under the same subject, metric and conditions as the claim. An omitted detail, an incomplete table
+or a passage describing another condition is insufficient. If you cannot quote explicit conflicting
+text from candidate_sources, use needs_review. For other verdicts return evidence tags only.
+Do not rewrite the claim or extract numeric facts.'''
 
 MAX_CROSS_FAILURES = 3
 
@@ -82,7 +90,7 @@ def make_units(fields, excerpts, batch, *, comparison=False):
     """Server assigns IDs and source candidates; model cannot substitute text."""
     merged = merge_fragments(excerpts)
     by_tag = {e['tag']: e for e in merged}
-    successors = _successors_by_paper(merged)
+    successors = _successors_by_material(merged)
     units = []
     for field, text, refs in fields:
         if not isinstance(text, str) or not text.strip():
@@ -99,7 +107,7 @@ def make_units(fields, excerpts, batch, *, comparison=False):
             tags = sorted((own or fallback) & by_tag.keys())
             if document:
                 tags = [tag for tag in tags if by_tag[tag].get('document_tag') == document]
-            adjacent = _adjacent_for(tags, by_tag, successors, limit=None if comparison else 3)
+            adjacent = _adjacent_for(tags, by_tag, successors, part, limit=None if comparison else 3)
             identity = json.dumps([batch, field, len(units), part], ensure_ascii=False)
             units.append({'id': 'cl_'+hashlib.sha256(identity.encode()).hexdigest()[:16],
                           'field': field, 'text': part.strip(), 'batch': batch,
@@ -108,17 +116,65 @@ def make_units(fields, excerpts, batch, *, comparison=False):
                           'quotes': [], 'facts': []})
             if document:
                 units[-1]['document_scope'] = document
+            elif not comparison:
+                warning = _performance_scope_warning(part, by_tag)
+                if warning:
+                    units[-1].update(performance_scope_warning=warning, reason=warning)
     return units
 
 
+_SPEEDUP_VALUE = r'(?<![\d.,])(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:×|x\b|倍)'
+_HIGH_END_SPEEDUP = re.compile(r'\bup to (?:at least )?(?:an? )?' + _SPEEDUP_VALUE + r'\s+speed[- ]?up\b', re.I)
+_WORST_CASE = re.compile(r'最[坏差](?:情况|情形)(?:下)?|\bworst[- ]case\b', re.I)
+_LOWER_BOUND = re.compile(r'至少|最低|不低于|下限|\b(?:at least|minimum|lower bound)\b', re.I)
+_SPEEDUP_METRIC = re.compile(r'加速|提速|\bspeed[- ]?up\b|\bfaster\b', re.I)
+_NON_ASSERTION = re.compile(r'不能|不应|不可|并非|不代表|不表示|\b(?:not|cannot|no)\b', re.I)
+_PERFORMANCE_CLAUSE = re.compile(r'[。！？；;]+|(?<=[.!?])\s+(?=[A-Z])')
+
+
+def _worst_case_speedups(text):
+    values = set()
+    for clause in _PERFORMANCE_CLAUSE.split(text):
+        if (not _WORST_CASE.search(clause) or not _LOWER_BOUND.search(clause)
+                or not _SPEEDUP_METRIC.search(clause) or _NON_ASSERTION.search(clause)):
+            continue
+        values_in_clause = re.findall(_SPEEDUP_VALUE, clause, re.I)
+        if len(values_in_clause) == 1:
+            values.add(_value(values_in_clause[0]))
+    return values
+
+
+def _performance_scope_warning(claim, by_tag):
+    """Recognize an explicit worst-case lower bound backed only by a cited high-end value."""
+    if not _WORST_CASE.search(claim):
+        return ''
+    claimed = _worst_case_speedups(norm(claim))
+    if not claimed:
+        return ''
+    sources = [norm(by_tag[tag]['text']) for tag, page in parse_citations(claim)
+               if tag in by_tag and (page is None or page == str(by_tag[tag].get('page')))]
+    high_end = {_value(value) for text in sources for value in _HIGH_END_SPEEDUP.findall(text)}
+    explicitly_bounded = {value for text in sources for value in _worst_case_speedups(text)}
+    if claimed & (high_end - explicitly_bounded):
+        return '本地检查发现，引用中的加速倍数写在高端观测描述中。请核对原文的数据规模和比较对象，再判断能否写成最坏情况下界。'
+    return ''
+
+
 _TERMINAL = re.compile(r'[。．.!?！？:：;；”"’)\]\}】]$')
+_FOOTNOTE = re.compile(r'^\d{1,2}(?=[A-Z][a-z])')
+_TABLE_CAPTION = re.compile(r'^(?:Table\s+|表\s*)\d+(?:\.\d+)*\s*[:：.]', re.I)
+_TABLE_CELL = re.compile(r'^(?:[+−-]?\d+(?:[.,]\d+)*(?:[a-zA-Z%]+\d*)*|[-–—])$')
+_LATIN_WORD = re.compile(r'[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*')
+_CONTINUED_PROSE = re.compile(r'^[a-z]+[\s.,;:!?-]')
+_CONTINUATION_BLOCKS = 4  # A repeated page tail, intervening tables and the first prose block.
+_CONTINUATION_LEAD = 240  # Ground the claim in the start of the resumed prose.
 
 
-def _successors_by_paper(merged):
-    """同论文内按阅读顺序取「下一个片段」。跨论文绝不互相补足。"""
+def _successors_by_material(merged):
+    """同论文、同材料版本内按阅读顺序取下一个片段。"""
     order = {}
     for e in merged:
-        order.setdefault(e.get('paper_id'), []).append(e['tag'])
+        order.setdefault((e.get('paper_id'), e.get('material_id')), []).append(e['tag'])
     nxt = {}
     for tags in order.values():
         for i, tag in enumerate(tags[:-1]):
@@ -126,24 +182,104 @@ def _successors_by_paper(merged):
     return nxt
 
 
-def _adjacent_for(tags, by_tag, successors, limit=3):
-    """为「在边界处被截断」的引用片段补上紧邻的下一段。
-
-    `reading_batches` 按 chunk 切分，表格行、跨页段落会在 chunk 边界被切断：
-    只给被引片段，模型看到的是半句话或半张表，于是把「证据不完整」判成
-    「与原文不符」（真实短论文验收里已出现）。这里只补**同论文的下一段**，
-    兼容入口按来源数限制，独立对比按实际消息窗口限制；补足项记在 `adjacent_tags`。
-    """
+def _adjacent_for(tags, by_tag, successors, claim, limit=3):
+    """补足截断的引文，记录物理来源而不合成引句。"""
     extra = []
     for tag in tags:
         if limit is not None and len(tags) + len(extra) >= limit:
             break
         nxt = successors.get(tag)
-        if not nxt or nxt in tags or nxt in extra:
+        if not nxt or not _needs_next(by_tag[tag]['text']):
             continue
-        if _needs_next(by_tag[tag].get('text') or ''):
-            extra.append(nxt)
+        continuation = None
+        if limit is not None:
+            continuation = _after_cross_page_tables(tag, by_tag, successors, claim)
+        for candidate in [nxt] if continuation is None else continuation:
+            if candidate not in tags and candidate not in extra:
+                extra.append(candidate)
+                if limit is not None and len(tags) + len(extra) >= limit:
+                    break
     return extra
+
+
+def _without_trailing_footnote(text):
+    head, _, last = text.strip().rpartition('\n')
+    return head.rstrip() if head and _FOOTNOTE.match(last.strip()) else text.strip()
+
+
+def _table_remainder(text):
+    """Return text after a detected table, or None for a prose block."""
+    cells = 0
+    lines = [line.strip() for line in text.splitlines()]
+    end = None
+    for i, line in enumerate(lines):
+        if line.startswith(('【表格行】', '【表格待核对】')):
+            end = i + 1
+        elif _TABLE_CAPTION.match(line) and cells >= 4:
+            # Wrapped captions can carry names themselves; don't use their tail as prose.
+            end = len(lines) if _needs_next(line) else i + 1
+            cells = 0
+        elif _TABLE_CELL.fullmatch(line):
+            cells += 1
+    return None if end is None else '\n'.join(lines[end:]).strip()
+
+
+def _claim_anchors(text):
+    return {word for word in _LATIN_WORD.findall(text)
+            if len(word) >= 4 and (word[0].isupper() or any(c.isupper() for c in word[1:]))}
+
+
+def _after_cross_page_tables(tag, by_tag, successors, claim):
+    """Find anchored prose after a table on the next physical page.
+
+    None keeps ordinary adjacency. An empty list records a table boundary where
+    no safe continuation was located. Each result is an original source tag.
+    """
+    left = by_tag[tag]
+    page = left.get('page')
+    if not (left.get('paper_id') and left.get('material_id') and isinstance(page, int)):
+        return None
+    left_text = _without_trailing_footnote(left['text'])
+    if not _needs_next(left_text):
+        return None
+    anchors = _claim_anchors(re.sub(r'\[P\d+[^\]]*\]', '', claim, flags=re.I)) - _claim_anchors(left_text)
+    passed_table = False
+    found = []
+    for _ in range(_CONTINUATION_BLOCKS):
+        nxt = successors.get(tag)
+        if not nxt:
+            break
+        if int(nxt[1:]) != int(tag[1:]) + 1:
+            return found
+        tag = nxt
+        source = by_tag[tag]
+        text = source['text'].strip()
+        if source.get('page') == page:
+            without_note = _without_trailing_footnote(text)
+            if without_note != text and len(without_note) >= 25 and left_text.endswith(without_note):
+                continue
+            return None
+        if source.get('page') != page + 1:
+            # Known pages must be contiguous to qualify as neighbouring evidence.
+            return found
+        after_table = _table_remainder(text)
+        if after_table is not None:
+            if found:
+                break
+            passed_table = True
+            text = after_table
+            if not text:
+                continue
+        if not passed_table:
+            return None
+        matches = anchors & _claim_anchors(text[:_CONTINUATION_LEAD])
+        if not _CONTINUED_PROSE.match(text) or not matches:
+            break
+        found.append(tag)
+        anchors -= matches
+        if not anchors or not _needs_next(text):
+            break
+    return found if passed_table else None
 
 
 def _needs_next(text):
@@ -192,18 +328,16 @@ def _facts(raw, unit, by_tag):
 def _claims_payload(units, *, comparison=False):
     claims = []
     for u in units:
-        claim = {'id': u['id'], 'text': u['text']}
-        if comparison:
-            claim['candidate_sources'] = list(u['candidate_tags'])
-            if u.get('document_scope'):
-                claim['document_scope'] = u['document_scope']
+        claim = {'id': u['id'], 'text': u['text'], 'candidate_sources': list(u['candidate_tags'])}
+        if comparison and u.get('document_scope'):
+            claim['document_scope'] = u['document_scope']
         if u.get('adjacent_tags'):
             claim['adjacent_sources'] = list(u['adjacent_tags'])
         claims.append(claim)
     return claims
 
 
-def _messages(units, by_tag, system=REVIEW_SYSTEM, prefix='', *, comparison=False):
+def _messages(units, by_tag, prefix='', *, comparison=False):
     """构造复核消息。
 
     ``prefix`` 是提取阶段同一份全文序列化（``reading.excerpt_text``）。带上它有两个作用：
@@ -211,8 +345,12 @@ def _messages(units, by_tag, system=REVIEW_SYSTEM, prefix='', *, comparison=Fals
     （是否命中由服务端上报，这里不假定）。
     """
     claims = _claims_payload(units, comparison=comparison)
+    system = REVIEW_SYSTEM + '\n' + REVIEW_RESPONSE
     if comparison:
+        system += '\nSelect source tags; do not reproduce quotations, rewrite the claim, or extract numeric facts.'
         system += '\n\n' + COMPARE_REVIEW_SCOPE
+    else:
+        system += '\n' + READING_COUNTEREVIDENCE
     if prefix:
         tail = '\n\n【待核对陈述】只依据上文原文核对下列陈述，逐条返回 JSON：\n' + json.dumps(
             {'claims': claims}, ensure_ascii=False)
@@ -272,6 +410,8 @@ def review_units(units, excerpts, cfg, llm, *, tracker=None, comparison=False):
     groups, current = [], []
     current_prefix = prefix
     for unit in units:
+        if unit.get('performance_scope_warning'):
+            continue
         if not unit['candidate_tags']:
             unit['reason'] = '没有可核对的来源。'
             continue
@@ -330,6 +470,19 @@ def review_units(units, excerpts, cfg, llm, *, tracker=None, comparison=False):
                 unit['reason'] = '核查结果遗漏或重复此项，未放行。'
                 continue
             review = matches[0]
+            verdict = review.get('verdict')
+            reason = review.get('reason')
+            if verdict not in ('supported', 'contradicted', 'needs_review') or not isinstance(reason, str) or not reason.strip():
+                unit['reason'] = '复核判定或说明格式不完整，未放行。'
+                continue
+            unit['reason'] = reason[:1200]
+            if verdict == 'contradicted' and not comparison:
+                counterevidence = _quotes([review.get('counterevidence')], unit, by_tag)
+                unit.update(status='contradicted' if counterevidence else 'needs_review',
+                            quotes=counterevidence, facts=[])
+                if not counterevidence:
+                    unit['reason'] = '机器提出不符，但没有可定位的明确反证，待人工核对。'
+                continue
             quotes = _quotes(review.get('quotes'), unit, by_tag)
             if 'evidence' in review:
                 selected = review['evidence']
@@ -338,12 +491,6 @@ def review_units(units, excerpts, cfg, llm, *, tracker=None, comparison=False):
                 else:
                     # Exact stored text is filled by the server, never generated.
                     quotes = [_source(by_tag[t], by_tag[t]['text']) for t in dict.fromkeys(selected)]
-            verdict = review.get('verdict')
-            reason = review.get('reason')
-            if verdict not in ('supported', 'contradicted', 'needs_review') or not isinstance(reason, str) or not reason.strip():
-                unit['reason'] = '复核判定或说明格式不完整，未放行。'
-                continue
-            unit['reason'] = reason[:1200] if isinstance(reason, str) else '核查结果不完整。'
             unit['quotes'] = quotes
             if verdict == 'supported' and quotes:
                 unit['status'] = 'machine_supported'
@@ -351,7 +498,7 @@ def review_units(units, excerpts, cfg, llm, *, tracker=None, comparison=False):
                 if re.search(r'困惑度|perplexity', unit['text'], re.I) and re.search(r'百分点|percent(?:age)?\s*points?', unit['text'], re.I):
                     unit['status'] = 'needs_review'
                     unit['reason'] = '陈述同时使用困惑度与百分比点单位，需核对指标及单位，未自动放行。'
-            elif verdict == 'contradicted' and (not comparison or quotes):
+            elif verdict == 'contradicted' and quotes:
                 unit['status'] = 'contradicted'
             else:
                 unit['status'] = 'needs_review'
@@ -545,6 +692,8 @@ def _run_review(fields_by_batch, excerpts, cfg, llm, tracker, *, comparison=Fals
         items = make_units(fields, sources, batch, comparison=comparison)
         if limited:
             for item in items:
+                if item.get('performance_scope_warning'):
+                    continue
                 item.update(review_error='output_limit', reason='前批复核耗尽预算，后续复核已停止；待人工核对。')
         else:
             review_units(items, sources, cfg, llm, tracker=tracker, comparison=comparison)
@@ -558,7 +707,11 @@ def _run_review(fields_by_batch, excerpts, cfg, llm, tracker, *, comparison=Fals
         coverage = {'complete': False, 'skipped_claim_ids': [u['id'] for u in units],
                     'method': 'not_run_due_review_output_limit', 'calls': 0, 'max_calls': None, 'tiles':0}
     else:
-        differences, coverage = reconcile(units, cfg, llm, tracker=tracker)
+        differences, coverage = reconcile([u for u in units if not u.get('performance_scope_warning')],
+                                          cfg, llm, tracker=tracker)
+    scope_claims = [u['id'] for u in units if u.get('performance_scope_warning')]
+    if scope_claims:
+        coverage['scope_warning_claim_ids'] = scope_claims
     pending = sum(u['status'] != 'machine_supported' for u in units)
     return {'version': 2, 'protocol': 'source_selection', 'status': ('needs_review' if pending else 'machine_supported') if units else 'no_claims',
             'passed': bool(units) and not pending and coverage['complete'], 'items': units, 'differences': differences,

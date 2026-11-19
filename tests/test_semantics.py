@@ -140,6 +140,39 @@ def test_evidence_selection_uses_stored_text_and_rejects_unknown_ids(selected):
         assert item['quotes'][0]['quote']==SOURCE and item['quotes'][0]['chunk_id']=='chunk1'
 
 
+@pytest.mark.parametrize('counterevidence,expected', [
+    (None, 'needs_review'),
+    ({'tag': 'P1', 'quote': 'SuperGLUE Average is 80.0'}, 'needs_review'),
+    ({'tag': 'P2', 'quote': 'SuperGLUE Average is 71.8'}, 'needs_review'),
+    ({'tag': [], 'quote': 'SuperGLUE Average is 71.8'}, 'needs_review'),
+    ({'tag': 'P1', 'quote': 'SuperGLUE Average is 71.8'}, 'contradicted'),
+])
+def test_reading_contradiction_requires_its_own_localized_counterevidence(counterevidence, expected):
+    other = {**EXCERPT, 'tag': 'P2', 'id': 'chunk2', 'page': 20}
+    text = 'SuperGLUE Average is 69.0 [P1]。'
+
+    class Selector:
+        def chat_json(self, messages, *, task):
+            assert task == 'semantic_review'
+            claim, = review_payload(messages)['claims']
+            assert claim['candidate_sources'] == ['P1']
+            assert 'counterevidence' in messages[0]['content']
+            return {'reviews': [{'id': claim['id'], 'verdict': 'contradicted',
+                                 'reason': 'The excerpt gives a different value.',
+                                 'evidence': ['P1'], 'quotes': [{'tag': 'P1', 'quote': SOURCE}],
+                                 'counterevidence': counterevidence}]}
+
+    item, = review_units(units(text), [EXCERPT, other], capacity_cfg(), Selector())
+    assert item['status'] == expected and item['text'] == text
+    if expected == 'contradicted':
+        quote, = item['quotes']
+        assert quote['quote'] == counterevidence['quote']
+        assert quote['chunk_id'] == 'chunk1' and quote['page'] == 19
+    else:
+        assert not item['quotes'] and '明确反证' in item['reason']
+    assert not supported_fields({'items': [item]})
+
+
 def test_client_remaining_calls_keeps_unreviewed_claims_pending():
     """内置调用上限已取消，只保留客户端给的剩余调用数。"""
     class NoBudget(Reviewer):
@@ -392,6 +425,122 @@ def test_complete_citation_is_not_expanded():
     excerpts = _chain(['Hidden size 256 is used.', 'Other content.'])
     built = make_units([('key_conclusions', 'Hidden size 256 is used [P1 p.4]。', ['P1 p.4'])], excerpts, 1)
     assert built[0]['adjacent_tags'] == []
+
+
+@pytest.mark.parametrize('text,extra_source,flagged', [
+    ('加速在最坏情况下至少达到15,000倍 [P1]。', '', True),
+    ('The speed-up is at least 15000.0x in the worst case [P1]。', '', True),
+    ('加速随数据集规模增加，在较大规模下可达到至少15,000倍 [P1]。', '', False),
+    ('YFCC100M 标签预测测试加速约600倍 [P2]。', '', False),
+    ('YFCC100M 测试最坏情况下至少加速600倍 [P2]。', '', False),
+    ('不能认定在最坏情况下至少有15,000倍的加速 [P1]。', '', False),
+    ('加速在最坏情况下至少达到15,000倍 [P2]。', '', False),
+    ('加速在最坏情况下至少达到15,000倍 [P1 p.5]。', '', False),
+    ('加速在最坏情况下至少达到15,000倍 [P1][P3]。',
+     'The fast classifier shows a worst-case speedup of at least 15,000×.', False),
+])
+def test_performance_scope_warning_requires_cited_matching_high_end_value(text, extra_source, flagged):
+    excerpts = _chain([
+        'The speed-up compared to neural network methods increases with dataset size, going up to at least a 15,000× speed-up.',
+        'YFCC100M tag prediction: the speedup of the test phase was 600×.',
+        extra_source,
+    ])
+    item, = make_units([('key_conclusions', text, [])], excerpts, 1)
+    assert bool(item.get('performance_scope_warning')) == flagged
+
+
+@pytest.mark.parametrize('machine_review', [False, True])
+def test_performance_scope_warning_reaches_reading_review_without_blocking_other_results(env, machine_review):
+    cfg, kb, _, api = env
+    pid = kb.add_paper(title='Two task conditions', verify_level='verified')
+    kb.add_chunks(pid, [
+        {'page': 3, 'section': '结果', 'text': 'We evaluate classifier speed under changing dataset size. '
+         'Our speed-up compared to neural network methods increases with size, going up to at least a 15,000× speed-up.'},
+        {'page': 4, 'section': '结果', 'text': 'Tag prediction on YFCC100M uses one test thread. '
+         'The speedup of the test phase was 600×.'},
+    ])
+    changed = '相对神经网络方法，加速随数据集规模增长，在最坏情况下至少达到15,000倍 [P1 p.3]。'
+    observed = '相对神经网络方法，加速在较大数据规模可达到至少15,000倍 [P1 p.3]。'
+    tag_prediction = 'YFCC100M 标签预测单线程测试加速600倍 [P2 p.4]。'
+
+    class OfflineReading:
+        name = 'offline-performance-scope'
+        supports_semantic_review = True
+        reviewed = []
+
+        def chat_json(self, messages, *, task=None):
+            if task == 'extract':
+                return {'key_conclusions': changed + observed + tag_prediction,
+                        'field_evidence': {'key_conclusions': ['P1 p.3', 'P2 p.4']}}
+            claims = review_payload(messages)['claims']
+            assert all('最坏' not in claim['text'] for claim in claims)
+            self.reviewed.extend(claim['text'] for claim in claims)
+            if task == 'semantic_cross_review':
+                return {'differences': []}
+            assert task == 'semantic_review'
+            return {'reviews': [{'id': c['id'], 'verdict': 'supported', 'reason': 'Study fixture.',
+                                 'evidence': c['candidate_sources']} for c in claims]}
+
+    model = OfflineReading()
+    payload = analyze_paper(kb, cfg, model, pid, force=True, with_concepts=False, semantic_review=machine_review)
+    report = api.get(f'/api/paper/{pid}/semantic').json()['report']
+    pending = next(row for row in report['items'] if row['text'] == changed)
+    assert pending['status'] == 'needs_review' and '数据规模和比较对象' in pending['reason']
+    assert pending['candidate_tags'] == ['P1']
+    if machine_review:
+        assert changed not in payload['key_conclusions']
+        assert observed in payload['key_conclusions'] and tag_prediction in payload['key_conclusions']
+        assert {observed, tag_prediction} == set(model.reviewed)
+        assert report['coverage']['scope_warning_claim_ids'] == [pending['id']]
+    else:
+        from litprism.extract import format_analysis
+        assert changed not in format_analysis(kb.get_paper(pid), payload)
+        assert not model.reviewed and report['status'] == 'skipped_by_user'
+
+
+@pytest.mark.parametrize('boundary', [None, 'later_page', 'another_material', 'another_paper', 'missing_block',
+                                     'table_mentions_claim', 'unrelated_prose'])
+def test_reading_continuation_after_intervening_table(boundary):
+    texts = [
+        'The authors compare the baselines.\nThey also compare\n2Using the following options',
+        'AG\nSogou\n88.8\n92.9\n94.5\n92.7\nTable 1: Test accuracy. The models have\n10 hidden units.',
+        '1h\n5h\n42s\n1h33\nTable 2: Running time for a single epoch.\nto Tang et al. (2015) following their',
+        'protocol.\nWe report two recurrent networks (Conv-GRNN and LSTM-GRNN).',
+    ]
+    sources = [dict(src, page=2 if i == 0 else 3, material_id='edition1')
+               for i, src in enumerate(_chain(texts))]
+    if boundary in {'later_page', 'another_material', 'another_paper'}:
+        key, value = {'later_page': ('page', 4), 'another_material': ('material_id', 'edition2'),
+                      'another_paper': ('paper_id', 'other')}[boundary]
+        for src in sources[2:]:
+            src[key] = value
+    elif boundary == 'missing_block':
+        del sources[2]
+    elif boundary == 'table_mentions_claim':
+        sources[2]['text'] = '1h\n5h\n42s\n1h33\nTable 2: Results for Tang et al. and Conv-GRNN.'
+        sources[3]['text'] = 'Results. This section covers a different task.'
+    elif boundary == 'unrelated_prose':
+        sources[2]['text'] = 'Another experiment. We compare to Tang et al. (2015) in a different setting.'
+    fields = [('experiment_design', '论文依据 Tang 协议比较 Conv-GRNN 与 LSTM-GRNN [P1]。', [])]
+    unit, = make_units(fields, sources, 1)
+    expected = ['P3', 'P4'] if boundary is None else []
+    assert unit['candidate_tags'] == ['P1', *expected] and unit['adjacent_tags'] == expected
+
+    class SelectContinuation:
+        def chat_json(self, messages, *, task):
+            assert task == 'semantic_review'
+            claim, = review_payload(messages)['claims']
+            assert claim['candidate_sources'] == ['P1', *expected]
+            return {'reviews': [{'id': claim['id'], 'verdict': 'supported',
+                                 'reason': 'Controlled continuation selection.', 'evidence': ['P1', 'P3', 'P4']}]}
+
+    item, = review_units([unit], sources, Config(), SelectContinuation())
+    if boundary is None:
+        assert item['status'] == 'machine_supported'
+        assert [(q['chunk_id'], q['page'], q['quote']) for q in item['quotes']] == [
+            (sources[i]['id'], sources[i]['page'], texts[i]) for i in (0, 2, 3)]
+    else:
+        assert item['status'] == 'needs_review' and not item['quotes']
 
 
 def test_split_fragments_do_not_produce_duplicate_citation_tags():

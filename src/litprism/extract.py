@@ -266,8 +266,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     candidates = []
     for batch, (fields, sources) in enumerate(semantic_inputs, 1):
         candidates.extend(make_units(fields, sources, batch))
-    merged['_candidates'] = [{k: u[k] for k in ('id', 'field', 'text', 'batch', 'candidate_tags', 'adjacent_tags')}
-                             for u in candidates]
+    candidate_keys = ('id', 'field', 'text', 'batch', 'candidate_tags', 'adjacent_tags', 'performance_scope_warning')
+    merged['_candidates'] = [{k: u[k] for k in candidate_keys if k in u} for u in candidates]
     from .candidate_snapshots import save as save_candidates
     candidate_id = save_candidates(kb, paper_id, material_id, merged['_candidates'], all_excerpts,
                                   model=getattr(llm, 'name', 'unknown'), run_id=getattr(llm, 'rid', None),

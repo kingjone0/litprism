@@ -17,7 +17,9 @@ def review_report(payload):
     report = dict(payload.get('_semantic_review') or {})
     items = {i['id']: i for i in report.get('items') or []}
     for c in payload.get('_candidates') or []:
-        items.setdefault(c['id'], {**c, 'status': 'candidate', 'reason': '未经机器核查，可直接核对原文并人工审核。',
+        warning = c.get('performance_scope_warning')
+        items.setdefault(c['id'], {**c, 'status': 'needs_review' if warning else 'candidate',
+                                   'reason': warning or '未经机器核查，可直接核对原文并人工审核。',
                                    'quotes': [], 'facts': []})
     report['items'] = list(items.values())
     report['pending'] = sum(i.get('status') != 'machine_supported' for i in items.values())
