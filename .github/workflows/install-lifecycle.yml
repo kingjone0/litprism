@@ -8,7 +8,7 @@ on:
       release_tag:
         description: '含安装包的 Release tag'
         required: true
-        default: 'v0.1.0'
+        default: 'v0.1.1'
 
 permissions:
   contents: read
@@ -83,14 +83,23 @@ jobs:
       - name: 正常退出并核对进程回收
         shell: pwsh
         run: |
-          # Electron 有多个 LitPrism.exe（主进程/渲染进程），只有主进程带窗口句柄
-          $app = Get-Process LitPrism -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-          if (-not $app) { throw '找不到带主窗口的 LitPrism 主进程，无法验证正常退出' }
+          # 通过单实例 IPC 触发正常退出：第二个实例带 --quit，主进程走 before-quit → stopSidecar。
+          # 不依赖窗口句柄 —— 无窗口环境里窗口可能是隐藏的。
+          $dir = "$env:LOCALAPPDATA\Programs\LitPrism"
+          $main = Get-Process LitPrism -ErrorAction SilentlyContinue |
+            Sort-Object StartTime | Select-Object -First 1
+          if (-not $main) { throw '应用进程不存在，无法验证正常退出' }
+          $mainPid = $main.Id
 
-          # 关主窗口（不是 Stop-Process），让外壳走自己的退出路径并回收 sidecar
-          if (-not $app.CloseMainWindow()) { throw '主窗口无法关闭，正常退出路径未走通' }
-          if (-not $app.WaitForExit(30000)) { throw '30 秒内应用进程未退出' }
+          $sender = Start-Process (Join-Path $dir 'LitPrism.exe') -ArgumentList '--quit' -Wait -PassThru
+          "退出命令退出码: $($sender.ExitCode)"
+
+          $gone = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            if (-not (Get-Process -Id $mainPid -ErrorAction SilentlyContinue)) { $gone = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $gone) { throw "30 秒内主进程 $mainPid 未退出" }
           "应用进程已正常退出"
 
           $left = $null

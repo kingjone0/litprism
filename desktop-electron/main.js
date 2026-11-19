@@ -324,7 +324,13 @@ async function createWindow() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    // 无声环境下的退出入口：第二个实例带 --quit 时，让已运行的实例走正常 before-quit
+    // （stopSidecar → 进程/端口回收），而不是靠外部强杀进程。
+    if ((argv || []).includes('--quit')) {
+      app.quit();
+      return;
+    }
     if (win) {
       if (win.isMinimized()) win.restore();
       win.show();
