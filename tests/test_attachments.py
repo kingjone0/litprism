@@ -13,6 +13,8 @@ from litprism.schema import SCHEMA_VERSION, apply_migrations
 
 from test_workflow_guards import env  # noqa: F401
 
+STATIC = Path(__file__).resolve().parents[1]
+
 
 def _fixture_pdf_bytes() -> bytes:
     from test_pdf_reading import _table_page
@@ -154,6 +156,35 @@ def test_backup_roundtrip_includes_attachments(tmp_path):
                 '不含原文的备份不得携带附件库'
     finally:
         kb.close()
+
+
+def test_cli_add_wires_attachment_registration():
+    """CLI 捕获点接线锁定：add 流程必须调用 register_attachment 且 source='cli'。"""
+    cli_text = (STATIC / 'src' / 'litprism' / 'cli.py').read_text(encoding='utf-8')
+    assert 'register_attachment(ctx.kb, ctx.cfg, pid, mid, p,' in cli_text
+    assert "source='cli'" in cli_text
+
+
+def test_add_material_snapshot_signals(env):
+    _, kb, _, _ = env
+    pid = kb.add_paper(title='快照信号样本', verify_level='verified', material_level='fulltext')
+    snap = kb.add_material_snapshot(pid, [{'text': 'alphatopic v1 evidence', 'page': 1}], level='fulltext')
+    assert snap['material_id'].startswith('mat_') and not snap['deduped']
+    assert snap['activated'] and snap['chunk_count'] == 1
+    # add_chunks 薄包装返回同一 material id（str 契约回归）
+    assert kb.add_chunks(pid, [{'text': 'alphatopic v1 evidence', 'page': 1}]) == snap['material_id']
+    # 同内容重导入：dedupe 到 current，activated=True
+    snap2 = kb.add_material_snapshot(pid, [{'text': 'alphatopic v1 evidence', 'page': 1}], level='fulltext')
+    assert snap2['deduped'] and snap2['activated'] and snap2['material_id'] == snap['material_id']
+    # 低完整度 keep_both：retained 不激活
+    snap3 = kb.add_material_snapshot(pid, [{'text': '题录信息', 'section': '题录与摘要'}],
+                                     level='abstract', policy='keep_both')
+    assert not snap3['deduped'] and not snap3['activated']
+    # 重导入已归档的低完整度内容：dedupe 到 retained 版本且不激活（防回滚设计）
+    snap4 = kb.add_material_snapshot(pid, [{'text': '题录信息', 'section': '题录与摘要'}], level='abstract')
+    assert snap4['deduped'] and not snap4['activated'] and snap4['material_id'] == snap3['material_id']
+    # material_level 保持导入历史最高水位 fulltext
+    assert kb.get_paper(pid)['material_level'] == 'fulltext'
 
 
 def test_v17_migration_is_idempotent(tmp_path):

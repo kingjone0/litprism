@@ -101,6 +101,36 @@ def test_fetch_candidate_imports_fulltext_and_links_candidate(tmp_path, monkeypa
         kb.close()
 
 
+def test_fetch_registers_download_attachment(tmp_path, monkeypatch):
+    """G07 下载捕获点：取回入库成功后原件归档并记录来源元数据。"""
+    import json as _json
+    cfg, kb = kb_of(tmp_path)
+    try:
+        cid = save_candidates(kb, [{'title': 'Attached remote', 'arxiv_id': '1607.01759'}], query='q')['added'][0]
+
+        def fake_download(url, dest, **kwargs):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b'%PDF-1.4 fake attachment')
+            return dest
+
+        monkeypatch.setattr(remote, 'download_pdf', fake_download)
+        monkeypatch.setattr('litprism.ingest.load_document', lambda p: _stub_document())
+        monkeypatch.setattr('litprism.ingest.chunk_document',
+                            lambda doc, size, overlap: [{'text': '正文内容', 'page': 1, 'section': '方法'}])
+
+        result = remote.fetch_candidate_pdf(kb, cfg, _Verifier(), cid)
+        assert result['attachment_id'] and not result['attachment_error']
+        from litprism.attachments import blob_path, get
+        att = get(kb, result['paper_id'], result['attachment_id'])
+        assert att['source'] == 'download' and att['original_name'].endswith('.pdf')
+        blob = blob_path(cfg, att['sha256'])
+        assert blob.is_file() and blob.read_bytes() == b'%PDF-1.4 fake attachment'
+        meta = _json.loads((cfg.data_path / 'papers' / '1607.01759.meta.json').read_text(encoding='utf-8'))
+        assert meta['url'].startswith('https://arxiv.org') and meta['sha256'] == att['sha256']
+    finally:
+        kb.close()
+
+
 def test_download_failure_leaves_candidate_untouched(tmp_path, monkeypatch):
     cfg, kb = kb_of(tmp_path)
     try:

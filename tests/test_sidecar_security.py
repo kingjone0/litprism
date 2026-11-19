@@ -53,6 +53,14 @@ def test_ping_is_open():
     assert TestClient(make_app("tk")).get("/api/ping").status_code == 200
 
 
+def test_attachment_and_annotation_export_paths_are_token_guarded():
+    """G07/v16 的取回路由不得进入任何豁免清单（中间件先于路由，未注册路径也 401）。"""
+    c = TestClient(make_app("tk"))
+    for path in ("/api/paper/p1/attachments/att1",
+                 "/api/paper/p1/annotations/export"):
+        assert c.get(path).status_code == 401, path
+
+
 def test_page_shell_is_not_guarded():
     # token 保护数据不保护外壳：挡住 / 既不增加安全，又妨碍排障
     assert TestClient(make_app("tk")).get("/").status_code == 200
