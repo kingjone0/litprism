@@ -1926,6 +1926,11 @@ kbd { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
   line-height: 1.7;
   white-space: nowrap;
 }
+
+/* ---------------- V4 轻量动效（reduced-motion 全局豁免覆盖） ---------------- */
+@keyframes fade-in { from { opacity: 0; transform: translateY(2px); } }
+.pane.active { animation: fade-in var(--dur) var(--ease); }
+.card.fade-in, .fade-in { animation: fade-in var(--dur) var(--ease); }
 .context-meter-panel {
   position: absolute;
   z-index: 4;

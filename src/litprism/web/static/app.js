@@ -424,6 +424,10 @@ function openView(view, opts = {}) {
     S.viewRevision = (S.viewRevision || 0) + 1;
     $('#inspSources').replaceChildren();
   }
+  /* V4 视图切换淡入：CSS animation 重触发（.pane.active 绑定 fade-in）。
+     曾试用 document.startViewTransition——无头验收环境（Playwright toBeVisible）
+     下过渡捕获阶段会挂起页面渲染（n10 大面积超时），故改纯 CSS 方案；
+     prefers-reduced-motion 由 app.css 全局豁免覆盖。 */
   S.activeView = view;
   $('#tbTitle').textContent = VIEW_TITLES[view] || view;
   $$('.pane').forEach(p => p.classList.toggle('active', p.dataset.pane === view));
