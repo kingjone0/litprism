@@ -8,7 +8,7 @@ on:
       release_tag:
         description: '含安装包的 Release tag'
         required: true
-        default: 'v0.1.0-ci.1'
+        default: 'v0.1.0'
 
 permissions:
   contents: read
