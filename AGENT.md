@@ -1,6 +1,6 @@
 # AGENT.md · LitPrism交接速查
 
-更新：2026-11-19。先读[当前状态](docs/当前实现与验收状态.md)和[唯一实施计划](docs/实现计划.md)，文档入口见[导航](docs/README.md)。本文保留开发约定、已验证环境及铁律，逐轮实测已归[历史](docs/history/README.md)。
+更新：2026-11-19。先读[当前状态](docs/当前实现与验收状态.md)，文档入口见[导航](docs/README.md)。本文保留开发约定、已验证环境及铁律，逐轮实测已归[历史](docs/history/README.md)。
 
 ## 当前执行点
 
