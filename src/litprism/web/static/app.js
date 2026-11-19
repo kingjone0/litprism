@@ -812,7 +812,7 @@ async function loadPaperDetail(versionId = null) {
   const box = $('#paperDetail');
   const requestedPaper = S.activePaper;
   if (!S.activePaper) {
-    box.innerHTML = `<div class="empty"><div class="title">未选择论文</div></div>`;
+    box.innerHTML = emptyState({ icon: 'library', title: '未选择论文' });
     return;
   }
   box.innerHTML = `<div class="empty"><div class="skeleton" style="width:60%;height:18px;margin:0 auto 12px"></div>
@@ -852,9 +852,14 @@ async function loadPaperDetail(versionId = null) {
           <span style="flex:1"></span>
           <div class="row" style="gap:6px">
             <button class="btn sm" id="btnAskThis">就这篇提问</button>
-            <button class="btn sm" id="btnRename">重命名</button>
-            <button class="btn sm danger" id="btnDelete">删除</button>
             <button class="btn sm primary" id="btnReanalyze">${d.reading?.has_analysis ? '重新解读' : '解读论文'}</button>
+            <details class="overflow-menu">
+              <summary class="btn sm" aria-label="更多操作">⋮</summary>
+              <div class="overflow-panel">
+                <button class="overflow-item" id="btnRename">重命名</button>
+                <button class="overflow-item danger" id="btnDelete">删除</button>
+              </div>
+            </details>
           </div>
         </div>
         <div class="segmented" style="margin-top:14px" id="paperTabs">
@@ -900,11 +905,10 @@ async function loadPaperDetail(versionId = null) {
             ${analysisSection('局限', a.limitations)}
           </div></div>` : `
           <div class="card"><div class="card-body">
-            <div class="empty"><div class="ico">🧩</div>
-              <div class="title">${candidateView._candidates?.length ? (candidateView._incomplete ? '提取进行中 / 已产出部分候选' : '正式解读尚未发布') : '尚未解读'}</div>
-              <div class="desc">${candidateView._candidates?.length ? (candidateView._incomplete ? `已提取第 ${candidateView._progress?.completed || '?'}/${candidateView._progress?.total || '?'} 段候选，可在上方核对原文并人工审核。` : '候选已保留，可在上方核对原文并人工审核。') : '先确认本次材料范围，再开始解读。'}</div>
-              <div class="empty-actions">${candidateView._candidates?.length ? '' : emptyCta('analyze', '解读这篇论文')}</div>
-            </div>
+            ${emptyState({ icon: 'prism',
+              title: candidateView._candidates?.length ? (candidateView._incomplete ? '提取进行中 / 已产出部分候选' : '正式解读尚未发布') : '尚未解读',
+              desc: candidateView._candidates?.length ? (candidateView._incomplete ? `已提取第 ${candidateView._progress?.completed || '?'}/${candidateView._progress?.total || '?'} 段候选，可在上方核对原文并人工审核。` : '候选已保留，可在上方核对原文并人工审核。') : '先确认本次材料范围，再开始解读。',
+              action: candidateView._candidates?.length ? '' : emptyCta('analyze', '解读这篇论文') })}
           </div></div>`}
       </div>
 
@@ -1024,8 +1028,8 @@ async function loadPaperText(pid, materialId) {
     const d = await api(`/api/paper/${encodeURIComponent(pid)}/text` + (materialId ? '?material_id='+encodeURIComponent(materialId) : ''));
     if (request !== paperTextRequest || body !== $('#paperTextBody')) return;
     if (!d.pages?.length) {
-      body.innerHTML = `<div class="empty"><div class="title">没有可显示的正文</div>
-        <div class="desc">该文件可能没有可提取的文本层（扫描件）。扫描件转写功能一期暂缓。</div></div>`;
+      body.innerHTML = emptyState({ icon: 'document', title: '没有可显示的正文',
+        desc: '该文件可能没有可提取的文本层（扫描件）。扫描件转写功能一期暂缓。' });
       return;
     }
     body.innerHTML = d.pages.map(pg => `
@@ -1105,10 +1109,10 @@ async function loadAllAnnotations() {
     const d = await api('/api/annotations?limit=200');
     const items = d.items || [];
     if (!items.length) {
-      box.innerHTML = `<div class="empty"><div class="title">还没有任何标注</div>
-        <div class="desc">打开一篇论文，在「原文」里选中一段话，点「标注这段」即可。</div>
-        <div class="empty-actions"><button class="btn primary" data-goto-library>去知识库</button></div></div>`;
-      $('[data-goto-library]', box).onclick = () => openView('library');
+      box.innerHTML = emptyState({ icon: 'annotate', title: '还没有任何标注',
+        desc: '打开一篇论文的原文页，选中一段话即可标注。',
+        action: emptyCta('view:library', '去知识库') });
+      $('[data-empty-action="view:library"]', box).onclick = () => openView('library');
       return;
     }
     box.innerHTML = `<p class="muted" style="margin-bottom:10px">共 ${items.length} 条标注</p>` + items.map(a => {
@@ -1177,8 +1181,8 @@ async function refreshAnnotations(pid) {
     const items = d.items || [];
     if (tab) tab.textContent = `标注 (${items.length})`;
     if (!items.length) {
-      box.innerHTML = `<div class="empty"><div class="title">还没有标注</div>
-        <div class="desc">切到「原文」选中一段话，点「标注这段」记下你的理解；之后会在这里汇总。</div></div>`;
+      box.innerHTML = emptyState({ icon: 'annotate', title: '还没有标注',
+        desc: '切到原文页选中一段话，点标注按钮记下你的理解；之后会在这里汇总。' });
       return;
     }
     box.innerHTML = `<div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:4px">
@@ -1711,6 +1715,7 @@ async function loadChat() {
                   <circle class="context-meter-ring-fill" cx="8" cy="8" r="6" pathLength="100" stroke-dasharray="0 100"></circle>
                 </svg>
                 <span class="context-meter-value">—</span>
+                <span class="context-meter-chip">输入占用</span>
               </summary>
               <div class="context-meter-panel">发送问题后显示本轮输入占用。</div>
             </details>
@@ -2638,10 +2643,8 @@ function renderProviders() {
       <span style="flex:1"></span>
       <button class="btn sm primary" id="btnAddProvider">＋ 添加提供商</button>
     </div>
-    <div id="pvList">${cards || `<div class="empty" style="padding:30px">
-      <div class="title">尚未配置模型提供商</div>
-      <div class="desc">添加一个后，可从提供商拉取模型列表，并选择哪些暴露到对话。</div>
-    </div>`}</div>
+    <div id="pvList">${cards || emptyState({ icon: 'settings', title: '尚未配置模型提供商',
+      desc: '添加一个后，可从提供商拉取模型列表，并选择哪些暴露到对话。' })}</div>
     ${S.secretsInfo.backend === 'weak'
       ? `<div class="pv-note" style="border-color:var(--warn);color:var(--warn)">${esc(S.secretsInfo.note)}</div>`
       : `<div class="pv-note">${esc(S.secretsInfo.note || '')}</div>`}
@@ -3143,11 +3146,8 @@ async function loadInspectorContext() {
   const current = () => request === inspectorContextRequest && S.activeConv === convId && S.activeView === view && S.viewRevision === revision;
   const box = $('#inspContext');
   if (!S.activeConv) {
-    box.innerHTML = `<div class="empty" style="padding:28px 8px">
-      <div class="ico">◫</div>
-      <div class="title">未选中对话</div>
-      <div class="desc">选择一个会话后，这里显示上下文占用、压缩块与账本。</div>
-    </div>`;
+    box.innerHTML = emptyState({ icon: 'chat', title: '未选中对话',
+      desc: '选择一个会话后，这里显示上下文占用、压缩块与账本。' });
     return;
   }
   box.innerHTML = '<p role="status">正在读取会话上下文…</p>';
@@ -3247,12 +3247,14 @@ async function loadInspectorSources() {
     const sources = view === 'compare' ? (S.compareSources || []) : S.sources;
     box.innerHTML = sources.length
       ? `<p class="source-intro">本次任务检索到的原文片段。页码与内容均取自知识库；不表示每个片段都被结论引用。</p>${LitUI.renderSegments(sources)}`
-      : '<div class="empty"><div class="title">本轮暂无原文来源</div><div class="desc">有检索依据的回答会在这里显示原文片段。历史对话和用户偏好不会成为引用来源。</div></div>';
+      : emptyState({ icon: 'document', title: '本轮暂无原文来源',
+        desc: '有检索依据的回答会在这里显示原文片段。历史对话和用户偏好不会成为引用来源。' });
     LitUI.bind(box);
     return;
   }
   if (view !== 'paper' || !paperId) {
-    box.innerHTML = '<div class="empty"><div class="title">让结论回到原文</div><div class="desc">打开一篇文献查看原文，或在对话中提问，查看回答对应的证据片段。</div></div>';
+    box.innerHTML = emptyState({ icon: 'prism', title: '让结论回到原文',
+      desc: '打开一篇文献查看原文，或在对话中提问，查看回答对应的证据片段。' });
     return;
   }
   box.innerHTML = '<div class="skeleton"></div>';
@@ -3324,6 +3326,10 @@ async function loadInspectorDeliv() {
    ========================================================================== */
 function bindGlobal() {
   $$('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
+  // 溢出菜单点外部关闭（V2：详情页次要动作收纳）
+  document.addEventListener('click', e => {
+    $$('.overflow-menu[open]').forEach(d => { if (!d.contains(e.target)) d.removeAttribute('open'); });
+  });
   $('#btnSidebar').onclick = toggleSidebar;
   $('#btnNewConv').onclick = newConversation;
   $('#btnSearch').onclick = () => { if (openView('library')) $('#libSearch').focus(); };

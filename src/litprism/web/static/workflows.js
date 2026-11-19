@@ -457,9 +457,11 @@ async function loadComparison() {
   const request = S.compareRequest = (S.compareRequest || 0) + 1;
   const ids = [...S.selectedPapers];
   if (ids.length < 2) {
-    box.innerHTML = `<div class="empty"><div class="title">还没有可对比的文献</div>
-      <div class="desc">在知识库勾选至少两篇，再回到这里对比。</div>
-      <div class="empty-actions"><button class="btn sm primary" data-empty-action="view:library">去知识库勾选</button></div></div>`;
+    box.innerHTML = emptyState({
+      icon: 'compare', title: '还没有可对比的文献',
+      desc: '在知识库勾选至少两篇，再回到这里对比。',
+      action: emptyCta('view:library', '去知识库勾选'),
+    });
     return;
   }
   box.innerHTML = '<div class="insp-note">正在读取原文并对比，完成后检查引用…</div>';
@@ -600,7 +602,8 @@ async function recommendPapers(event) {
     box.innerHTML = `<div class="insp-note">${esc(data.disclaimer || '')} 元数据导入不等于已经获得全文。</div>` +
       (data.items || []).map((p, i) => `<div class="card"><div class="card-body"><strong>${esc(p.title)}</strong><p>${esc(p.reason || p.abstract || '')}</p>
         ${badgeOf(p.verification?.level)} <button class="btn sm" data-recommend-import="${i}" ${p._paper_id ? 'disabled' : ''}>${p._paper_id ? '已在知识库' : '核验并导入题录'}</button></div></div>`).join('') +
-      (!(data.items || []).length ? '<div class="empty">没有找到候选，请调整关键词或检查数据源设置。</div>' : '');
+      (!(data.items || []).length ? emptyState({ icon: 'search', title: '没有找到候选',
+        desc: '调整关键词或检查数据源设置后重试。' }) : '');
     $$('[data-recommend-import]', box).forEach(b => b.onclick = async () => {
       b.disabled = true;
       try {
