@@ -132,7 +132,14 @@ jobs:
         shell: pwsh
         run: |
           $setup = (Get-ChildItem "$env:RUNNER_TEMP\pkg\LitPrism-Setup-*.exe").FullName
-          $p = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
+          # NSIS 在干净 VM 上偶发 0xC0000005（-1073741819）；最多重试 3 次，全部失败才认定失败
+          $p = $null
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $p = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
+            if ($p.ExitCode -eq 0) { break }
+            "重装第 $attempt 次失败，退出码 $($p.ExitCode)"
+            Start-Sleep -Seconds 10
+          }
           if ($p.ExitCode -ne 0) { throw "重装失败 $($p.ExitCode)" }
           $marker = Join-Path $env:DATA_DIR 'ci-retention.marker'
           if (-not (Test-Path $marker)) { throw "重装后数据丢失: $marker" }

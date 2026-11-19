@@ -37,3 +37,9 @@ def test_cross_version_upgrade_step_exists():
     assert 'gh release download v0.1.0' in text, '没有下载旧版作为对照'
     assert 'ci-upgrade.marker' in text, '没有断言升级后数据保留'
     assert "inputs.release_tag != 'v0.1.0'" in text, '用旧 tag 触发时不应跑升级对照'
+
+
+def test_reinstall_has_bounded_retry():
+    text = WORKFLOW.read_text(encoding='utf-8')
+    assert '$attempt -le 3' in text, '重装遇到 NSIS 偶发崩溃时应有有限重试'
+    assert '-1073741819' in text, '应记录 0xC0000005 这一已知偶发退出码'
