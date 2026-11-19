@@ -53,6 +53,21 @@ const S = {
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
+/* 本函数被本文件的 boot/侧栏/库路径调用，而本文件先于 workflows.js 执行；
+   localhost 响应足够快时调用会落在两文件执行间隙，故必须定义在本文件。 */
+function syncBatchActions() {
+  const none = S.selectedPapers.size === 0;
+  // 库里一篇都没有时整组没有意义，隐藏比显示一排禁用按钮干净
+  const group = document.querySelector('.tool-group');
+  if (group) group.hidden = S.papers.length === 0;
+  ['#btnMovePapers', '#btnBatchDelete', '#btnPaperExport', '#btnBatchVerify'].forEach(sel => {
+    const el = $(sel);
+    if (el) el.disabled = none;
+  });
+  const cmp = $('#btnCompareSelected');
+  if (cmp) cmp.disabled = S.selectedPapers.size < 2;
+}
+
 // 本地 SVG 图标保持跨平台一致，不依赖字体或远程资源。
 function icon(name) {
   const paths = {

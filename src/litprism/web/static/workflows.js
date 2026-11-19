@@ -1434,19 +1434,6 @@ const POOL_FILTERS = { open: '待处理', library: '已在库', all: '全部' };
  * 批量动作都依赖「已选」。未选中时全部禁用 —— 否则点了没有任何反应，
  * 用户会以为功能坏了。对比需要至少两篇。
  */
-function syncBatchActions() {
-  const none = S.selectedPapers.size === 0;
-  // 库里一篇都没有时整组没有意义，隐藏比显示一排禁用按钮干净
-  const group = document.querySelector('.tool-group');
-  if (group) group.hidden = S.papers.length === 0;
-  ['#btnMovePapers', '#btnBatchDelete', '#btnPaperExport', '#btnBatchVerify'].forEach(sel => {
-    const el = $(sel);
-    if (el) el.disabled = none;
-  });
-  const cmp = $('#btnCompareSelected');
-  if (cmp) cmp.disabled = S.selectedPapers.size < 2;
-}
-
 function poolStatusChip(item) {
   if (item.in_library) return '<span class="ev-claim-chip ok">已在库</span>';
   if (item.status === 'ignored') return '<span class="ev-claim-chip">已忽略</span>';
