@@ -1,6 +1,5 @@
-/* 研究任务交互。模型调用与引用校验均由后端执行。 */
-S.selectedPapers = new Set();
-S.collections = [];
+/* 研究任务交互。模型调用与引用校验均由后端执行。
+   S.selectedPapers/S.collections 定义在 app.js 的 S 字面量内（脚本加载顺序使然）。 */
 
 async function waitTask(id) {
   const card = document.createElement('div');
@@ -200,9 +199,7 @@ function workflowDialog(title, body, submit, action = '确定') {
 const analysisStages = { extract: '原文提取', concepts: '术语提取', semantic_review: '逐项复核', semantic_cross_review: '跨批核对' };
 const analysisRunStatuses = { queued: '等待执行', running: '正在执行或上次中断', paused_budget: '旧版预算暂停', needs_retry: '需确认重试', cancelled: '已取消', partial: '仍有待审项', completed: '机器复核通过', failed: '运行失败', stale: '版本已变化' };
 
-function paperMaterialLabel(level) {
-  return {metadata:'仅题录',abstract:'摘要',partial:'部分正文',fulltext:'已解析正文'}[level] || '完整度未知';
-}
+/* paperMaterialLabel/collectionLabel 已前移到 app.js（loadLibrary/parseScope 在 boot 路径引用）。 */
 
 function readingMaterialSummary(prepared) {
   const note = {
@@ -385,13 +382,7 @@ async function refreshCollections() {
   });
 }
 
-function collectionLabel(id, visited = new Set()) {
-  const c = S.collections.find(v => v.id === id);
-  if (!c || visited.has(id)) return '';
-  visited.add(id);
-  return (c.parent_id ? collectionLabel(c.parent_id, visited)+' / ' : '')+c.name;
-}
-
+/* collectionLabel 已前移到 app.js（boot 路径 parseScope 引用，见其注释）。 */
 function collectionDescendants(id) {
   const found = new Set([id]);
   for (let i = 0; i < S.collections.length; i++) S.collections.forEach(c => { if (found.has(c.parent_id)) found.add(c.id); });
@@ -792,10 +783,7 @@ function semanticEndpoint(ref) {
   return ref.kind === 'run' ? '/api/semantic-runs/'+encodeURIComponent(ref.id) : '/api/paper/'+encodeURIComponent(ref.id)+'/semantic';
 }
 
-function confirmReviewLeave() {
-  const dirty = $$('#inspSources form').some(form => form.dataset.reviewDirty === 'true' && form.getAttribute('aria-busy') !== 'true');
-  return !dirty || confirm('离开当前审核？尚未提交的修改将被丢弃。');
-}
+/* confirmReviewLeave 已前移到 app.js（脚本加载顺序竞态，见其注释）。 */
 
 for (const type of ['input', 'change']) document.addEventListener(type, event => {
   const form = event.target.closest('#inspSources form');
@@ -1636,3 +1624,9 @@ async function poolAct(button, url, body, pending) {
     delete row.dataset.busy;
   }
 }
+
+/* 求值完成闸门：本文件定义的所有函数此刻起可用；重放 boot 间隙内被
+   openView 入队的视图切换（见 app.js openView 顶部注释）。 */
+window.__WORKFLOWS_READY__ = true;
+(window.__PENDING_VIEWS__ || []).forEach(([view, opts]) => openView(view, opts));
+window.__PENDING_VIEWS__ = [];

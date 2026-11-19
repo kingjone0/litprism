@@ -48,6 +48,10 @@ const S = {
   sending: false,
   chatDrafts: new Map(),
   chatRunViews: new Map(),
+  /* 以下两项本属研究工作流，但必须定义在 S 字面量内：本文件先于 workflows.js 执行，
+     boot 间隙里的 syncBatchActions/loadLibrary 会立即读它们（脚本加载顺序竞态）。 */
+  selectedPapers: new Set(),
+  collections: [],
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -375,7 +379,21 @@ const VIEW_TITLES = {
   knowledge: '来源与知识', annotations: '阅读标注',
 };
 
+/* 本文件先于 workflows.js 执行；boot 间隙内 openView 可能被调用，
+   故审核离开确认必须定义在本文件（仅依赖 $$ / DOM / confirm）。 */
+function confirmReviewLeave() {
+  const dirty = $$('#inspSources form').some(form => form.dataset.reviewDirty === 'true' && form.getAttribute('aria-busy') !== 'true');
+  return !dirty || confirm('离开当前审核？尚未提交的修改将被丢弃。');
+}
+
 function openView(view, opts = {}) {
+  /* boot 间隙闸门：workflows.js 求值完成前（__WORKFLOWS_READY__ 未置位），任何视图
+     切换入队待其末尾重放——把"间隙内点击某些视图才炸"的残余窗口整体关闭。
+     boot 自身的 openView('library') 发生在 await 之后，正常路径永不入队。 */
+  if (!window.__WORKFLOWS_READY__) {
+    (window.__PENDING_VIEWS__ = window.__PENDING_VIEWS__ || []).push([view, opts]);
+    return true;
+  }
   const changed = view !== S.activeView ||
     (view === 'paper' && opts.paperId && opts.paperId !== S.activePaper) ||
     (view === 'chat' && opts.convId && opts.convId !== S.activeConv);
@@ -414,12 +432,21 @@ function openView(view, opts = {}) {
     b.dataset.view === view || (view === 'paper' && b.dataset.paper === S.activePaper) ||
     (view === 'chat' && b.dataset.conv === S.activeConv)));
 
-  const loader = {
-    library: loadLibrary, paper: loadPaperDetail, chat: loadChat,
-    deliverables: loadDeliverables, skills: loadSkills, verify: loadVerify,
-    compare: loadComparison, memories: loadMemories, trash: loadTrash,
-    knowledge: loadKnowledge, recommend: loadCandidates, annotations: loadAllAnnotations,
-  }[view];
+  /* 惰性解析：对象字面量会急切求值全部标识符，间隙窗口内读到
+     workflows.js 里的函数（loadComparison 等）即 ReferenceError（P1-2）。 */
+  const loader =
+    view === 'library' ? loadLibrary :
+    view === 'paper' ? loadPaperDetail :
+    view === 'chat' ? loadChat :
+    view === 'deliverables' ? loadDeliverables :
+    view === 'skills' ? loadSkills :
+    view === 'verify' ? loadVerify :
+    view === 'compare' ? loadComparison :
+    view === 'memories' ? loadMemories :
+    view === 'trash' ? loadTrash :
+    view === 'knowledge' ? loadKnowledge :
+    view === 'recommend' ? loadCandidates :
+    view === 'annotations' ? loadAllAnnotations : null;
   if (loader) loader().catch(e => toast(e.message, true));
   refreshInspector();
   return true;
@@ -645,6 +672,19 @@ async function newConversation() {
    ========================================================================== */
 let libraryRequest = 0;
 const LIBRARY_PAGE_SIZE = 50;
+/* 以下两个标签 helper 被 loadLibrary（boot 路径）与 parseScope（loadChat 路径）引用，
+   定义必须在本文件：workflows.js 后于本文件求值（脚本加载顺序竞态）。 */
+function paperMaterialLabel(level) {
+  return {metadata:'仅题录',abstract:'摘要',partial:'部分正文',fulltext:'已解析正文'}[level] || '完整度未知';
+}
+
+function collectionLabel(id, visited = new Set()) {
+  const c = S.collections.find(v => v.id === id);
+  if (!c || visited.has(id)) return '';
+  visited.add(id);
+  return (c.parent_id ? collectionLabel(c.parent_id, visited)+' / ' : '')+c.name;
+}
+
 async function loadLibrary(offset = 0) {
   if (S.activeView !== 'library') return;
   const request = ++libraryRequest, revision = S.viewRevision;
