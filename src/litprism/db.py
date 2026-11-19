@@ -372,11 +372,12 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     def add_chunks(self, paper_id: str, chunks: list[dict], *, policy: str = 'replace',
                    source: str | None = None, origin: str | None = None,
-                   level: str | None = None, full_text: str | None = None) -> int:
+                   level: str | None = None, full_text: str | None = None) -> str:
         """Save one complete material snapshot; repeated identical imports are idempotent.
 
         keep_both retains the preceding material as a named alternative; default
         reading still uses exactly one material. Lower-level imports stay archived.
+        Returns the material version id the chunks landed in (new or deduped).
         """
         from .materials import content_hash
         if policy not in ('replace', 'keep_both'):
@@ -401,7 +402,7 @@ class KnowledgeBase:
                     con.execute('UPDATE materials SET level=? WHERE id=?', (level, existing['id']))
                 if material_rank(level) > material_rank(paper.get('material_level')):
                     con.execute('UPDATE papers SET material_level=? WHERE id=?', (level, paper_id))
-                return len(self.get_chunks(paper_id, material_id=existing['id']))
+                return existing['id']
             mid = _new_id('mat_')
             activate = current is None or material_rank(level) >= material_rank(current['level'])
             con.execute('INSERT INTO materials VALUES (?,?,?,?,?,?,?,?)',
@@ -432,7 +433,7 @@ class KnowledgeBase:
                             (mid, full_text if full_text is not None else '\n\n'.join(c['text'] for c in clean), _now(), paper_id))
             if material_rank(level) > material_rank(paper.get('material_level')):
                 con.execute('UPDATE papers SET material_level=? WHERE id=?', (level, paper_id))
-        return len(clean)
+        return mid
 
     @_locked
     def list_materials(self, paper_id: str) -> list[dict]:

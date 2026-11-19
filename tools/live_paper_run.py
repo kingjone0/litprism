@@ -131,7 +131,8 @@ def main() -> int:
                                verify_status='verified', verify_level='manual_confirmed',
                                verify_confidence=1.0, verify_evidence={'basis': 'live paper test'})
             chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
-            n = kb.add_chunks(pid, chunks)
+            mid = kb.add_chunks(pid, chunks)
+            n = len(kb.get_chunks(pid, material_id=mid))
             print(json.dumps({'step': 'ingest', 'pages': doc.page_count, 'chunks': n,
                               'title': doc.title[:60]}, ensure_ascii=False), flush=True)
 

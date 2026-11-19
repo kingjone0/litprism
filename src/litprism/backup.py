@@ -180,7 +180,7 @@ def create_backup(kb, cfg: Config, output, *, include_originals=False):
     if cfg.data_path.resolve().is_relative_to(cfg.notes_path.resolve()):
         raise BackupError('笔记目录不能包含整个数据根，请先为笔记指定独立子目录。')
     output.parent.mkdir(parents=True, exist_ok=True)
-    for root in (cfg.notes_path, cfg.data_path/'skills', cfg.data_path/'papers'):
+    for root in (cfg.notes_path, cfg.data_path/'skills', cfg.data_path/'papers', cfg.data_path/'attachments'):
         if output.resolve().is_relative_to(root.resolve()):
             raise BackupError('备份文件不能放入即将备份的笔记、技能或原文目录。')
     with tempfile.TemporaryDirectory(prefix='litprism-backup-') as temp:
@@ -199,6 +199,7 @@ def create_backup(kb, cfg: Config, output, *, include_originals=False):
             _copy_tree(cfg.data_path/'skills', folder/'skills')
             if include_originals:
                 _copy_tree(cfg.data_path/'papers', folder/'papers')
+                _copy_tree(cfg.data_path/'attachments', folder/'attachments')
         content = _logical_content(folder, bool(include_originals))
         manifest = {'format': FORMAT, 'created_at': datetime.now(timezone.utc).isoformat(),
                     'content': content, 'content_hash': hashlib.sha256(_json(content)).hexdigest(), 'files': {}}
@@ -231,7 +232,7 @@ def _valid_name(info):
             any(p in ('', '.', '..') for p in name.split('/')) or info.is_dir() or
             stat.S_ISLNK(info.external_attr >> 16)):
         raise BackupError('备份含不安全的文件路径或链接。')
-    if name not in ('manifest.json', 'litprism.db', 'settings.json') and path.parts[0] not in ('notes', 'skills', 'papers'):
+    if name not in ('manifest.json', 'litprism.db', 'settings.json') and path.parts[0] not in ('notes', 'skills', 'papers', 'attachments'):
         raise BackupError('备份含不支持的文件。')
     if any(p in SECRET_NAMES for p in path.parts):
         raise BackupError('备份不得包含本机密钥文件。')

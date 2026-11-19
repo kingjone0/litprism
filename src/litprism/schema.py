@@ -667,6 +667,25 @@ def _migrate_v16(conn):
     """)
 
 
+def _migrate_v17(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS attachments (
+          id TEXT PRIMARY KEY,
+          paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+          material_id TEXT NOT NULL REFERENCES materials(id),
+          sha256 TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          original_name TEXT,
+          ext TEXT,
+          source TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(paper_id, material_id, sha256)
+        );
+        CREATE INDEX IF NOT EXISTS idx_attachments_material
+          ON attachments(material_id);
+    """)
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "基础表：papers / chunks / chunks_fts / analyses / concepts / relations / verify_log / meta", _migrate_v1),
     Migration(2, "会话 / 压缩 / 记忆 / 白名单 / 交付物 / 提供商 / MCP / OCR", _migrate_v2),
@@ -684,6 +703,7 @@ MIGRATIONS: list[Migration] = [
     Migration(14, '对话请求、逐次响应与显式续验', _migrate_v14),
     Migration(15, '知识来源依赖与本轮外部证据授权', _migrate_v15),
     Migration(16, '阅读标注：原文摘录与批注', _migrate_v16),
+    Migration(17, '原始附件逐版本保管（内容寻址原件库）', _migrate_v17),
 ]
 
 SCHEMA_VERSION: int = max(m.version for m in MIGRATIONS)

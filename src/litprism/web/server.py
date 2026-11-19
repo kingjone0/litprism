@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from ..agents import CompareAgent, QAAgent, RecommendAgent, render_comparison, render_recommendation
@@ -211,9 +211,33 @@ def create_app(cfg: Config) -> FastAPI:
             p = kb.resolve_paper(paper_id)
             if not p:
                 raise HTTPException(404, '未找到论文')
-            return {'items': kb.list_materials(p['id']), 'current_material_id': p.get('current_material_id'),
+            from ..attachments import list_for_paper
+            by_material: dict[str, list] = {}
+            for a in list_for_paper(kb, p['id']):
+                by_material.setdefault(a['material_id'], []).append(
+                    {k: a[k] for k in ('id', 'sha256', 'size', 'original_name', 'source')})
+            items = kb.list_materials(p['id'])
+            for m in items:
+                m['attachments'] = by_material.get(m['id'], [])
+            return {'items': items, 'current_material_id': p.get('current_material_id'),
                     'analyses': [dict(r) for r in kb._con.execute(
                         "SELECT id,material_id,model,created_at FROM analysis_versions WHERE paper_id=? AND id NOT LIKE 'ac_%' ORDER BY rowid DESC", (p['id'],))]}
+
+    @app.get('/api/paper/{paper_id}/attachments/{attachment_id}')
+    def paper_attachment(paper_id: str, attachment_id: str):
+        with kb._tx_lock:
+            p = kb.resolve_paper(paper_id)
+            if not p:
+                raise HTTPException(404, '未找到论文')
+            from ..attachments import blob_path, get as get_attachment
+            att = get_attachment(kb, p['id'], attachment_id)
+            if not att:
+                raise HTTPException(404, '附件不存在。')
+            path = blob_path(cfg, att['sha256'])
+            if not path.is_file():
+                raise HTTPException(404, '原件文件缺失。')
+            return FileResponse(path, media_type='application/octet-stream',
+                                filename=att['original_name'] or path.name)
 
     @app.get("/api/paper/{paper_id}")
     def paper(paper_id: str, version_id: str | None = None):
@@ -310,14 +334,22 @@ def create_app(cfg: Config) -> FastAPI:
                         verify_confidence=v_conf, verify_evidence=v_ev,
                     )
                     chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
-                    kb.add_chunks(pid, chunks, policy=material_policy, level='fulltext', source='local_pdf',
-                                  origin=f.filename, full_text=doc.full_text)
+                    mid = kb.add_chunks(pid, chunks, policy=material_policy, level='fulltext', source='local_pdf',
+                                        origin=f.filename, full_text=doc.full_text)
                 entry = {
                     "file": f.filename, "ok": True, "paper_id": pid,
                     "title": doc.title, "pages": doc.page_count, "chunks": len(chunks),
                     "verify_level": v_level, "verify_confidence": v_conf,
                     "warnings": doc.warnings,
                 }
+                # G07：原件逐版本归档；失败不阻断导入，但须显式回告
+                try:
+                    from ..attachments import register as register_attachment
+                    att = register_attachment(kb, cfg, pid, mid, tmp,
+                                              original_name=f.filename, source='upload')
+                    entry["attachment_id"] = att["id"]
+                except Exception as e:  # noqa: BLE001
+                    entry["attachment_error"] = str(e)
                 if analyze:
                     try:
                         analyze_paper(kb, cfg, task_llm(), pid, force=True)

@@ -283,7 +283,7 @@ class Config:
         return p
 
     def ensure_dirs(self) -> None:
-        for d in (self.data_path, self.cache_path, self.notes_path):
+        for d in (self.data_path, self.cache_path, self.notes_path, self.data_path / 'attachments'):
             d.mkdir(parents=True, exist_ok=True)
 
 

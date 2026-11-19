@@ -203,9 +203,16 @@ def cmd_add(ctx: Ctx, args) -> int:
                 verify_evidence=verify_evidence,
             )
             chunks = chunk_document(doc, ctx.cfg.retrieval.chunk_size, ctx.cfg.retrieval.chunk_overlap)
-            n = ctx.kb.add_chunks(pid, chunks, level='fulltext', source='local_pdf',
-                                  origin=str(p), full_text=doc.full_text)
+            mid = ctx.kb.add_chunks(pid, chunks, level='fulltext', source='local_pdf',
+                                    origin=str(p), full_text=doc.full_text)
+            n = len(ctx.kb.get_chunks(pid, material_id=mid))
         ok(f"已入库 {pid}（{doc.page_count} 页 / {n} 个文本块 / {len(doc.sections)} 个章节）")
+        try:
+            from .attachments import register as register_attachment
+            register_attachment(ctx.kb, ctx.cfg, pid, mid, p,
+                                original_name=p.name, source='cli')
+        except Exception as e:  # noqa: BLE001
+            warn(f"附件归档失败（不影响入库）：{e}")
         added += 1
 
         if not args.no_analyze:

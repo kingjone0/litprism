@@ -211,14 +211,27 @@ def fetch_candidate_pdf(kb: KnowledgeBase, cfg: Config, verifier, cid: str, *, m
             verify_confidence=float(result.confidence), verify_evidence=result.to_dict(),
         )
         chunks = chunk_document(doc, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
-        added = kb.add_chunks(pid, chunks, policy=material_policy, level='fulltext', source=provider,
-                              origin=url, full_text=doc.full_text)
+        mid = kb.add_chunks(pid, chunks, policy=material_policy, level='fulltext', source=provider,
+                            origin=url, full_text=doc.full_text)
+        added = len(kb.get_chunks(pid, material_id=mid))
     set_candidate_status(kb, cid, 'imported', paper_id=pid)
     _record_provenance(kb, cid, provider=provider, url=url, license=license)
+    # G07：下载的原件逐版本归档；失败不阻断导入，结果中显式报告
+    try:
+        from .attachments import register as register_attachment
+        att = register_attachment(kb, cfg, pid, mid, target,
+                                  original_name=target.name, source='download')
+        attachment_id = att['id']
+    except Exception as e:  # noqa: BLE001
+        attachment_id = None
+        attachment_error = str(e)
+    else:
+        attachment_error = None
     return {'paper_id': pid, 'arxiv_id': arxiv_id, 'reused_file': reused, 'provider': provider,
             'source_url': url, 'chunks': added, 'pages': len(doc.pages),
             'verify_level': result.level, 'material_level': material_label('fulltext'),
-            'title': doc.title or candidate['title'], 'warnings': doc.warnings}
+            'title': doc.title or candidate['title'], 'warnings': doc.warnings,
+            'attachment_id': attachment_id, 'attachment_error': attachment_error}
 
 
 def import_candidate(kb: KnowledgeBase, cfg: Config, verifier, cid: str, *, material_policy: str = 'replace') -> dict:
