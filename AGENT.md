@@ -1,12 +1,12 @@
 # AGENT.md · LitPrism交接速查
 
-更新：2026-11-20。先读[当前状态](docs/当前实现与验收状态.md)，文档入口见[导航](docs/README.md)。本文保留开发约定、已验证环境及铁律，逐轮实测已归[历史](docs/history/README.md)。
+更新：2026-11-21。先读[当前状态](docs/当前实现与验收状态.md)，文档入口见[导航](docs/README.md)。本文保留开发约定、已验证环境及铁律，逐轮实测已归[历史](docs/history/README.md)。
 
 ## 当前执行点
 
-gemi 工作树（`E:/antigravity`）2026-11-20 三批收口：①G06 提取中候选即时持久化（`91d5e50`/`a498d6a`）+ 草稿跨刷新（`afdc8cd`/`7c40831`）；②前端现代化批次（`2cc8265`，modern-web-guidance 对照：IME 安全提交、toast 播报、首帧主题防闪烁、弹窗滚动隔离、平台 API 替换）+ `syncBatchActions` 加载竞态修复（`c2ae4b0`）；③G07 原始附件逐版本保管（`985d8f0`，schema v17：内容寻址 `data/attachments/`、上传/CLI/下载三捕获点、备份可选包含、材料列表带附件与取回路由；v17 之前历史材料不回填）。全套 pytest 1686 项（2项既有跳过）、默认完整离线工作流、N10 56组通过；未 push/打包。
+gemi 工作树（`E:/antigravity`）2026-11-20 五批审计修复收口（`3215753`→`d68214c`，共领先 main 13 提交，未 push/打包）：**批次A** 脚本加载竞态根治（数据归位+惰性loader+boot函数前移+`__WORKFLOWS_READY__` 就绪闸门重放）；**批次B** 后端P2×8（upload 路由 def 化不再阻塞事件循环+流式100MB上限、reused_file %PDF/来源元数据校验、backup 顶层同名文件拒绝+附件归属校验、`add_material_snapshot` deduped/activated/chunk_count 信号、drill 脚本加固、attachments 返回库内实际行；B8 经回归证实为过度拒绝已回退）；**批次C** 前端体验×7（草稿 Map 优先、未提交失败恢复草稿、64KB 上限、Ctrl+Enter IME 守卫、legacy dark 迁移、workbench mock 部分修复、白名单内联校验）；**批次D** 文档真实化 14 处（N12 契约冲突修正、OA 五处反向失真、标注三口径归一）；**批次E** 测试补强（捕获点接线、快照信号语义、导出 401、演练自动化 3 项）+ **OA 真实联网验收通过**（`tools/oa_live_acceptance.py`：arXiv 直链+OpenAlex 发现 PLOS 开放副本→下载→入库→G07 附件归档，零模型调用，证据 `_selftest.oa-live-*`）。
 
-G08 真实环境：恢复演练脚本 `tools/backup_drill.py` 已对主树真实库（`E:/aicoding/paper-research-agent/data`，schema v15）完成本机演练——只读在线快照、schema gate 如实拒绝直恢、演练副本经真实迁移升 v17 全链校验通过（3 论文/389 块），源库未动，报告在 `_selftest.g08-drill-20261120/`。CI 升级基线参数化为 `old_tag` 输入；多屏/真实GPU/杀软/跨机 DPAPI 列外部核对清单 [G08清单](docs/G08真实环境验收清单-2026-11-20.md)。下一个候选方向：G07 网页正文获取闭环（按实际需求）或 push/合并 main（需授权）。
+审查协议执行记录：每批次独立对抗审查 agent（共 4 个），**抓到并当场修复**：批次B 的 drill 假通过 P2、批次C 的 randomUUID 安全上下文 P2 与草稿恢复覆盖新输入 P3、批次E 的同库重跑 IndexError P2 与恒真死断言；批次B 审查还证实 B8（data_path 排除）为过度拒绝并经回归回退。全套 pytest 1699 项（2项既有跳过）、默认离线工作流、N10 56组通过。剩余方向：push/合并 main（需授权）、G07 网页正文闭环（按需求）、F3 外部四项（G08 清单）。
 
 N04 长上下文校准及 11 轮会话回放已提交 `f116279`。Web 首条消息保存后锁定范围，换范围从顶部按钮新建。有效历史及摘要用于追问，当前证据遵守范围和失效规则。N02/N03 本批收口包含 fastText 目标复验和 GPT‑3 v4 独立全文回放。GPT‑3 的四条定向真实复核首次通过，隔整页图表续文和同块错行继续保留为回归。后续按实际阅读和人工核对反馈处理。 [N04 长会话与上下文占用](docs/N04长会话与上下文占用验收-2026-11-18.md) · [fastText 复杂来源](docs/N02-N03复杂来源离线核对-2026-11-19.md) · [GPT‑3 独立样本](docs/N02-N03独立样本GPT3离线复验-2026-11-19.md)
 
