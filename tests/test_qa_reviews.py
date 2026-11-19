@@ -100,11 +100,11 @@ def test_stale_snapshot_duplicate_click_and_other_review_route_cannot_bypass(env
     assert get_source(kb, latest['reviews'][-1]['knowledge_id'])['status'] == 'revoked'
 
 
-def test_scope_change_does_not_rebind_frozen_reply_and_revoke_survives_source_loss(env):
+def test_scope_change_attempt_does_not_rebind_frozen_reply_and_revoke_survives_source_loss(env):
     _, kb, _, client = env
     pid, cid, rid, d = start(env)
     other = paper(kb, title='Other')
-    client.patch('/api/conversations/'+cid, json={'scope': {'paper_ids': [other]}})
+    assert client.patch('/api/conversations/'+cid, json={'scope': {'paper_ids': [other]}}).status_code == 409
     response = submit(client, rid, d)
     assert response.status_code == 200
     sid = response.json()['knowledge_id']

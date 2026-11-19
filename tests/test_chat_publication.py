@@ -35,13 +35,13 @@ def test_invalid_legacy_assistant_is_hidden_and_not_history(env):
     assert 'LEGACY_BAD' not in loaded['content'] and loaded['status'] == 'invalid_citation'
 
 
-def test_scope_snapshot_survives_scope_change(env):
+def test_scope_snapshot_survives_scope_change_attempt(env):
     _, kb, _, client = env
     a = paper(kb, title='A')
     b = paper(kb, title='B')
     cid = kb.add_conversation('Scopes', scope={'paper_ids': [a]})
     client.post('/api/chat/'+cid, json={'question': 'alphatopic'})
-    client.patch('/api/conversations/'+cid, json={'scope': {'paper_ids': [b]}})
+    assert client.patch('/api/conversations/'+cid, json={'scope': {'paper_ids': [b]}}).status_code == 409
     loaded = client.get(f'/api/conversations/{cid}/messages').json()['items'][-1]
     assert loaded['scope_snapshot']['paper_ids'] == [a]
 

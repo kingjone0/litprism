@@ -142,8 +142,25 @@ class ChatRuns:
             def validate():
                 with self.kb._tx_lock:
                     current = binding(self.kb, cfg, client, row['conversation_id'], request['scope'], user['seq'])
-                if current != json.loads(row['binding']):
-                    raise RunConflict('来源、范围、历史、模型或实现已变化；请重新提问。')
+                    expected = json.loads(self.row(rid)['binding'])
+                    expected.pop('preflight_compaction', None)
+                    if current != expected:
+                        raise RunConflict('来源、范围、历史、模型或实现已变化；请重新提问。')
+
+            def compact(prepare):
+                with self.kb.tx() as con:
+                    validate()
+                    saved = json.loads(self.row(rid)['binding'])
+                    previous = saved.get('preflight_compaction')
+                    if previous or any(c['task'] == 'qa' for c in self.calls(rid)):
+                        return previous
+                    result = prepare()
+                    if result:
+                        saved = binding(self.kb, cfg, client, row['conversation_id'], request['scope'], user['seq'])
+                        saved['preflight_compaction'] = result
+                        con.execute('UPDATE chat_runs SET binding=? WHERE id=?', (dump(saved), rid))
+                    return result
+
             try:
                 validate()
                 latest = {c['step']: c for c in self.calls(rid)}
@@ -157,6 +174,7 @@ class ChatRuns:
                         raise RunConflict(journal.conflict)
                     validate()
                 execution = {'client': journal, 'user': user, 'rid': rid, 'validate': validate_publish,
+                             'compact': compact,
                              'publish': lambda result: self.publish(rid, result), 'usage': lambda: self.usage(rid)}
                 process(row['conversation_id'], request['input'], execution=execution)
             except RetryRequired:
@@ -183,6 +201,8 @@ class ChatRuns:
 class ChatJournal:
     def __init__(self, store, rid, client, cfg, retry):
         self.store, self.rid, self.client, self.runtime_config = store, rid, client, cfg
+        self.cfg = getattr(client, 'cfg', cfg.llm)
+        self.protocol = getattr(client, 'protocol', None)
         self.name, self.retry, self.step = client.name, retry, 0
         client.durable_single_attempt = True
         self.last_usage = None
@@ -274,7 +294,8 @@ class ChatJournal:
                             'rejected_prediction_tokens','audio_tokens') and numeric(v)}
             settings = getattr(self.client, 'last_request_settings', {}) or {}
             self.last_request_settings.update({k:v for k,v in settings.items() if k in (
-                'max_tokens','estimated_input_tokens','model_window_tokens','model_max_output_tokens','attempts','timeout') and numeric(v)})
+                'max_tokens','estimated_input_tokens','input_safety_tokens','model_window_tokens',
+                'model_max_output_tokens','attempts','timeout') and numeric(v)})
             if settings.get('output_mode') in ('automatic', 'legacy_unknown_capability'):
                 self.last_request_settings['output_mode'] = settings['output_mode']
             self.last_reasoning = getattr(self.client, 'last_reasoning', '') if status == 'succeeded' else ''

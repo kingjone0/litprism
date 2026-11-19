@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from litprism.config import Config, LLMConfig
 from litprism.db import KnowledgeBase
-from litprism.llm import AnthropicClient, ContextWindowError, OpenAICompatClient, output_allocation
+from litprism.llm import AnthropicClient, ContextWindowError, OpenAICompatClient, output_allocation, request_budget
 from litprism.providers import ProviderError, ProviderStore, apply_active_window
 from litprism.web import server
 
@@ -108,6 +108,70 @@ def test_large_input_receives_remaining_window_and_oversize_is_not_sent(monkeypa
     monkeypatch.setattr('requests.post', lambda *a, **kw: pytest.fail('Oversized input reached network'))
     with pytest.raises(ContextWindowError):
         OpenAICompatClient(settings).chat([{'role': 'user', 'content': 'x' * 4_000_000}])
+
+
+@pytest.mark.parametrize('url,protocol,task,percent', [
+    ('https://api.commandcode.ai/provider/v1', 'openai', 'qa', 7),
+    ('https://api.commandcode.ai/provider/v1', 'anthropic', 'qa', 5),
+    ('https://api.commandcode.ai/provider/v1', 'openai', 'extract', 5),
+    ('https://example.org/provider/v1', 'openai', 'qa', 5),
+])
+def test_long_qa_safety_is_scoped_and_matches_dispatch(url, protocol, task, percent):
+    settings = LLMConfig(base_url=url, model='deepseek/deepseek-v4.1-flash', automatic_output=True,
+                         model_window_tokens=1_000_000, model_max_output_tokens=384_000)
+    messages = [{'role': 'user', 'content': 'x' * 2_463_912}]
+    budget = request_budget(settings, protocol=protocol, task=task)
+    result = output_allocation(settings, messages, protocol=protocol, task=task)
+    estimate = result['estimated_input_tokens']
+    assert estimate == 615_990
+    assert result['input_safety_tokens'] == (estimate * percent + 99) // 100
+    assert result['max_tokens'] + estimate + result['input_safety_tokens'] == budget.window
+    limit = budget.input_limit(4096)
+    assert limit + budget.input_safety(limit) + 4096 <= budget.window
+    assert limit + 1 + budget.input_safety(limit + 1) + 4096 > budget.window
+
+
+def test_durable_qa_keeps_full_material_and_recent_turn_with_calibrated_safety(env, monkeypatch):
+    cfg, kb, _, provider = env
+    with kb.tx() as con:
+        con.execute("INSERT OR REPLACE INTO provider_model_capabilities VALUES (?,?,?,?,?)",
+                    (provider.id, provider.chat_model, 60_000, 4000, '2026-11-19T00:00:00'))
+    pid = kb.add_paper(title='Source', verify_level='verified')
+    kb.add_chunks(pid, [{'page': 1, 'text': 'alphatopic source observation. ' + 'x' * 187_000}], level='fulltext')
+    cid = kb.add_conversation('Offline pressure', scope={'paper_ids': [pid], 'mode': 'strict'})
+    for i in range(8):
+        kb.append_message(cid, 'user', f'QUESTION_{i} ' + 'u' * 3_000)
+        kb.append_message(cid, 'assistant', f'REPLY_{i} ' + 'a' * 3_000)
+    monkeypatch.setattr(server, 'KnowledgeBase', lambda _: kb)
+    captured = []
+
+    def post(*args, **kwargs):
+        captured.append(kwargs['json'])
+        result = json.dumps({'answer': 'Source observation [P1].', 'confidence': 'high'})
+        frame = {'choices': [{'delta': {'content': result}, 'finish_reason': 'stop'}]}
+        return SimpleNamespace(status_code=200, close=lambda: None, iter_lines=lambda **_: iter([
+            ('data: ' + json.dumps(frame)).encode(), b'', b'data: [DONE]', b'']))
+
+    monkeypatch.setattr('requests.post', post)
+    with TestClient(server.create_app(cfg)) as api:
+        created = api.post(f'/api/conversations/{cid}/chat-runs', json={
+            'question': 'alphatopic', 'request_id': 'capacity_pressure',
+        })
+        route = '/api/chat-runs/' + created.json()['run_id']
+        # Read the stream until the durable run reaches its terminal state.
+        assert api.get(route + '/events').status_code == 200
+        state = api.get(route).json()
+        assert state['status'] == 'completed', state
+        answer = api.get(route + '/result').json()
+    assert len(captured) == 1
+    settings = state['calls'][0]['settings']
+    assert settings['max_tokens'] == captured[0]['max_tokens'] == 4000
+    assert settings['input_safety_tokens'] == (settings['estimated_input_tokens'] * 7 + 99) // 100
+    assert settings['estimated_input_tokens'] + settings['input_safety_tokens'] + 4000 <= 60_000
+    assert answer['retrieval']['full_material_paper_ids'] == [pid]
+    content = captured[0]['messages'][1]['content']
+    assert 'QUESTION_7' in content and 'REPLY_7' in content
+    assert '历史摘要:' in content
 
 
 def test_capacity_does_not_turn_into_a_claim_generation_target():

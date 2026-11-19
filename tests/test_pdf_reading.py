@@ -208,8 +208,10 @@ def test_outline_defines_real_chapters_and_roles():
              Page(3, 'augment\n' * 4), Page(4, 'conclusion\n' * 4)]
     outline = [(1, '1 Introduction', 1), (1, '2 Retrieval', 2), (1, '3 Conclusion', 4)]
     sections = detect_sections(pages, outline)
-    assert [s.name for s in sections] == ['1 Introduction', '2 Retrieval', '3 Conclusion']
-    assert [s.role for s in sections] == ['引言', '正文', '结论']
+    # Placeholder text does not contain the actual headings: page-level ranges
+    # must retain the bookmark names but explicitly avoid precise attribution.
+    assert [s.name.split('（')[0] for s in sections] == ['1 Introduction', '2 Retrieval', '3 Conclusion']
+    assert all('边界未定位' in s.name and s.role == '正文' for s in sections)
     assert sections[1].start_page == 2
 
 

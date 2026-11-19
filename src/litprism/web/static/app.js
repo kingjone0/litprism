@@ -109,6 +109,8 @@ function emptyCta(action, label, { primary = true } = {}) {
 }
 
 document.addEventListener('click', event => {
+  const contextMeter = $('#chatContextMeter[open]');
+  if (contextMeter && !contextMeter.contains(event.target)) contextMeter.open = false;
   const trigger = event.target.closest('[data-empty-action]');
   if (!trigger) return;
   const action = trigger.dataset.emptyAction || '';
@@ -386,6 +388,7 @@ function openView(view, opts = {}) {
   if (view === 'paper' && opts.paperId) S.activePaper = opts.paperId;
   if (view === 'chat' && opts.convId && opts.convId !== S.activeConv) {
     S.activeConv = opts.convId;
+    S.convScope = null;
     S.messages = [];
     S.sources = [];
   }
@@ -420,9 +423,10 @@ function renderLocation() {
   const label = S.locLabel || VIEW_TITLES[S.activeView] || '';
   const chip = label ? `<span class="loc-chip" title="${esc(label)}">${esc(label)}</span>` : '';
   // 对话页额外显示文献范围：用户必须随时看得出"这次回答基于哪些文献"
+  const scopeAction = S.convScope?.locked ? '按其他范围新建对话' : '设置对话范围';
   const scope = (S.activeView === 'chat' && S.convScope)
     ? `<button class="scope-chip" id="scopeChip" type="button"
-         title="本次对话的文献范围，点击修改">${icon('library')}<span>${esc(S.convScope.label)}</span></button>`
+         title="${scopeAction}" aria-label="${esc(S.convScope.label + '，' + scopeAction)}">${icon('library')}<span>${esc(S.convScope.label)}</span></button>`
     : '';
   bar.innerHTML = chip + scope;
   const btn = $('#scopeChip');
@@ -457,9 +461,10 @@ function setLocation(label) {
   renderLocation();
 }
 
-/** 修改当前对话的文献范围（不重建会话，历史保留）。 */
+/** 首条消息发出前可在原对话内调整范围。 */
 function editConversationScope() {
   if (!S.activeConv) return;
+  if (S.convScope?.locked || S.sending) return showConversationDialog({ changeScope: true });
   const convId = S.activeConv;
   const current = structuredClone(S.convScope?.raw || {});
   const selectedIds = [...(S.selectedPapers || [])];
@@ -474,7 +479,7 @@ function editConversationScope() {
       `<option value="g:${esc(c.id)}">分组：${esc(collectionLabel(c.id))}</option>`),
   ].join('');
   workflowDialog('修改文献范围', `<label>文献范围<select class="select" name="scope">${options}</select></label>
-    <p class="source-intro">默认综合全库可信知识与联网来源。选择文献或分组后，仅使用该范围，不额外联网。只影响之后的问题；历史保留。</p>`, async values => {
+    <p class="source-intro">首条问题发出后，换范围时可新建对话。</p>`, async values => {
     let scope = {};
     if (values.scope === 'current') scope = current;
     else if (values.scope === 'selected') scope = { paper_ids: selectedIds, mode: 'strict' };
@@ -759,7 +764,7 @@ async function loadPaperDetail(versionId = null) {
     S.analysisMaterial = d.analysis_material?.id || null;
     S.claimChunksFor = null;
     S.paperMaterials = d.materials || [];
-    const concepts = d.concepts || a.concepts || [];
+    const concepts = d.concept_details || [];
 
     box.innerHTML = `
       <div class="page-head">
@@ -846,16 +851,7 @@ async function loadPaperDetail(versionId = null) {
       </div>
 
       <div data-ppane="concepts" style="display:none">
-        ${concepts.length ? `
-          <div class="card"><div class="card-body">
-            <table class="table">
-              <thead><tr><th style="width:150px">术语</th><th>文中含义</th></tr></thead>
-              <tbody>${concepts.map(c => `
-                <tr><td><strong>${esc(c.term)}</strong></td><td>${esc(c.definition || '—')}</td></tr>`).join('')}
-              </tbody>
-            </table>
-          </div></div>` : `<div class="card"><div class="card-body">
-            <div class="empty"><div class="title">暂无术语</div></div></div></div>`}
+        ${renderPaperConcepts(concepts, a, !!versionId)}
       </div>
     `;
 
@@ -920,6 +916,28 @@ async function loadPaperDetail(versionId = null) {
     if (S.activeView !== 'paper' || S.activePaper !== requestedPaper || request !== paperDetailRequest) return;
     box.innerHTML = `<div class="empty"><div class="title">加载失败</div><div class="desc">${esc(e.message)}</div></div>`;
   }
+}
+
+function renderPaperConcepts(concepts, analysis, historical) {
+  const labels = {paper_definition: '论文定义', paper_usage: '文中用法',
+    general: '通用含义', insufficient: '证据不足', legacy: '论文语境'};
+  const emptyMessage = analysis._concepts_error ? ['术语提取未完成', '可重新解读，或继续查看原文。'] :
+    ['暂无术语', '本份解读没有可展示的术语。'];
+  return `${!historical && concepts.length && analysis._concepts_error ? '<p class="source-intro">部分材料的术语尚未提取。</p>' : ''}
+    ${concepts.length ? `<ul class="paper-concepts" aria-label="论文术语">${concepts.map(c => `
+      <li class="paper-concept">
+        <div class="paper-concept-name"><strong>${esc(c.term)}</strong>${c.category ? `<span>${esc(c.category)}</span>` : ''}</div>
+        <div>${c.sections.map(s => `<div class="paper-concept-section">
+          <div class="paper-concept-label"><strong>${labels[s.kind] || labels.legacy}</strong>
+            ${s.note ? `<span>${esc(s.note)}</span>` : ''}</div>
+          ${s.pending ? `<details><summary>查看待核对释义</summary><p>${esc(s.text)}</p></details>` :
+            s.text ? `<p>${esc(s.text)}</p>` : ''}
+          ${s.sources.length ? `<div class="paper-concept-cites">${s.sources.map(source => `
+            <a href="#evidence-${esc(source.ref)}" data-evidence-ref="${esc(source.ref)}" data-concept-source
+               aria-label="查看 ${esc(c.term)} ${source.supplemental ? '补充原文' : '原文'} ${esc(source.tag)}${source.page == null ? '' : '，第 '+esc(source.page)+' 页'}">${source.supplemental ? '补充 ' : ''}${esc(source.tag)}${source.page == null ? ' · 无页码' : ' · p.'+esc(source.page)}</a>`).join('')}</div>` : ''}
+        </div>`).join('')}</div>
+      </li>`).join('')}</ul>` : emptyState({bare:true, title:emptyMessage[0], desc:emptyMessage[1],
+        action: historical ? '' : emptyCta('analyze', analysis._concepts_error ? '重新解读' : '解读并提取术语', {primary:false})})}`;
 }
 
 let paperTextRequest = 0;
@@ -1306,6 +1324,37 @@ function rememberChatDraft() {
   if (input?.dataset.convId) S.chatDrafts.set(input.dataset.convId, input.value);
 }
 
+function renderChatContextInput(input) {
+  const meter = $('#chatContextMeter');
+  if (!meter || !input?.window_tokens) return;
+  const ratio = 100 * input.estimated_tokens / input.window_tokens;
+  const percent = ratio > 0 && ratio < 1 ? '<1%' : Math.round(ratio) + '%';
+  const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 2 });
+  const parts = [
+    ['system', '系统提示'],
+    ['history', '对话与摘要'],
+    ['evidence', '本轮证据'],
+    ['question', '问题与指令'],
+  ];
+  $('.context-meter-value', meter).textContent = percent;
+  $('summary', meter).setAttribute('aria-label', '上下文占用，最近一次请求 ' + percent);
+  $('.context-meter-ring-fill', meter).setAttribute('stroke-dasharray', Math.min(ratio, 100) + ' 100');
+  const total = fmtNum(input.estimated_tokens) + ' / ' + fmtNum(input.window_tokens) + ' token';
+  $('.context-meter-panel', meter).innerHTML = `
+    <div class="context-meter-heading"><span>上下文已用 <strong>${esc(percent)}</strong></span>
+      <span title="${esc(total)}">≈${compact.format(input.estimated_tokens)} / ${compact.format(input.window_tokens)}</span>
+    </div>
+    <div class="context-meter-track" aria-hidden="true">
+      ${parts.map(([key]) => `<span data-part="${key}" style="--context-share:${100 * input.parts[key] / input.window_tokens}%"></span>`).join('')}
+    </div>
+    <dl class="context-meter-breakdown">
+      ${parts.map(([key, label]) => `<div data-part="${key}"><dt>${label}</dt><dd>${input.parts[key] ? '≈' : ''}${fmtNum(input.parts[key])}</dd></div>`).join('')}
+    </dl>
+    <div class="context-meter-foot">最近一次请求 · 本地估算<br>${esc(input.model)}
+      ${input.provider_input_tokens != null ? `<br>服务报告输入 ${fmtNum(input.provider_input_tokens)} token` : ''}
+    </div>`;
+}
+
 async function loadChat() {
   rememberChatDraft();
   const loadSeq = S.chatLoadSeq = (S.chatLoadSeq || 0) + 1;
@@ -1335,7 +1384,7 @@ async function loadChat() {
     S.sources = d.sources || [];
     $('#tbTitle').textContent = d.conversation.title || '对话';
     setLocation(d.conversation.title || '对话');
-    S.convScope = parseScope(d.conversation.scope);
+    S.convScope = {...parseScope(d.conversation.scope), locked: d.scope_locked};
     renderLocation();
 
     box.innerHTML = `
@@ -1368,13 +1417,30 @@ async function loadChat() {
             </div>
           </div>
           <div class="composer-hint">
-            <span>点击回答来源查看原文；需要整理知识时再核对入库。</span>
+            <details class="context-meter" id="chatContextMeter">
+              <summary aria-label="上下文占用">
+                <svg class="context-meter-ring" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="8" cy="8" r="6" pathLength="100"></circle>
+                  <circle class="context-meter-ring-fill" cx="8" cy="8" r="6" pathLength="100" stroke-dasharray="0 100"></circle>
+                </svg>
+                <span class="context-meter-value">—</span>
+              </summary>
+              <div class="context-meter-panel">发送问题后显示本轮输入占用。</div>
+            </details>
             <kbd>Ctrl + Enter</kbd>
           </div>
         </div>
       </div>`;
 
     const input = $('#chatInput');
+    renderChatContextInput(d.context_input);
+    $('#chatContextMeter').addEventListener('keydown', event => {
+      if (event.key === 'Escape' && event.currentTarget.open) {
+        event.preventDefault();
+        event.currentTarget.open = false;
+        $('summary', event.currentTarget).focus();
+      }
+    });
     input.value = S.chatDrafts.get(convId) || '';
     input.oninput = () => S.chatDrafts.set(convId, input.value);
     LitUI.bind(box);
@@ -1430,6 +1496,7 @@ async function askQuestion() {
     if (S.activeConv !== convId || S.activeView !== 'chat' || !stream.isConnected) return;
     S.messages.push(r.user, r.assistant);
     S.sources = r.sources || [];
+    renderChatContextInput(r.context_input);
     $('#pending')?.remove();
     stream.insertAdjacentHTML('beforeend', renderMessage(r.assistant, true));
     if (r.insufficient_evidence) {
@@ -1676,7 +1743,10 @@ async function showDeliverable(id) {
   try {
     const d = await api(`/api/deliverables/${encodeURIComponent(id)}`);
     const cites = (d.citations || []).map(c => `<p>${esc(c.paper_title || c.paper_id)} · ${c.page == null ? '无页码' : 'p.'+esc(c.page)}</p>`).join('');
-    workflowDialog(d.title, `<p class="source-intro">${esc(d.model || '模型未记录')} · ${esc(d.status_label)}</p><div class="reading-report">${LitUI.md(d.content || '')}</div><h3>引用来源</h3>${cites || '<p>无来源，禁止导出。</p>'}`, null);
+    const comparison = d.type === 'comparison';
+    const content = comparison ? LitUI.reportMarkdown(d.content) : LitUI.md(d.content || '');
+    const dialog = workflowDialog(d.title, `<p class="source-intro">${esc(d.model || '模型未记录')} · ${esc(d.status_label)}</p><div class="reading-report">${content}</div><h3>引用来源</h3>${cites || '<p>无来源，禁止导出。</p>'}`, null);
+    if (comparison) dialog.classList.add('comparison-preview');
 
   } catch (e) { toast(e.message, true); }
 }

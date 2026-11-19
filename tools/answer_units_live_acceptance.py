@@ -28,7 +28,8 @@ def fingerprints():
 
 
 def material(messages):
-    return messages[-1]['content'].split('【片段】\n', 1)[1].split('\n\n【程序送达记录】', 1)[0]
+    from litprism.qa_retrieval import prompt_material
+    return prompt_material(messages[-1]['content'])
 
 
 def validate_dispatch(task, messages, frozen, already_sent):

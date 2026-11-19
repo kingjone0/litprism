@@ -250,6 +250,23 @@ class TestSeamBegin:
 
 
 class TestSeamCommit:
+    def test_rejects_range_split_at_start_or_end(self, env):
+        from litprism.context.policy import SelectionResult
+
+        cfg, kb, conv = env
+        seam = Seam(kb, cfg)
+        for start, end in [(3, 5), (4, 6)]:
+            selected = _load_msgs(kb, conv)[start - 1:end]
+            tokens = sum(Meter(cfg).estimate_message(m) for m in selected)
+            tx, _ = seam.begin(conv, 'manual', SelectionResult(
+                ok=True, start_seq=start, end_seq=end,
+                shadowed_refs=[m['ref'] for m in selected], shadowed_tokens=tokens,
+            ))
+            summary = Summarizer(cfg, backend=lambda *_: '测试摘要').summarize(selected, tokens)
+            result = seam.commit(tx, summary)
+            assert not result.ok and result.failure_code == 'invariant'
+        assert kb._con.execute('SELECT count(*) FROM compaction_blocks').fetchone()[0] == 0
+
     def _prepare(self, env):
         cfg, kb, conv = env
         seam = Seam(kb, cfg)

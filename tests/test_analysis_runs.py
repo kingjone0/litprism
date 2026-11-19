@@ -73,6 +73,23 @@ def test_resume_after_database_reopen(env):
         reopened.close()
 
 
+@pytest.mark.parametrize('version', ['analysis-journal-v3-terms', 'analysis-journal-v4-term-anchors',
+                                     'analysis-journal-v5-reading-counterevidence',
+                                     'analysis-journal-v6-reading-continuations'])
+def test_previous_pipeline_cannot_resume_under_new_pipeline(env, monkeypatch, version):
+    from litprism import analysis_runs
+
+    cfg, kb, pid = env
+    store, client = AnalysisRuns(kb), Client(cfg)
+    with monkeypatch.context() as previous:
+        previous.setattr(analysis_runs, 'PIPELINE_VERSION', version)
+        rid = store.create(cfg, client, pid)['id']
+    with pytest.raises(RunConflict):
+        store.execute(rid, cfg, client)
+    assert not store.calls(rid) and not client.calls
+    assert store.detail(rid)['status'] == 'stale'
+
+
 @pytest.mark.parametrize('change', ['source', 'model', 'endpoint', 'temperature', 'context', 'analysis'])
 def test_incompatible_resume_stops_before_any_model_call(env, change):
     cfg, kb, pid = env

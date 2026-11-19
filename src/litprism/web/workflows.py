@@ -17,13 +17,7 @@ from ..evidence import require_citable
 def register_workflows(app, kb, cfg, task_llm, verifier):
     @app.patch('/api/conversations/{cid}')
     def update_conversation(cid: str, req: dict):
-        """改会话名 / 置顶 / **文献范围**。
-
-        范围原先只能在建会话时设定，想加一篇新导入的论文就得重建会话、丢掉历史。
-        这里补上修改能力：只改 scope，不动消息。
-
-        聊天 ``paper_ids: []`` 表示未限定论文；显式分组和无效文献仍须校验。
-        """
+        """改会话名、置顶，或在首次发送前设置文献范围。"""
         from ..scope import chat_paper_scope, chat_strict
 
         current = kb.resolve_conversation(cid)
@@ -59,6 +53,8 @@ def register_workflows(app, kb, cfg, task_llm, verifier):
                     raise HTTPException(409, str(exc)) from exc
 
         with kb.tx() as con:
+            if 'scope' in req and kb.conversation_scope_locked(cid):
+                raise HTTPException(409, '会话已有消息。请新建对话以选择其他文献范围。')
             if 'title' in req:
                 title = str(req['title']).strip()
                 if not title:

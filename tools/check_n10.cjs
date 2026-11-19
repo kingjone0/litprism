@@ -52,6 +52,60 @@ const path = require('node:path');
     }); }, release, close: async () => { release(); await page.unroute(url, handler); } };
   };
   try {
+    await check('four-theme-ids-render-real-palettes', async () => {
+      const measurements=[];
+      for (const width of [1360,390]) {
+        await page.setViewportSize({width,height:844});
+        for (const id of ['paper','paper-dark','minimal','glass']) {
+          await page.evaluate(id=>setTheme(id),id);
+          await expect(page.locator('html')).toHaveAttribute('data-theme',id);
+          const actual=await page.evaluate(()=>{
+            const style=getComputedStyle(document.body);
+            const lum=color=>{const rgb=color.match(/\d+/g).slice(0,3).map(Number);return (.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2])/255;};
+            return {state:S.theme,stored:localStorage.getItem('litprism-theme'),background:style.backgroundColor,
+              bg:lum(style.backgroundColor),fg:lum(style.color),skin:document.documentElement.dataset.skin};
+          });
+          assert.equal(actual.state,id);assert.equal(actual.stored,id);assert.equal(actual.skin,undefined);
+          const dark=['paper-dark','minimal'].includes(id);
+          assert(dark?actual.bg<.25&&actual.fg>actual.bg:actual.bg>.6&&actual.fg<actual.bg,JSON.stringify({id,...actual}));
+          measurements.push({width,id,...actual});
+        }
+      }
+      fs.writeFileSync(path.join(output,'theme-palettes.json'),JSON.stringify(measurements,null,2));
+      await page.evaluate(()=>setTheme('paper'));
+    });
+    await check('g04-partial-reply-keeps-local-gap-and-existing-review-after-reopen', async () => {
+      const seed=process.env.LITPRISM_ACCEPTANCE_SEED;
+      const conv=await call('/api/conversations','POST',{title:'G04 部分可答',scope:{paper_ids:[seed],mode:'strict'}});
+      try {
+        await page.evaluate(async id=>{await loadSidebar();await openView('chat',{convId:id});},conv.id);
+        await page.locator('#chatInput').fill('alphatopic partialreplymarker 原文的数据与GPU训练时间');
+        await page.locator('#btnSend').click();
+        const reply=page.locator('.from-assistant');
+        await expect(reply).toHaveCount(1);
+        await expect(reply).toHaveAttribute('data-message-status','answered');
+        await expect(reply.locator('.chat-bubble')).toContainText('尚未定位该模型的GPU训练时间。');
+        await expect(page.locator('#chatStream')).not.toContainText('本地知识库中没有找到足够的依据');
+        await expect(reply.locator('[data-evidence-ref]').first()).toBeVisible();
+        await reply.locator('[data-chat-review]').click();
+        await expect(page.locator('.qa-unit-row')).toHaveCount(2);
+        await expect(page.locator('#inspSources')).toContainText('尚未定位该模型的GPU训练时间。');
+        await page.screenshot({path:path.join(output,'g04-partial-review-desktop.png')});
+        await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{S.theme='paper-dark';applyTheme();});
+        await expect(page.locator('#inspSources')).toBeVisible();
+        await page.screenshot({path:path.join(output,'g04-partial-review-narrow.png')});
+        await page.reload();
+        // Boot finishes by opening the library. Wait for that read before
+        // selecting a conversation, otherwise the test races boot's last step.
+        await page.locator('#paperList [data-paper]').first().waitFor({state:'attached'});
+        await page.evaluate(id=>openView('chat',{convId:id}),conv.id);
+        await expect(page.locator('.from-assistant')).toHaveCount(1);
+        await expect(page.locator('.from-assistant')).toHaveAttribute('data-message-status','answered');
+        if (await page.locator('#btnCloseInspector').isVisible()) await page.locator('#btnCloseInspector').click();
+        await page.locator('.from-assistant [data-chat-review]').click();
+        await expect(page.locator('.qa-unit-row')).toHaveCount(2);
+      } finally {await call('/api/conversations/'+conv.id,'DELETE');}
+    });
     await check('settings-keyboard-modal-and-return-focus', async () => {
       await page.locator('[data-view=settings]').click();
       assert(await page.evaluate(() => document.querySelector('#settingsModal').contains(document.activeElement)), 'Focus must enter settings');
@@ -184,7 +238,11 @@ const path = require('node:path');
     });
     await check('settings-control-names-and-visible-save-feedback', async () => {
       await page.locator('[data-view=settings]').click();
-      await expect(page.getByRole('combobox', { name: '主题', exact: true })).toBeVisible();
+      await expect(page.locator('[data-theme-id]')).toHaveCount(4);
+      for (const id of ['paper','paper-dark','minimal','glass']) {
+        await expect(page.locator(`[data-theme-id="${id}"]`)).toBeVisible();
+        await expect(page.locator(`[data-theme-id="${id}"]`)).toHaveAccessibleName(/.+/);
+      }
       for (const section of ['sources', 'verify', 'retrieval', 'export']) {
         await page.locator(`[data-set="${section}"]`).click();
         const unnamed = await page.locator('#settingsPanes').evaluate(root =>
@@ -198,7 +256,7 @@ const path = require('node:path');
       await page.locator('[data-set=retrieval]').click();
       const field = page.getByRole('spinbutton', { name: '返回片段数', exact: true });
       const before = (await call('/api/status')).config.retrieval.top_k;
-      for (const [width, theme] of [[1360, 'light'], [390, 'dark']]) {
+      for (const [width, theme] of [[1360, 'paper'], [390, 'paper-dark']]) {
         await page.setViewportSize({ width, height: 844 });
         await page.evaluate(t => { S.theme = t; applyTheme(); }, theme);
         await page.locator('label', { hasText: '返回片段数' }).click();
@@ -268,7 +326,7 @@ const path = require('node:path');
           assert.equal(lines, 1, 'Short action wraps: ' + await control.innerText());
         }
       };
-      for (const theme of ['light', 'dark']) {
+      for (const theme of ['paper', 'paper-dark']) {
         await page.evaluate(t => { S.theme = t; applyTheme(); openView('library'); }, theme);
         await oneLine('.library-tools .btn, .tool-group-label');
         await page.screenshot({ path: path.join(output, `short-actions-library-${theme}.png`) });
@@ -461,7 +519,7 @@ const path = require('node:path');
     });
     await check('candidate-failure-can-retry-existing-actions', async () => {
       await page.locator('[data-view=recommend]').first().click();
-      for (const [action, expected, width, theme] of [['ignore','ignored',1360,'light'],['reject','rejected',390,'dark']]) {
+      for (const [action, expected, width, theme] of [['ignore','ignored',1360,'paper'],['reject','rejected',390,'paper-dark']]) {
         await page.setViewportSize({width,height:844});
         await page.evaluate(t=>{S.sidebar=false;applySidebar();S.theme=t;applyTheme();},theme);
         const candidate=await call('/api/candidates','POST',{title:'候选恢复 '+action,url:'https://example.org/retry-'+action});
@@ -526,7 +584,7 @@ const path = require('node:path');
       const b=await call('/api/evidence','POST',{kind:'knowledge',title:'来源读取 B',content:'仅供本地回归的待审核原文 B。'});
       await page.locator('[data-view=knowledge]').first().click();
       await page.setViewportSize({width:390,height:844});
-      await page.evaluate(()=>{S.sidebar=false;applySidebar();S.theme='dark';applyTheme();});
+      await page.evaluate(()=>{S.sidebar=false;applySidebar();S.theme='paper-dark';applyTheme();});
       const linkA=page.locator(`#knowledgeList [data-evidence-ref="${a.id}"]`);
       const endpoint=base+'/api/evidence/'+a.id;let reads=0;
       await page.route(endpoint,route=> (++reads===1||reads===3)
@@ -798,7 +856,7 @@ const path = require('node:path');
       for (const width of [1360, 1000, 720, 390]) {
         await page.setViewportSize({ width, height: 760 });
         await page.evaluate(() => { S.sidebar = false; applySidebar(); });
-        for (const theme of ['light', 'dark']) {
+        for (const theme of ['paper', 'paper-dark']) {
           await page.evaluate(t => { S.theme = t; applyTheme(); }, theme);
           await page.locator('#btnCollection').click();
           await expect(page.locator('#researchTask')).toBeVisible();
@@ -845,8 +903,8 @@ const path = require('node:path');
           .map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4)
           .reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
         const result = [];
-        for (const theme of ['light', 'dark']) {
-          document.documentElement.dataset.theme = theme;
+        for (const theme of ['paper', 'paper-dark']) {
+          S.theme=theme;applyTheme();
           const style = getComputedStyle(document.documentElement);
           const text = luminance(style.getPropertyValue('--muted'));
           for (const token of ['--bg', '--panel', '--panel-2', '--panel-3']) {
@@ -1266,7 +1324,7 @@ const path = require('node:path');
       for(const name of [title,'非常长的研究产出标题与来源核验记录'.repeat(8)]) ids.push((await call('/api/deliverables','POST',{title:name,type:'notes',content:'原文描述 [P1 p.1]',citations:[{tag:'P1',paper_id:seed,chunk_id:text.pages[0].chunks[0].chunk_id}]})).id);
       await page.locator('[data-view=deliverables]').click();await expect(page.locator('#delivList')).toHaveAttribute('aria-busy','false');
       const measurements=[];
-      for(const theme of ['light','dark']) {
+      for(const theme of ['paper','paper-dark']) {
         await page.evaluate(theme=>{S.theme=theme;applyTheme();},theme);
         for(const width of [320,390,760,1360]) {
           await page.setViewportSize({width,height:880});await page.evaluate(()=>{S.sidebar=false;applySidebar();});
@@ -1318,7 +1376,7 @@ const path = require('node:path');
       await expect(page.locator(`[data-edit-memory="${custom.id}"]`).locator('..').locator('strong')).toHaveText('自定义展示名称');
       await page.locator(`[data-edit-memory="${records[0].id}"]`).click();await expect(page.locator('#researchTask [name=kind]')).toHaveValue('style_preference');await expect(page.locator('#researchTask [name=kind] option:checked')).toHaveText('表达偏好');await page.keyboard.press('Escape');
       const go=async view=>{if(!await page.evaluate(()=>S.sidebar))await page.locator('#btnSidebar').click();await page.locator(`[data-view="${view}"]`).first().click();};
-      for(const theme of ['light','dark'])for(const width of [390,1360]) {
+      for(const theme of ['paper','paper-dark'])for(const width of [390,1360]) {
         await page.setViewportSize({width,height:880});await page.evaluate(async({theme,width})=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));S.theme=theme;applyTheme();S.sidebar=width>760;applySidebar();},{theme,width});
         await go('memories');await expect(page.locator('#memoryList')).toHaveAttribute('aria-busy','false');await page.screenshot({path:path.join(output,`p3-preferences-${width}-${theme}.png`)});
         await go('skills');await expect(page.locator('#skillCards')).toHaveAttribute('aria-busy','false');
@@ -1332,7 +1390,7 @@ const path = require('node:path');
       assert.equal(stored.find(m=>m.id===custom.id).key,'自定义展示名称');
     });
     await check('g01-growing-library-pages-search-scope-and-older-conversations', async () => {
-      await page.evaluate(()=>{S.theme='light';applyTheme();});
+      await page.evaluate(()=>{S.theme='paper';applyTheme();});
       const fixture = await call('/api/acceptance/library-capacity', 'POST', {});
       let scoped;
       try {
@@ -1392,7 +1450,7 @@ const path = require('node:path');
         await page.locator('#libSearch').fill('G01容量');
         await expect(page.locator('#paperList [data-paper]')).toHaveCount(50);
         await page.setViewportSize({width:390,height:844});
-        await page.evaluate(()=>{S.theme='dark';applyTheme();});
+        await page.evaluate(()=>{S.theme='paper-dark';applyTheme();});
         await expect(page.locator('#libraryNext')).toBeVisible();
         assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
         await page.screenshot({path:path.join(output,'g01-narrow-dark-pagination.png')});
@@ -1461,7 +1519,7 @@ const path = require('node:path');
           } else await expect(page.locator('#researchTask [type=submit]')).toBeEnabled();
           if(level==='partial')await page.screenshot({path:path.join(output,'g02-materials-desktop.png')});
           if(level==='unknown') {
-            await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{S.theme='dark';applyTheme();});
+            await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{S.theme='paper-dark';applyTheme();});
             const button=await page.locator('#researchTask [type=submit]').boundingBox();
             assert(button.x>=0&&button.x+button.width<=390&&button.y+button.height<=844);
             await page.screenshot({path:path.join(output,'g02-materials-narrow-dark.png')});
@@ -1564,7 +1622,7 @@ const path = require('node:path');
         await page.reload();await expect(page.locator('#paperList [data-paper]').first()).toBeVisible();
         await page.locator(`[data-conv="${cid}"]`).click();
         await expect(page.locator('#chatLiveDraft [data-live-text]')).toHaveText('streamingfixture 提出了有依据的');
-        await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{S.theme='dark';applyTheme();});
+        await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{S.theme='paper-dark';applyTheme();});
         assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
         await expect(page.locator('#chatLiveDraft [data-live-cancel]')).toBeEnabled();
         assert((await page.locator('#chatLiveDraft [data-live-cancel]').boundingBox()).height>=44);

@@ -8,13 +8,12 @@
 |---|---|---|---|
 | OpenAI | `prompt_tokens` | `completion_tokens` | `prompt_tokens_details.cached_tokens` |
 | DeepSeek | `prompt_tokens` | `completion_tokens` | `prompt_cache_hit_tokens` |
-| Anthropic | `input_tokens` | `output_tokens` | `cache_read_input_tokens` |
+| Anthropic | `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` | `output_tokens` | `cache_read_input_tokens` |
 
 直接把原始 dict 透出去，界面上就得写三套判断，而且很容易某家漏看。
 
-**缓存命中率是"上下文是否真的固定"的体检指标。** 我们为了命中前缀缓存
-做了布局反转（原文在前、指令在后），如果实测命中率接近 0，说明这条设计没生效 ——
-这不是成本问题，是设计验证问题。所以必须能测。
+相同前缀可通过实际请求校验。服务报告的缓存命中还取决于模型、缓存边界、
+有效期和路由，需按服务协议归集。
 """
 
 from __future__ import annotations
@@ -46,6 +45,13 @@ def normalize_usage(usage: dict | None) -> dict:
     total_in = _pick(usage, "prompt_tokens", "input_tokens")
     out = _pick(usage, "completion_tokens", "output_tokens")
 
+    if "prompt_tokens" not in usage and ("cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage):
+        hit = _pick(usage, "cache_read_input_tokens")
+        miss = total_in + _pick(usage, "cache_creation_input_tokens")
+        total_in = hit + miss
+        return {"input": total_in, "output": out, "cache_hit": hit, "cache_miss": miss,
+                "cached_ratio": hit / total_in if total_in else None}
+
     hit = _pick(usage, "prompt_cache_hit_tokens", "cache_read_input_tokens")
     if not hit:
         hit = _pick(details, "cached_tokens", "cache_hit_tokens")
@@ -63,7 +69,7 @@ def normalize_usage(usage: dict | None) -> dict:
         or details.get("cache_hit_tokens") is not None
     )
 
-    miss = _pick(usage, "prompt_cache_miss_tokens", "cache_creation_input_tokens")
+    miss = _pick(usage, "prompt_cache_miss_tokens")
     if not miss and reported and total_in:
         miss = max(0, total_in - hit)
 

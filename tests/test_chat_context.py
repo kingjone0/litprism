@@ -25,6 +25,7 @@ class RecordingLLM:
         self.answer = "该方法只采用注意力机制。[P1 p.3]"
 
     def chat_json(self, messages, **kwargs):
+        self.last_usage = {"prompt_tokens": 1234, "completion_tokens": 40}
         self.requests.append(copy.deepcopy(messages))
         return {"answer": self.answer, "confidence": "high"}
 
@@ -62,6 +63,7 @@ def test_api_followup_sends_history_preferences_and_authoritative_sources(env, m
     client = TestClient(server.create_app(cfg))
     first = client.post(f"/api/chat/{conv}", json={"question": "注意力方法是什么？"})
     assert first.status_code == 200, first.text
+    assert first.json()["context_input"]["parts"]["history"] == 0
     followup = client.post(f"/api/chat/{conv}", json={"question": "它有哪些局限？"})
     assert followup.status_code == 200, followup.text
     prompt = "\n".join(m["content"] for m in llm.requests[-1])
@@ -70,16 +72,42 @@ def test_api_followup_sends_history_preferences_and_authoritative_sources(env, m
     assert prompt.count("【问题】它有哪些局限？") == 1
     assert "Attention Study" in queries[-1]  # source-bound document identity
     assert "历史引用，本轮无效" in prompt
+    meter = followup.json()["context_input"]
+    assert meter["window_tokens"] == cfg.context.window_tokens
+    assert meter["provider_input_tokens"] == 1234
+    assert meter["model"] == llm.name
+    assert all(value > 0 for value in meter["parts"].values())
+    assert sum(meter["parts"].values()) == meter["estimated_tokens"] == sum(
+        Meter(cfg).estimate_message(m) for m in llm.requests[-1]
+    )
     source = followup.json()["sources"][0]["component"]["items"][0]
     assert source["page"] == 3 and source["text"] == hit["text"]
     # 伪造保存的页码，重新打开会话时仍以数据库原文为准。
     kb._con.execute("UPDATE messages SET citations = REPLACE(citations, '\"page\": 3', '\"page\": 999') WHERE role = 'assistant'")
     kb._con.commit()
     loaded = client.get(f"/api/conversations/{conv}/messages").json()
+    assert loaded["context_input"] == meter
     assert loaded["sources"][0]["component"]["items"][0]["page"] == 3
     view = TurnViewStore(kb).latest(conv)
     assert view.read_refs["history"] and view.read_refs["resident"]
     assert view.read_refs["retrieved"] == [hit["id"]]
+
+
+def test_context_meter_keeps_last_model_request_after_local_refusal(env, monkeypatch):
+    cfg, kb, conv, llm, _, _ = env
+    from litprism.web import server
+    monkeypatch.setattr(server, 'KnowledgeBase', lambda cfg: kb)
+    monkeypatch.setattr(server, 'build_llm', lambda cfg: llm)
+    client = TestClient(server.create_app(cfg))
+    url = f'/api/conversations/{conv}/messages'
+    assert client.get(url).json()['context_input'] is None
+    latest = client.post(f'/api/chat/{conv}', json={'question': '注意力方法是什么？'}).json()['context_input']
+    monkeypatch.setattr('litprism.agents.search_local', lambda *args, **kwargs: [])
+    response = client.post(f'/api/chat/{conv}', json={'question': '没有相关证据的问题'})
+    assert response.json()['status'] == 'refused'
+    assert response.json()['context_input'] is None
+    assert len(llm.requests) == 1
+    assert client.get(url).json()['context_input'] == latest
 
 
 def test_no_retrieval_refuses_despite_history_and_memory(env, monkeypatch):

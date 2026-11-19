@@ -725,7 +725,8 @@ def cmd_compact(ctx: Ctx, args) -> int:
         err(f"无法开始压缩：{FAILURE_CODES.get(code or '', code)}")
         return 2
 
-    in_range = [m for m in messages if sel.start_seq <= m["seq"] <= sel.end_seq]
+    refs = set(sel.shadowed_refs)
+    in_range = [m for m in messages if m['ref'] in refs]
     summarizer = Summarizer(ctx.cfg, ctx.llm, backend=ExtractiveSummarizer())
     print(f"\n  正在生成摘要（{len(in_range)} 条消息，{sel.shadowed_tokens} token）…")
     summary = summarizer.summarize(in_range, sel.shadowed_tokens)

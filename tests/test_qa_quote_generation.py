@@ -6,7 +6,7 @@ import pytest
 from test_workflow_guards import env  # noqa: F401
 from litprism.agents import QAAgent
 from litprism.prompts import QA_QUOTE_CHECK
-from litprism.qa_retrieval import material_text
+from litprism.qa_retrieval import EXCERPT_HEADER, material_text, prompt_material
 
 
 def test_per_source_body_boundaries_preserve_all_original_characters_and_types():
@@ -55,6 +55,56 @@ def test_real_qa_generation_preserves_full_prefix_budget_and_protocol(env,anchor
     assert texts[1][located['start']:located['end']] == located['quote'] == texts[1]
     assert first.evidence_audit['semantic_status']=='unreviewed'
     assert cfg.llm.model_window_tokens==1000000 and cfg.llm.model_max_output_tokens==384000
+
+
+def test_qa_reuses_paper_and_history_prefix_across_ranking_web_and_preference_changes(env, monkeypatch):
+    from litprism.chat_evidence import excerpts as web_excerpts, grant
+    from litprism.knowledge import create_source
+    from litprism.memory.store import MemoryStore
+
+    cfg, kb, model, _ = env
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = 1_000_000
+    paper_ids = [kb.add_paper(title=title, verify_level='verified') for title in ('Alpha', 'Beta')]
+    for pid, label in zip(paper_ids, ('ALPHA', 'BETA')):
+        kb.add_chunks(pid, [{'text': f'{label} original {i}', 'page': i} for i in (1, 2)])
+    cid = kb.add_conversation('Prefix control')
+    user = kb.append_message(cid, 'user', 'Earlier research topic')
+
+    def search(kb, query, **kwargs):
+        order = paper_ids if query == 'first' else list(reversed(paper_ids))
+        return [{**kb.get_chunks(pid)[-1], 'paper_title': kb.get_paper(pid)['title'], 'score': 1} for pid in order]
+
+    monkeypatch.setattr('litprism.agents.search_local', search)
+    first = QAAgent(kb, cfg, model).ask('first', conversation_id=cid, strict_scope=False)
+    first_messages = model.calls[-1][1]
+    MemoryStore(kb, cfg).save('PREFERENCE_CHANGED', kind='style_preference')
+    source = create_source(kb, kind='web', title='Search', url='https://example.org/prefix', content='FRESH_WEB')
+    web = web_excerpts(kb, grant(kb, cid, user['id'], 'second', [source]))
+    second = QAAgent(kb, cfg, model).ask('second', conversation_id=cid, strict_scope=False, external=web)
+    second_messages = model.calls[-1][1]
+
+    prefix, tail = second_messages[1]['content'].split(EXCERPT_HEADER, 1)
+    assert first_messages[0] == second_messages[0]
+    assert first_messages[1]['content'].split(EXCERPT_HEADER, 1)[0] == prefix
+    assert 'Earlier research topic' in prefix
+    assert 'FRESH_WEB' in tail and 'PREFERENCE_CHANGED' in tail and '【问题】second' in tail
+    assert not any(word in prefix for word in ('FRESH_WEB', 'PREFERENCE_CHANGED', '【问题】'))
+    expected = [c['id'] for pid in sorted(paper_ids) for c in kb.get_chunks(pid)]
+    assert first.retrieval['delivered_chunk_ids'] == expected
+    assert second.retrieval['delivered_chunk_ids'][:len(expected)] == expected
+    assert [(e['tag'], e['chunk_id']) for e in first.excerpts] == [
+        (e['tag'], e['chunk_id']) for e in second.excerpts[:len(expected)]]
+    assert all(excerpt['text'] in prompt_material(second_messages[1]['content']) for excerpt in second.excerpts)
+
+    kb.append_message(cid, 'user', 'Later research detail')
+    QAAgent(kb, cfg, model).ask('third', conversation_id=cid, strict_scope=False)
+    following = model.calls[-1][1][1]['content']
+    assert following.startswith(prefix.rstrip()+'\n\nuser: Later research detail')
+
+    kb.add_chunks(min(paper_ids), [{'text': 'CURRENT_REPLACEMENT', 'page': 1}])
+    QAAgent(kb, cfg, model).ask('fourth', conversation_id=cid, strict_scope=False)
+    changed = model.calls[-1][1][1]['content']
+    assert not changed.startswith(prefix) and 'CURRENT_REPLACEMENT' in prompt_material(changed)
 
 
 def test_coverage_guidance_is_delivered_without_auto_rewriting_or_new_semantic_block(env):

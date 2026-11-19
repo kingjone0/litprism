@@ -24,3 +24,12 @@ def test_registry_has_no_palette_or_skin_fields():
     text = (STATIC / 'app.js').read_text(encoding='utf-8')
     block = text[text.index('const THEMES = ['):text.index('const THEME_IDS')]
     assert 'palette:' not in block and 'skin:' not in block, '主题注册表不该再有 palette/skin 两套字段'
+
+
+def test_acceptance_scripts_do_not_write_retired_theme_values():
+    # These assignments silently fell back to paper, making dark coverage false.
+    root = STATIC.parents[3]
+    for name in ('check_n10.cjs', 'check_workflows.cjs', 'check_workbench.cjs'):
+        text = (root / 'tools' / name).read_text(encoding='utf-8')
+        assert not re.search(r"['\"](?:light|dark)['\"]", text), name
+        assert 'dataset.theme =' not in text and 'dataset.theme=' not in text, name

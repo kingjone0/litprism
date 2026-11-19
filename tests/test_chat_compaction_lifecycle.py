@@ -54,6 +54,47 @@ def test_compacted_paper_identity_is_restored_without_replaying_old_answer(env):
     assert kb._con.execute('SELECT active FROM compaction_blocks WHERE id=?',(result.block_id,)).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize('compacted', [False, True])
+def test_outgoing_qa_keeps_valid_history_but_limits_current_evidence(env, monkeypatch, compacted):
+    from litprism.agents import QAAgent
+    from test_chat_context import RecordingLLM
+
+    cfg, kb, _, _ = env
+    encoder, cid, _, _ = paper_history(env)
+    if compacted:
+        compact(cfg, kb, cid)
+    decoder = kb.add_paper(title='Decoder Study', verify_level='verified', material_level='fulltext')
+    kb.add_chunks(decoder, [{'text': 'The decoder uses masked attention.', 'page': 3}])
+    chunk = kb.get_chunks(decoder)[0]
+    kb.append_message(cid, 'user', 'Decoder structure?')
+    kb.append_message(cid, 'assistant', 'DECODER_PRIOR_ANSWER [P1]',
+                      citations=[{'tag': 'P1', 'chunk_id': chunk['id']}],
+                      citation_check={'passed': True}, meta={'status': 'answered'})
+    def search(kb, query, **kwargs):
+        return [dict(chunk, paper_title='Decoder Study', score=1.0)]
+
+    monkeypatch.setattr('litprism.agents.search_local', search)
+    llm = RecordingLLM()
+    llm.answer = 'The decoder uses masked attention. [P1]'
+    agent = QAAgent(kb, cfg, llm)
+
+    def request(**scope):
+        answer = agent.ask('它还有哪些局限？', conversation_id=cid, **scope)
+        assert answer.context_input['parts']['history'] > 0
+        return llm.requests[-1][1]['content']
+
+    old = 'ENCODER_COMPACT_SUMMARY' if compacted else 'ENCODER_OLD_CONCLUSION'
+    assert old in request(strict_scope=False)
+    prompt = request(paper_ids=[decoder], strict_scope=True)
+    from litprism.qa_retrieval import EXCERPT_HEADER, prompt_material
+    evidence = prompt_material(prompt)
+    history = prompt.split('【历史对话，仅供理解追问】', 1)[1].split(EXCERPT_HEADER, 1)[0]
+    assert 'The decoder uses masked attention.' in evidence and 'Compacted Encoder Study' not in evidence
+    assert old in history and 'DECODER_PRIOR_ANSWER' in history
+    kb.update_paper(encoder, verify_level='unchecked')
+    assert old not in request(paper_ids=[decoder], strict_scope=True)
+
+
 def test_later_checkpoint_cannot_hide_history_of_an_earlier_turn(env):
     cfg,kb,_,_ = env
     _,cid,_,reply = paper_history(env)

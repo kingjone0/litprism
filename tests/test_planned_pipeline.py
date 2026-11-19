@@ -23,7 +23,7 @@ def pipeline(tmp_path, monkeypatch):
     kb = KnowledgeBase(cfg)
     pid = kb.add_paper(title='Offline pipeline study', verify_level='verified')
     kb.add_chunks(pid, [
-        {'text': 'Alpha evidence. '*160+'模型得分为71.8。模型使用两个层。', 'page': 1, 'section': '结果'},
+        {'text': 'Alpha evidence. '*160+'本节报告的模型得分为71.8。模型使用两个层。', 'page': 1, 'section': '结果'},
         {'text': 'Beta context. '*160+'实验使用固定测试集。', 'page': 2, 'section': '结果'},
     ])
     llm = OpenAICompatClient(LLMConfig(max_tokens=8192))
@@ -43,9 +43,11 @@ def pipeline(tmp_path, monkeypatch):
             c = request['claims'][0]
             verdict = ('contradicted' if '99.9' in c['text'] else
                        'needs_review' if '未报告' in c['text'] else 'supported')
-            content = {'reviews': [{'id': c['id'], 'verdict': verdict,
-                                   'reason': 'Offline wiring fixture',
-                                   'evidence': [request['sources'][0]['tag']]}]}
+            tag = request['sources'][0]['tag']
+            review = {'id': c['id'], 'verdict': verdict, 'reason': 'Offline wiring fixture', 'evidence': [tag]}
+            if verdict == 'contradicted':
+                review['counterevidence'] = {'tag': tag, 'quote': '本节报告的模型得分为71.8。'}
+            content = {'reviews': [review]}
         else:
             assert task == 'semantic_cross_review'
             content = {'differences': []}
@@ -87,6 +89,7 @@ def test_plan_to_review_to_export_and_human_revoke(pipeline):
     assert '71.8' in markdown and '99.9' not in markdown
     detail = api.get(f'/api/paper/{pid}/semantic').json()
     rejected = next(c for c in report['items'] if c['status'] == 'contradicted')
+    assert rejected['quotes'][0]['quote'] == '本节报告的模型得分为71.8。'
     path = f"/api/paper/{pid}/semantic/{rejected['id']}/review"
     reviewed = api.post(path, json={'analysis_hash': detail['analysis_hash'], 'action': 'confirm',
                         'note': '人工对照原文数值', 'reviewed_text': '模型得分为71.8。'})

@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import re
 
+COMPLETE_PAPER_HEADER = '【完整送达的论文片段】\n'
+COMPLETE_PAPER_END = '\n【完整送达的论文片段结束】'
+EXCERPT_HEADER = '【片段】\n'
+DELIVERY_HEADER = '\n\n【程序送达记录】'
+
 
 def as_excerpts(hits):
     return [dict(tag=f'P{i}', chunk_id=h.get('id'), paper_id=h.get('paper_id'),
@@ -13,6 +18,35 @@ def as_excerpts(hits):
                  trust_level=h.get('trust_level'), dependency_status=h.get('dependency_status'),
                  material_level=h.get('material_level'), acquired_at=h.get('acquired_at'))
             for i, h in enumerate(hits, 1)]
+
+
+def prompt_excerpts(kb, hits, paper_ids, *, reuse_complete):
+    """Keep selected paper order, then sort complete supplemental papers by identity."""
+    delivered = {}
+    for hit in hits:
+        if hit.get('source_kind', 'paper') == 'paper' and hit.get('paper_id'):
+            delivered.setdefault(hit['paper_id'], set()).add(hit['id'])
+    current = {pid: [chunk['id'] for chunk in kb.get_chunks(pid)] for pid in delivered}
+    scoped = {pid: index for index, pid in enumerate(paper_ids or ())}
+    supplemental_rank = len(paper_ids or ())
+    fixed = []
+    if reuse_complete:
+        for pid in sorted(current, key=lambda pid: (scoped.get(pid, supplemental_rank), pid)):
+            if current[pid] and set(current[pid]) == delivered[pid]:
+                fixed.extend(current[pid])
+    fixed_set = set(fixed)
+    by_id = {hit['id']: hit for hit in hits}
+    ordered = [by_id[cid] for cid in fixed] + [hit for hit in hits if hit['id'] not in fixed_set]
+    return as_excerpts(ordered), len(fixed), current
+
+
+def prompt_material(content):
+    """Read source blocks from a saved QA prompt, including the original layout."""
+    complete = ''
+    if content.startswith(COMPLETE_PAPER_HEADER):
+        complete, _, content = content.removeprefix(COMPLETE_PAPER_HEADER).partition(COMPLETE_PAPER_END)
+    tail = content.split(EXCERPT_HEADER, 1)[1].split(DELIVERY_HEADER, 1)[0]
+    return '\n\n---\n\n'.join(part for part in (complete, tail) if part)
 
 
 def source_block(head, tag, text):

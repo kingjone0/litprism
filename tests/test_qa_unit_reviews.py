@@ -17,7 +17,8 @@ def start(env):
                         {'text': 'Section 4 reports eleven tasks. Section 5.3 separately studies NER.', 'page': 2}])
     def response(messages, task='', **kwargs):
         model.calls.append((task, messages))
-        catalog = json.loads(messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n')[1])
+        catalog, _ = json.JSONDecoder().raw_decode(
+            messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n', 1)[1])
         def u(tag, text):
             a = next(a for a in catalog if a['source'] == tag)
             return {'text': text, 'subject': '方法', 'basis': 'direct', 'sources': [tag],

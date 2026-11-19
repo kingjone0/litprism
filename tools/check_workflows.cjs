@@ -92,11 +92,11 @@ const path = require('node:path');
     if (process.env.LITPRISM_UI_OUTPUT) {
       fs.mkdirSync(process.env.LITPRISM_UI_OUTPUT, {recursive:true});
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'semantic-review-light.png')});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.setViewportSize({width:850,height:880});
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'semantic-review-dark-narrow.png')});
       await page.setViewportSize({width:1360,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
     }
     await page.locator('#semanticReview [name=note]').fill('离线验收撤销');
     await page.locator('#semanticReview [value=revoke]').click();
@@ -135,12 +135,40 @@ const path = require('node:path');
     await page.locator('#researchTask [type=submit]').click();
     await expect(page.locator('#scopeChip')).toContainText('全库知识与联网');
     await expect(page.locator('#chatWebSearch')).toHaveCount(0);
+    const contextMeter = page.locator('#chatContextMeter');
+    const contextButton = contextMeter.locator('summary');
+    const contextPanel = contextMeter.locator('.context-meter-panel');
+    await contextButton.click();
+    await expect(contextPanel).toContainText('发送问题后显示');
+    await page.keyboard.press('Escape');
+    await expect(contextPanel).toBeHidden();
+    await expect(contextButton).toBeFocused();
     const defaultRequest = page.waitForRequest(r => r.method()==='POST' && r.url().endsWith('/chat-runs'));
     await page.locator('#chatInput').fill('alphatopic');
     await page.locator('#btnSend').click();
     assert.equal((await defaultRequest).postDataJSON().web_search,true);
     await expect(page.locator('.from-assistant')).toHaveCount(1);
     await expect(page.locator('.from-assistant')).toContainText('offline:acceptance-fixture');
+    await expect(contextButton).toContainText(/%/);
+    await contextButton.click();
+    await expect(contextPanel).toContainText('最近一次请求');
+    await expect(contextPanel).toContainText('本轮证据');
+    await expect(contextPanel.locator('dd')).toHaveCount(4);
+    const openedContext = await contextPanel.innerText();
+    if (process.env.LITPRISM_UI_OUTPUT) {
+      await expect(page.locator('#toasts .toast')).toHaveCount(0);
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-context-light.png'), animations:'disabled'});
+    }
+    await page.evaluate(() => { S.theme='paper-dark'; applyTheme(); });
+    await page.setViewportSize({width:430,height:780});
+    await expect(contextPanel).toBeInViewport({ ratio:1 });
+    if (process.env.LITPRISM_UI_OUTPUT) {
+      await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-context-dark-narrow.png'), animations:'disabled'});
+    }
+    await page.locator('#chatInput').click();
+    await expect(contextPanel).toBeHidden();
+    await page.setViewportSize({width:1360,height:880});
+    await page.evaluate(() => { S.theme='paper'; applyTheme(); });
     await expect(page.locator('.chat-reasoning')).toHaveCount(1);
     await page.locator('.chat-reasoning summary').click();
     await expect(page.locator('.chat-reasoning pre')).toHaveText('<script>thinking_ui_marker</script>');
@@ -177,6 +205,21 @@ const path = require('node:path');
     await expect(page.locator('#inspSources')).toContainText('论文原文');
     await page.reload();
     await page.locator(`[data-conv="${auditConv}"]`).click();
+    await contextButton.click();
+    await expect(contextPanel).toContainText('最近一次请求');
+    assert.notEqual(await contextPanel.innerText(), openedContext);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#scopeChip')).toHaveAttribute('title', '按其他范围新建对话');
+    await page.locator('#scopeChip').click();
+    await expect(page.locator('#researchTask')).toContainText('按其他范围新建对话');
+    await page.locator('#researchTask [name=scope]').selectOption('p:' + process.env.LITPRISM_ACCEPTANCE_SEED);
+    await page.locator('#researchTask [type=submit]').click();
+    await expect(page.locator('#chatInput')).not.toHaveAttribute('data-conv-id', auditConv);
+    await expect(page.locator('#scopeChip')).toContainText('仅限：');
+    await expect(page.locator('.from-assistant')).toHaveCount(0);
+    await expect(page.locator('#scopeChip')).toHaveAttribute('title', '设置对话范围');
+    await page.locator(`[data-conv="${auditConv}"]`).click();
+    await expect(page.locator('.from-assistant')).toHaveCount(2);
     await expect(page.locator('.from-assistant').last().locator('.answer-sources [data-evidence-ref]')).toHaveCount(1);
     await page.locator('#chatInput').fill('alphatopic invalidcitationmarker');
     await page.locator('#btnSend').click();
@@ -202,11 +245,11 @@ const path = require('node:path');
     await page.locator('#chatReviewForm [name=reviewed_text]').fill('经人工核对的原文说明。[P1]');
     if (process.env.LITPRISM_UI_OUTPUT) {
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-review-light.png')});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.setViewportSize({width:850,height:880});
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-review-dark-narrow.png')});
       await page.setViewportSize({width:1360,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
     }
     await page.locator('#chatReviewForm [value=confirm]').click();
     await expect(page.locator('#chatReviewForm [value=confirm]')).toHaveText('已确认入库');
@@ -236,11 +279,11 @@ const path = require('node:path');
       await expect(page.locator('#inspSources')).toContainText('did not use TriviaQA');
       await expect(page.locator('#toasts .toast')).toHaveCount(0);
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-guard-light.png')});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.setViewportSize({width:850,height:880});
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-guard-dark-narrow.png')});
       await page.setViewportSize({width:1360,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
     }
     // Numeric/condition mismatch uses the same held draft and stable sources.
     await page.keyboard.press('Escape');
@@ -285,7 +328,7 @@ const path = require('node:path');
     await expect(page.locator('#chatReviewForm [name=source_tags]:checked')).toHaveCount(0);
     if (process.env.LITPRISM_UI_OUTPUT) {
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'claim-map-light.png')});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.setViewportSize({width:850,height:880});
       // Theme switches animate for 120ms; inspect the settled colors, not the transient frame.
       await expect.poll(() => page.locator('.qa-claim-map .btn').first().evaluate(el => {
@@ -301,7 +344,7 @@ const path = require('node:path');
       assert.equal(await page.locator('.qa-claim-map').evaluate(el => el.scrollWidth > el.clientWidth), false);
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'claim-map-dark-narrow.png'), animations:'disabled'});
       await page.setViewportSize({width:1360,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
     }
     // 本轮外部证据可引用；确认后在同一重点会话重新检索，撤销上游则失效。
     await page.locator('#chatInput').fill('alphatopic mixedwebmarker');
@@ -334,11 +377,11 @@ const path = require('node:path');
     if (process.env.LITPRISM_UI_OUTPUT) {
       await expect(page.locator('#inspSources')).toContainText('搜索摘要获取时间');
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT,'mixed-evidence-light.png')});
-      await page.evaluate(() => document.documentElement.dataset.theme='dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.setViewportSize({width:850,height:880});
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT,'mixed-evidence-dark-narrow.png'),animations:'disabled'});
       await page.setViewportSize({width:1360,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme='light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
     }
     await page.locator('#evidenceReview [name=note]').fill('撤回上游依据，检验派生知识停止引用。');
     await page.locator('#evidenceReview [value=reject]').click();
@@ -565,10 +608,10 @@ const path = require('node:path');
     await expect(card.locator('[data-model-max-output]')).toHaveText('384,000 token');
     if (output) {
       await page.setViewportSize({width:1360,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
       await page.screenshot({path:path.join(output, 'model-capacity-light.png')});
       await page.setViewportSize({width:850,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.screenshot({path:path.join(output, 'model-capacity-dark-narrow.png')});
     }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -631,10 +674,10 @@ const path = require('node:path');
     await page.locator('[data-ptab=text]').click();
     await expect(page.locator('#paperTextBody')).toContainText('originalmarker');
     if (output) {
-      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
       await page.screenshot({path:path.join(output, 'material-history-light.png')});
       await page.setViewportSize({width:850,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.screenshot({path:path.join(output, 'material-history-dark-narrow.png')});
     }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -670,11 +713,11 @@ const path = require('node:path');
     await expect(page.locator('#chatRunPanel')).toContainText('用量未知');
     if (process.env.LITPRISM_UI_OUTPUT) {
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-runs-light.png')});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.setViewportSize({width:850,height:880});
       await page.screenshot({path:path.join(process.env.LITPRISM_UI_OUTPUT, 'chat-runs-dark-narrow.png')});
       await page.setViewportSize({width:1360,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
     }
     await page.locator('[data-chat-resume][data-retry=true]').click();
     await expect(page.locator('.from-assistant')).toHaveCount(2);
@@ -694,7 +737,7 @@ const path = require('node:path');
     await page.locator('#backupFile').setInputFiles(await backupDownload.path());
     await expect(page.locator('#backupPreview')).toContainText('校验通过');
     if (output) {
-      await page.evaluate(() => document.documentElement.dataset.theme = 'light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
       await page.locator('#settingsPanes').evaluate(el => { el.scrollTop = 0; });
       await page.screenshot({path:path.join(output, 'backup-preview-light.png')});
     }
@@ -711,7 +754,7 @@ const path = require('node:path');
     assert.equal((await page.evaluate(() => api('/api/backups/status'))).requires_restart, false);
     if (output) {
       await page.setViewportSize({width:850,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.locator('#backupActivate').scrollIntoViewIfNeeded();
       await page.screenshot({path:path.join(output, 'backup-switch-dark-narrow.png')});
     }
@@ -844,13 +887,13 @@ const path = require('node:path');
     assert.equal(evidenceState.original_evidence.length, 1);
     assert.equal(evidenceState.reviews[0].evidence_snapshot.length, 2);
     if (output) {
-      await page.evaluate(() => {document.documentElement.dataset.theme='light';document.querySelector('#inspSources').scrollTop=0;});
+      await page.evaluate(() => {S.theme='paper';applyTheme();document.querySelector('#inspSources').scrollTop=0;});
       await page.screenshot({path:path.join(output,'unit-review-light.png'),animations:'disabled'});
-      await page.evaluate(() => document.documentElement.dataset.theme='dark');
+      await page.evaluate(() => {S.theme='paper-dark';applyTheme();});
       await page.setViewportSize({width:850,height:880});
       await page.screenshot({path:path.join(output,'unit-review-dark-narrow.png'),animations:'disabled'});
       await page.setViewportSize({width:1360,height:880});
-      await page.evaluate(() => document.documentElement.dataset.theme='light');
+      await page.evaluate(() => {S.theme='paper';applyTheme();});
     }
     await page.locator('#chatInput').fill('unitknowledgefollowmarker');
     await page.locator('#btnSend').click();

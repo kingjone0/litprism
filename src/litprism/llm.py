@@ -12,10 +12,10 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any
 
 try:
@@ -124,32 +124,54 @@ def _review_connect_timeout(default: int = 10) -> int:
         return default
 
 
-def output_allocation(cfg: LLMConfig, messages: list[dict], *, meter=None) -> dict:
-    """Allocate from model capacity and the complete, estimated input envelope.
-
-    There is no user task ceiling in automatic mode. A 5% input-estimation
-    margin (at least 256 tokens) covers formatting/tokenizer uncertainty. This
-    is an estimate, not a promise that every provider will accept the request.
-    """
+def estimate_request_tokens(messages: list[dict], *, meter=None) -> int:
     from .context.meter import Meter
     meter = meter or Meter()
-    estimated = sum(meter.estimate_message(m) for m in messages) + 8
-    margin = max(256, math.ceil(estimated * .05))
-    ceiling = cfg.model_max_output_tokens
-    window = cfg.model_window_tokens
-    if not cfg.automatic_output or not ceiling or not window:
+    return sum(meter.estimate_message(m) for m in messages) + 8
+
+
+@dataclass(frozen=True)
+class RequestBudget:
+    window: int
+    output_ceiling: int
+    safety_percent: int
+
+    def input_safety(self, estimated: int) -> int:
+        return max(256, (estimated * self.safety_percent + 99) // 100)
+
+    def input_limit(self, output_reserve: int) -> int:
+        """Invert the same margin used at dispatch, including its token floor."""
+        available = self.window - output_reserve
+        return max(0, min(available - 256, available * 100 // (100 + self.safety_percent)))
+
+
+def request_budget(cfg: LLMConfig, *, protocol=None, task=None) -> RequestBudget | None:
+    if not cfg.automatic_output or not cfg.model_max_output_tokens or not cfg.model_window_tokens:
+        return None
+    from .model_limits import input_safety_percent
+    return RequestBudget(cfg.model_window_tokens, cfg.model_max_output_tokens,
+                         input_safety_percent(cfg.effective_base_url, cfg.effective_model, protocol, task))
+
+
+def output_allocation(cfg: LLMConfig, messages: list[dict], *, meter=None, protocol=None, task=None) -> dict:
+    """Allocate from model capacity and an estimate of the complete request."""
+    estimated = estimate_request_tokens(messages, meter=meter)
+    budget = request_budget(cfg, protocol=protocol, task=task)
+    if budget is None:
         return {'max_tokens': cfg.max_tokens, 'output_mode': 'legacy_unknown_capability',
                 'estimated_input_tokens': estimated}
-    remaining = window - estimated - margin
+    margin = budget.input_safety(estimated)
+    remaining = budget.window - estimated - margin
     if remaining <= 0:
         raise ContextWindowError('完整请求估算已占满模型上下文，未发送模型请求。')
-    return {'max_tokens': min(ceiling, remaining), 'output_mode': 'automatic',
+    return {'max_tokens': min(budget.output_ceiling, remaining), 'output_mode': 'automatic',
             'estimated_input_tokens': estimated, 'input_safety_tokens': margin,
-            'model_window_tokens': window, 'model_max_output_tokens': ceiling}
+            'model_window_tokens': budget.window, 'model_max_output_tokens': budget.output_ceiling}
 
 
 class OpenAICompatClient:
     supports_semantic_review = True
+    protocol = 'openai'
     def __init__(self, cfg: LLMConfig):
         if requests is None:
             raise LLMError("缺少 requests 依赖：python -m pip install requests")
@@ -169,7 +191,8 @@ class OpenAICompatClient:
             "temperature": self.cfg.temperature if temperature is None else temperature,
             "max_tokens": self.cfg.max_tokens if max_tokens is None else max_tokens,
         }
-        allocation = output_allocation(self.cfg, messages, meter=getattr(self, 'meter', None))
+        allocation = output_allocation(self.cfg, messages, meter=getattr(self, 'meter', None),
+                                       protocol=self.protocol, task=task)
         if self.cfg.automatic_output:
             payload['max_tokens'] = allocation['max_tokens']
         if self.cfg.model_max_output_tokens:
@@ -537,6 +560,8 @@ class AnthropicClient:
     返回结构是 content 数组。
     """
 
+    protocol = 'anthropic'
+
     def __init__(self, cfg: LLMConfig):
         if requests is None:
             raise LLMError("缺少 requests 依赖：python -m pip install requests")
@@ -571,7 +596,8 @@ class AnthropicClient:
             payload["system"] = "\n\n".join(system_parts)
         if on_delta is not None:
             payload['stream'] = True
-        allocation = output_allocation(self.cfg, messages, meter=getattr(self, 'meter', None))
+        allocation = output_allocation(self.cfg, messages, meter=getattr(self, 'meter', None),
+                                       protocol=self.protocol, task=task)
         if self.cfg.automatic_output:
             payload['max_tokens'] = allocation['max_tokens']
         if self.cfg.model_max_output_tokens:

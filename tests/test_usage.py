@@ -38,9 +38,9 @@ class TestNormalize:
             "input_tokens": 500, "output_tokens": 100,
             "cache_read_input_tokens": 400, "cache_creation_input_tokens": 100,
         })
-        assert n["input"] == 500 and n["output"] == 100
-        assert n["cache_hit"] == 400 and n["cache_miss"] == 100
-        assert n["cached_ratio"] == 0.8
+        assert n["input"] == 1000 and n["output"] == 100
+        assert n["cache_hit"] == 400 and n["cache_miss"] == 600
+        assert n["cached_ratio"] == 0.4
 
     def test_no_cache_fields_gives_none(self):
         """⭐ 没报缓存 → None，不是 0。"""

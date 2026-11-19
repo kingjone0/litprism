@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from .config import Config
@@ -37,6 +38,8 @@ class QAAnswer:
     warnings: list[str] = field(default_factory=list)
     provider_usage: dict | None = None
     request_tokens: int = 0
+    context_input: dict | None = None
+    auto_compact: dict | None = None
     reasoning: str = ''
     request_settings: dict = field(default_factory=dict)
     status: str = 'answered'
@@ -70,6 +73,7 @@ class QAAnswer:
             "warnings": self.warnings,
             'provider_usage': self.provider_usage,
             'request_tokens': self.request_tokens,
+            'context_input': self.context_input,
             'reasoning': self.reasoning,
             'request_settings': self.request_settings,
             'status': self.status,
@@ -102,10 +106,13 @@ class QAAgent:
         before_seq: int | None = None,
         strict_scope: bool = True,
         external: tuple | list = (),
+        compact_history=None,
     ) -> QAAnswer:
         from .context.dialogue import HISTORY_GUARD, DialogueContext, build_dialogue
         from .context.meter import Meter
-        from .usage import TrackedClient, UsageTracker
+        from .config import LLMConfig
+        from .llm import estimate_request_tokens, request_budget
+        from .usage import TrackedClient, UsageTracker, normalize_usage
 
         tracker = UsageTracker()
         client = TrackedClient(self.llm, tracker)
@@ -115,6 +122,19 @@ class QAAgent:
             return res
         dialogue = build_dialogue(self.kb, self.cfg, conversation_id, before_seq) if conversation_id else DialogueContext()
         meter = Meter(self.cfg)
+        input_limit = self.cfg.context.available_tokens
+        budget = request_budget(getattr(self.llm, 'cfg', self.cfg.llm),
+                                protocol=getattr(self.llm, 'protocol', None), task='qa')
+        if budget is not None:
+            # Preserve the nominal input share for full evidence. Near the
+            # window edge, let the uncertainty use some of the output share,
+            # while retaining room for an ordinary response or a smaller model ceiling.
+            output_reserve = min(budget.output_ceiling, LLMConfig.max_tokens)
+            input_limit = min(input_limit, budget.input_limit(output_reserve))
+
+        def request_cost(messages):
+            return estimate_request_tokens(messages, meter=meter)
+
         def freeze_refusal(outcome, request):
             if conversation_id:
                 from .memory.view import TurnViewStore
@@ -122,50 +142,58 @@ class QAAgent:
                     **dialogue.memory.read_refs(), 'question': question, 'request': request,
                     'outcome': outcome, 'model': getattr(self.llm, 'name', 'unknown'),
                     'preferences': [m.to_dict() for m in dialogue.memory.resident]})
-        if meter.estimate_text(question) > self.cfg.context.available_tokens // 2:
+        if meter.estimate_text(question) > input_limit // 2:
             freeze_refusal('question_over_budget', [])
             res.answer, res.status = '问题过长，请缩短后重试。', 'budget_exceeded'
             res.insufficient_evidence, res.confidence = True, 'none'
             return finish()
         top_k = top_k or self.cfg.retrieval.top_k
-        from .qa_retrieval import as_excerpts, material_text, retrieve
+        from .qa_retrieval import (
+            COMPLETE_PAPER_END, COMPLETE_PAPER_HEADER, DELIVERY_HEADER, EXCERPT_HEADER,
+            material_text, prompt_excerpts, retrieve,
+        )
         from .qa_evidence import manifest, material_risks
         scope = '全库可引用论文与人工确认知识，以及本轮取得的外部证据（如有；保留类型与审核状态）'
-        delivery = {}
         if paper_ids:
             titles = [self.kb.get_paper(p) for p in paper_ids]
             scope = ('仅限指定论文：' if strict_scope else '重点论文（同时补充相关可信知识及本轮外部证据）：')+'、'.join(truncate(t['title'], 40) for t in titles if t)
-        def messages_for(excerpts, history=''):
-            import json
-            nonlocal delivery
-            delivery = manifest(self.kb, excerpts)
-            system = QA_SYSTEM+'\n\n'+HISTORY_GUARD+'\n\n'+dialogue.memory.prompt_block()
-            if any(e.get('source_kind') != 'paper' for e in excerpts):
-                system += '\n部分片段为人工确认知识或本轮搜索摘要。必须按程序标记区分来源/审核状态；搜索摘要未必经人工审核，不能称为网页正文或核验论文。'
-            # Keep source bytes before changing history/question for caching.
-            content = (f'检索范围：{scope}\n\n【片段】\n'+material_text(excerpts)
-                       +'\n\n【程序送达记录】\n'+json.dumps(delivery, ensure_ascii=False)
-                       +'\n\n'+history+f'\n\n【问题】{question}\n\n'
-                       +'请仅依据上述片段作答，并在每条结论后只标注片段编号（如 [P1]），不生成页码；来源链接由程序展示真实页码。'
-                       +'未提供的论文或章节不能声称已读完，题录/摘要不等于全文。'
-                       +'证据不足应明确拒答，不能依据历史回答补事实。')
-            if not self.cfg.qa.evidence_anchor_trial:
-                content += '\n'+QA_QUOTE_CHECK
-            if self.cfg.qa.evidence_anchor_trial:
+        system = QA_SYSTEM+'\n\n'+HISTORY_GUARD
+        system += ('\n来源按程序标记区分类型和审核状态。搜索摘要可能未经人工审核，不能称为网页正文或核验论文。')
+        anchors_enabled = self.cfg.qa.evidence_anchor_trial
+        if anchors_enabled:
+            system += ('\n本轮开启原文锚点小范围试验。回答使用answer_units，每项保留text/subject/basis/sources结构；'
+                       'answer_units各项原文quotes优先只选择本轮目录中该来源的anchor_id，形如'
+                       '{"source":"P1","anchor_id":"qa_…"}，不要再复制quote。'
+                       '原文由程序按材料版本和字符范围回填，不得发明锚点或引用其他来源的锚点。'
+                       '程序记录仍使用metadata及实际完整字段。锚点位置正确不代表能支持陈述。'
+                       '优先选择覆盖实际依据的短句/短段锚点；需要多句或多个片段时分别列出各自锚点，'
+                       '不得把邻近内容自动当成依据，短段边界不认证语义完整。')
+        preferences = dialogue.memory.prompt_block()
+        task = (f'【问题】{question}\n\n'
+                '请仅依据上述片段作答，并在每条结论后只标注片段编号（如 [P1]），不生成页码；来源链接由程序展示真实页码。'
+                '未提供的论文或章节不能声称已读完，题录/摘要不等于全文。'
+                '证据不足应明确拒答，不能依据历史回答补事实。')
+        if not anchors_enabled:
+            task += '\n'+QA_QUOTE_CHECK
+
+        def messages_for(candidates, history=''):
+            excerpts, fixed_count, current = prompt_excerpts(
+                self.kb, candidates, paper_ids, reuse_complete=bool(self.cfg.llm.model_window_tokens),
+            )
+            delivery = manifest(self.kb, excerpts, current_chunks=current)
+            fixed = COMPLETE_PAPER_HEADER+material_text(excerpts[:fixed_count])+COMPLETE_PAPER_END if fixed_count else ''
+            dynamic = EXCERPT_HEADER+material_text(excerpts[fixed_count:])
+            dynamic += DELIVERY_HEADER+'\n'+json.dumps(delivery, ensure_ascii=False)
+            if anchors_enabled:
                 from .qa_anchors import catalog
-                content += '\n\n【试验定位锚点（程序生成，不是语义结论）】\n'+json.dumps(catalog(excerpts), ensure_ascii=False)
-                system += ('\n本轮开启原文锚点小范围试验。回答使用answer_units，每项保留text/subject/basis/sources结构；'
-                           'answer_units各项原文quotes优先只选择本轮目录中该来源的anchor_id，形如'
-                           '{"source":"P1","anchor_id":"qa_…"}，不要再复制quote。'
-                           '原文由程序按材料版本和字符范围回填，不得发明锚点或引用其他来源的锚点。'
-                           '程序记录仍使用metadata及实际完整字段。锚点位置正确不代表能支持陈述。')
-                system += ('优先选择覆盖实际依据的短句/短段锚点；需要多句或多个片段时分别列出各自锚点，'
-                           '不得把邻近内容自动当成依据，短段边界不认证语义完整。')
-            return [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]
+                dynamic += '\n\n【试验定位锚点（程序生成，不是语义结论）】\n'+json.dumps(catalog(excerpts), ensure_ascii=False)
+            content = '\n\n'.join(filter(None, (fixed, history, dynamic, f'检索范围：{scope}', preferences, task)))
+            messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]
+            return messages, excerpts, delivery, (fixed, dynamic)
         from .context.dialogue import is_followup
         hits, res.retrieval = retrieve(self.kb, question, dialogue.query(question, paper_ids), paper_ids=paper_ids,
                                       top_k=top_k, llm=client, search=search_local, cfg=self.cfg,
-                                      fits_full=lambda hs: sum(meter.estimate_message(m) for m in messages_for(as_excerpts(hs)))+8 <= self.cfg.context.available_tokens,
+                                      fits_full=lambda hs: request_cost(messages_for(hs)[0]) <= input_limit,
                                       prior_refs=dialogue.evidence_refs if is_followup(question) else (),
                                       strict_scope=strict_scope, external=external)
 
@@ -183,14 +211,10 @@ class QAAgent:
                 TurnViewStore(self.kb).freeze(conversation_id, read_refs={'request': [], 'outcome': 'no_evidence', 'question': question})
             return finish()
 
-        excerpts = as_excerpts(hits)
-        res.excerpts = excerpts
-        material = material_text(excerpts)
-        messages = messages_for(excerpts)
+        messages, excerpts, delivery, evidence_sections = messages_for(hits)
 
-        meter = Meter(self.cfg)
-        while sum(meter.estimate_message(m) for m in messages) + 8 > self.cfg.context.available_tokens:
-            if len(excerpts) <= 1:
+        while request_cost(messages) > input_limit:
+            if len(hits) <= 1:
                 res.answer = '当前上下文预算不足以容纳问题与原文证据，请缩小范围或增加窗口预算。'
                 res.insufficient_evidence = True
                 res.excerpts = []
@@ -198,13 +222,19 @@ class QAAgent:
                 res.status = 'budget_exceeded'
                 freeze_refusal('evidence_over_budget', messages)
                 return finish()
-            excerpts.pop()
-            material = material_text(excerpts)
-            messages = messages_for(excerpts)
-        remaining = max(0, self.cfg.context.available_tokens - sum(meter.estimate_message(m) for m in messages) - 8)
+            hits.pop()
+            messages, excerpts, delivery, evidence_sections = messages_for(hits)
+        # The base and history are rounded separately, so allow for joining them.
+        remaining = max(0, input_limit - request_cost(messages) - 1)
         history, history_refs = dialogue.prompt(meter, remaining)
+        if compact_history and remaining and len(history_refs) < len(dialogue.history):
+            res.auto_compact = compact_history(dialogue, remaining)
+            if res.auto_compact:
+                dialogue = build_dialogue(self.kb, self.cfg, conversation_id, before_seq,
+                                          checkpoint_ref=res.auto_compact['checkpoint_ref'])
+                history, history_refs = dialogue.prompt(meter, remaining)
         if history:
-            messages = messages_for(excerpts, history)
+            messages, excerpts, delivery, evidence_sections = messages_for(hits, history)
         from copy import deepcopy
         attempts = []
         error = None
@@ -227,12 +257,12 @@ class QAAgent:
                     break
                 if history:
                     history, history_refs = '', []
-                elif len(excerpts) > 1:
-                    excerpts.pop()
-                    material = material_text(excerpts)
+                elif len(hits) > 1:
+                    hits.pop()
                 else:
                     break
-                messages = messages_for(excerpts, history)
+                messages, excerpts, delivery, evidence_sections = messages_for(hits, history)
+        res.excerpts = excerpts
         res.request_tokens = sum(meter.estimate_message(m) for m in messages)
         res.retrieval.update(delivered_chunks=len(excerpts),
                              delivered_chunk_ids=[e['chunk_id'] for e in excerpts],
@@ -244,6 +274,25 @@ class QAAgent:
         res.retrieval['full_material_paper_ids'] = [p['paper_id'] for p in delivery['papers']
                                                   if p['complete_current_material']]
         res.provider_usage = getattr(self.llm, 'last_usage', None) if error is None else None
+        if error is None:
+            system_tokens = meter.estimate_message(messages[0])
+            history_tokens = meter.estimate_text(history)
+            evidence_tokens = meter.estimate_text(''.join(evidence_sections))
+            provider_usage = res.provider_usage or {}
+            provider_input = provider_usage.get('prompt_tokens', provider_usage.get('input_tokens'))
+            res.context_input = {
+                'model': res.model,
+                'window_tokens': self.cfg.context.window_tokens,
+                'estimated_tokens': res.request_tokens,
+                'provider_input_tokens': (normalize_usage(provider_usage)['input']
+                                          if type(provider_input) is int and provider_input >= 0 else None),
+                'parts': {
+                    'system': system_tokens,
+                    'history': history_tokens,
+                    'evidence': evidence_tokens,
+                    'question': res.request_tokens - system_tokens - history_tokens - evidence_tokens,
+                },
+            }
         res.reasoning = getattr(self.llm, 'last_reasoning', '') if error is None else ''
         res.request_settings = dict(getattr(self.llm, 'last_request_settings', {}) or {})
         if conversation_id:
@@ -255,7 +304,7 @@ class QAAgent:
                            'request': messages, 'request_attempts': attempts, 'model': res.model,
                            'outcome': 'error' if error else 'submitted',
                            'preferences': [m.to_dict() for m in dialogue.memory.resident]},
-                retrieved_tokens=meter.estimate_text(material),
+                retrieved_tokens=meter.estimate_text(material_text(excerpts)),
             )
         if error:
             from .llm import safe_failure
@@ -311,7 +360,16 @@ class QAAgent:
                 res.answer = '回答的证据归属存在疑点，已隔离生成草稿。请核对原文后再判断。\n'+' '.join(refs)
                 res.open_questions, res.evidence_map = [], []
             elif res.insufficient_evidence:
-                res.status = 'refused'
+                from .qa_answer import partial_availability
+                availability = partial_availability(res.evidence_audit)
+                if availability:
+                    # Keep the immutable raw flag/answer in the journal. This
+                    # describes available body text, not question completeness
+                    # or semantic support. Existing source/risk guards ran first.
+                    res.evidence_audit['answer_availability'] = availability
+                    res.insufficient_evidence = False
+                else:
+                    res.status = 'refused'
         return finish()
 
     def _check_citations(self, res: QAAnswer) -> None:
@@ -347,16 +405,21 @@ class CompareAgent:
     def compare(self, refs: list[str], *, aspects: list[str] | None = None) -> dict:
         papers = []
         missing = []
+        seen = set()
         for r in refs:
             p = self.kb.resolve_paper(r)
             if p:
-                papers.append(p)
+                if p['id'] not in seen:
+                    papers.append(p)
+                    seen.add(p['id'])
             else:
                 missing.append(r)
+        if missing:
+            raise ValueError(f"所选论文不存在或无法识别，请重新选择：{missing}")
         if len(papers) < 2:
-            raise ValueError(f"需要至少 2 篇可识别的论文，当前识别到 {len(papers)} 篇；未找到：{missing}")
+            raise ValueError(f"需要至少 2 篇不同的可识别论文，当前识别到 {len(papers)} 篇。")
 
-        from .comparison import check_comparison
+        from .comparison import check_comparison, source_issues
         from .evidence import require_citable
         from .prompts import SYSTEM_ACADEMIC
         from .reading import build_messages, excerpt_context, reading_batches
@@ -365,6 +428,7 @@ class CompareAgent:
         system = SYSTEM_ACADEMIC + "\n仅比较给定原文，不使用先前解读作为事实。维度缺信息写未提及。输出 JSON：summary, dimensions（每项 dimension, values，键为 D1/D2 等论文编号）, convergence, divergence, evidence_map。每个非空学术结论标注 [P# p.N]，P 是原文片段编号；无页码来源不写页码。"
         system += '\n严格使用以下结构：{"summary":"结论 [P1 p.3]","dimensions":[{"dimension":"方法","values":{"D1":"方法 [P1 p.3]","D2":"方法 [P2 p.3]"}}],"convergence":["一致点 [P1 p.3][P2 p.3]"],"divergence":["差异 [P1 p.3][P2 p.3]"],"evidence_map":[{"claim":"结论","sources":["P1 p.3","P2 p.3"]}]}。这里页码仅为格式示例，必须替换为实际页码。convergence、divergence、sources 必须是字符串数组，无结论则用空数组。'
         instruction = '仅比较本批原文，未读取的部分不能写成原文未提及。'
+        instruction += '\n每个 D# 单元格只描述该论文。描述缺项时明确说「D# 的已提供材料未说明」，不要用不指明论文的「本批未提及」。'
         if aspects:
             instruction += '\n关注维度：' + '、'.join(aspects)
         batches, excerpts, coverage = reading_batches(self.kb, self.cfg, papers, system, instruction)
@@ -407,8 +471,9 @@ class CompareAgent:
             for key in ('convergence', 'divergence'):
                 fields.extend((key, text, []) for text in result.get(key) or [])
             inputs.append((fields, batch))
+        issues.extend(source_issues(self.kb, excerpts))
         if not issues:
-            semantic = run_review(inputs, excerpts, self.cfg, self.llm, tracker=tracker)
+            semantic = run_review(inputs, excerpts, self.cfg, self.llm, tracker=tracker, comparison=True)
             data['_semantic_review'] = semantic
             if semantic['status'] != 'not_run':
                 safe = supported_fields(semantic)
@@ -424,21 +489,16 @@ class CompareAgent:
         data['_coverage'] = coverage
         coverage['usage'] = tracker.to_dict()
         data['_citation_check'] = {'passed': not issues, 'issues': issues}
-        from .evidence import citations_for, stored_excerpts
+        from .evidence import citations_for
         data['_citations'] = citations_for(excerpts)
-        try:
-            stored_excerpts(self.kb, data['_citations'])
-        except ValueError as exc:
-            issues.append(str(exc))
-            data['_citation_check'] = {'passed': False, 'issues': issues}
+        issues = list(dict.fromkeys(issues + source_issues(self.kb, excerpts)))
+        data['_citation_check'] = {'passed': not issues, 'issues': issues}
         data['_model'] = getattr(self.llm, 'name', 'unknown')
         data['_papers'] = [{'tag': f'D{i}', 'id': p['id'], 'title': p['title']} for i, p in enumerate(papers, 1)]
         data['_coverage']['reading_mode'] = 'whole' if len(batches) == 1 else 'batched'
         if issues:
             data = {k: v for k, v in data.items() if k.startswith('_')}
             data['summary'] = '引用校验未通过，已阻止展示无法回溯的对比结论。'
-        if missing:
-            data['_missing'] = missing
         if data.get('_semantic_review', {}).get('status') not in (None, 'not_run'):
             import json
             import uuid
@@ -446,18 +506,23 @@ class CompareAgent:
             from .knowledge import now
             data['_semantic_run_id'] = 'sm_'+uuid.uuid4().hex[:12]
             with self.kb.tx() as con:
-                stored_excerpts(self.kb, data['_citations'])
+                changed = source_issues(self.kb, excerpts)
+                if changed:
+                    raise ValueError('；'.join(changed))
                 con.execute('INSERT INTO semantic_runs VALUES (?,?,?,?)',
                             (data['_semantic_run_id'], '跨论文对比', json.dumps(data, ensure_ascii=False), now()))
         return data
 
 
 def render_comparison(data: dict) -> str:
+    def cell(value):
+        return ' '.join(str(value).splitlines()).replace('\\', '\\\\').replace('|', '\\|')
+
     papers = data.get("_papers") or []
     lines = ["# 论文对比分析", ""]
     semantic = data.get('_semantic_review') or {}
     lines += ['> '+(semantic.get('note') or '尚未运行整体语义核查。引用存在不等于语义正确。'),
-              f"> 待核对陈述：{semantic.get('pending', '未知')}；待核对项不作为正常结论导出。", '']
+              f"> 生成时待核对陈述：{semantic.get('pending', '未知')}；人工审核另存。", '']
     if data.get("summary"):
         lines += ["## 总体结论", str(data["summary"]), ""]
 
@@ -466,14 +531,18 @@ def render_comparison(data: dict) -> str:
         tags = [p["tag"] for p in papers] or sorted(
             {k for d in dims for k in (d.get("values") or {})}
         )
-        header = "| 维度 | " + " | ".join(tags) + " |"
+        titles = {p['tag']: p['title'] for p in papers}
+        pending_fields = {u['field'] for u in semantic.get('items', []) if u['status'] != 'machine_supported'}
+        header = "| 维度 | " + " | ".join(cell(f'{t} · {titles[t]}' if t in titles else t) for t in tags) + " |"
         sep = "|" + "---|" * (len(tags) + 1)
         lines += [header, sep]
         for d in dims:
             vals = d.get("values") or {}
-            row = [str(d.get("dimension", ""))]
+            dimension = d.get('dimension', '')
+            row = [cell(dimension)]
             for t in tags:
-                row.append(str(vals.get(t, "未提及")).replace("\n", " "))
+                missing = '待核对' if f'dimension|{dimension}|{t}' in pending_fields else '未提及'
+                row.append(cell(vals.get(t) or missing))
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
 

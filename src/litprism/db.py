@@ -783,6 +783,13 @@ class KnowledgeBase:
         return {"id": mid, "seq": seq, "ref": ref, "role": role, "content": content, "kind": kind}
 
     @_locked
+    def conversation_scope_locked(self, conversation_id: str) -> bool:
+        return self._con.execute(
+            "SELECT 1 FROM messages WHERE conversation_id=? AND role IN ('user','assistant') "
+            "AND kind!='compact-checkpoint' LIMIT 1", (conversation_id,),
+        ).fetchone() is not None
+
+    @_locked
     def get_messages(self, conversation_id: str, *, limit: int | None = None) -> list[dict]:
         sql = (
             "SELECT seq, ref, role, content, citations, citation_check, kind, shadowed_refs,"

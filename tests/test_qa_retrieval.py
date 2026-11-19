@@ -209,7 +209,13 @@ def test_known_window_scoped_paper_delivers_full_material_with_stable_prefix(env
 
 def test_full_material_that_does_not_fit_uses_retrieval_without_losing_scope(env):
     cfg, kb, model, _ = env
-    cfg.llm.model_window_tokens = cfg.context.window_tokens = 4500
+    from litprism.context.meter import Meter
+    from litprism.prompts import QA_SYSTEM, QA_QUOTE_CHECK
+    # Fit a small retrieval plus the current protocol, but not the whole 19-chunk
+    # paper. A fixed 4500 accidentally became a no-excerpt-fits test as the
+    # system contract grew; that is a different boundary.
+    cfg.llm.model_window_tokens = cfg.context.window_tokens = (
+        Meter(cfg).estimate_text(QA_SYSTEM + QA_QUOTE_CHECK) + 3000)
     cfg.context.output_reserve_tokens = 1000
     pid = paper(kb)
     kb.add_chunks(pid, [{'text': 'alpha '+('large '*500), 'page': n} for n in range(1, 20)])
@@ -217,6 +223,7 @@ def test_full_material_that_does_not_fit_uses_retrieval_without_losing_scope(env
     result = QAAgent(kb, cfg, model).ask('alpha', paper_ids=[pid], top_k=1)
     assert result.retrieval['full_material_considered'] and not result.retrieval['full_material_fits']
     assert result.retrieval['mode'] == 'passages'
+    assert result.status != 'budget_exceeded' and 0 < len(result.excerpts) < len(kb.get_chunks(pid))
     assert {e['paper_id'] for e in result.excerpts} == {pid}
 
 

@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+from .concepts import normalize_concepts
 from .config import Config
 from .db import KnowledgeBase
 from .prompts import CONCEPTS_SYSTEM, EXTRACT_SYSTEM
@@ -121,7 +122,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     window_info = apply_active_window(cfg, kb)
     extract_system = EXTRACT_SYSTEM + '\n每个非空字段必须在 field_evidence 提供原文标记列表；无依据留空。'
     extract_system += '\n每个独立句子就地附其直接依据，不把多个分号连接的结论统一在段末附一串引用；每句最多 3 个直接来源，复杂内容分成多句。'
-    concept_system = CONCEPTS_SYSTEM + '\n每条 definition 必须含本批原文引用 [P# p.N]；无页码不写页码，无依据不生成。'
+    concept_system = CONCEPTS_SYSTEM
+    concept_instruction = '只抽取本批原文出现的术语；分别说明文中定义、用法和证据缺口。'
     # 较长的指令作为分批预算基准，确保两类请求都容纳得下。
     system = max([extract_system, concept_system], key=len)
     instruction = '仅分析本批原文。未读取部分不能称为原文未提及。'
@@ -148,7 +150,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         texts = [repair_text(d, 0) for d in plan.directives]
         candidates = [(extract_system, text) for text in texts]
         if with_concepts:
-            candidates.append((concept_system, '只抽取本批原文出现的术语，逐条给出定义并附原文引用。'))
+            candidates.append((concept_system, concept_instruction))
         if any(sum(meter.estimate_message(m) for m in build_messages(sys, full_ctx, text))
                > cfg.context.available_tokens for sys, text in candidates):
             plan.mode, plan.directives = 'batched', []
@@ -161,7 +163,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
             'total_chunks': len(chunks), 'read_chunks': len(chunks), 'omitted_chunks': [],
             'sections': sorted({c.get('section') or '正文' for c in chunks}),
             'basis': 'indexed_chunks', 'reading_mode': 'whole',
-            'note': plan.note + ' 每条指令只提取指定章节；其余章节仅作上下文参考。',
+            'note': plan.note + ' 每条指令以原文编号和字符区间限定目标，章节标签仅作导航；目标之外仅作上下文参考。',
         }
     else:
         batches, all_excerpts, coverage = reading_batches(kb, cfg, [paper], system, instruction)
@@ -184,6 +186,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     brief_entries: list[dict] = []
     structure_failures: list[dict] = []
     structure_failures: list[dict] = []
+    repair_attempts: list[dict] = []
+    full_terms_attempted = False
     for index, (directive, excerpts) in enumerate(units, 1):
         unit_label = directive.id if directive is not None else f'b{index}'
         checkpoint(f'解读原文第 {index}/{len(units)} 段')
@@ -200,6 +204,7 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
         data, issues, gates = _run_with_repair(
             llm, extract_system, ctx, directive, unit_instruction, scope, unit_label, tracker,
             meter=meter, available_tokens=cfg.context.available_tokens, failures=structure_failures,
+            repairs=repair_attempts,
         )
         gate_log.append({'unit': unit_label, **gates.to_dict()})
         if gates.failed and data is not None:
@@ -223,19 +228,17 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
                                  for field, _ in _FIELDS], scope))
         if isinstance(data.get('field_notes'), str) and data['field_notes'].strip():
             batch_notes.append({'batch': index, 'text': data['field_notes'], 'status': 'unreviewed_model_note'})
-        if with_concepts:
+        if with_concepts and (shared_ctx is None or not full_terms_attempted):
+            # Whole-paper directives share the exact terms prompt. Once attempted,
+            # don't send it again at a different extraction step, even on failure.
+            full_terms_attempted = shared_ctx is not None
             try:
                 from .usage import tracked_json
-                cdata = tracked_json(llm,
-                    build_messages(concept_system, ctx, '只抽取本批原文出现的术语，逐条给出定义并附原文引用。'),
-                    task='concepts', tracker=tracker,
-                )
-                concepts = cdata.get('concepts') or []
-                if not isinstance(concepts, list):
-                    raise ValueError('concepts 必须是数组。')
-                all_concepts.extend(c for c in concepts if isinstance(c, dict)
-                                    and isinstance(c.get('term'), str) and isinstance(c.get('definition'), str)
-                                    and not citation_issues(c['definition'], excerpts))
+                messages = build_messages(concept_system, ctx, concept_instruction)
+                if sum(meter.estimate_message(m) for m in messages) > cfg.context.available_tokens:
+                    raise ValueError('术语请求超出原文窗口，未发送。')
+                cdata = tracked_json(llm, messages, task='concepts', tracker=tracker)
+                all_concepts.extend(normalize_concepts(cdata.get('concepts', []), excerpts))
             except Exception as exc:
                 if getattr(exc, 'stop_analysis_run', False):
                     raise
@@ -263,8 +266,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     candidates = []
     for batch, (fields, sources) in enumerate(semantic_inputs, 1):
         candidates.extend(make_units(fields, sources, batch))
-    merged['_candidates'] = [{k: u[k] for k in ('id', 'field', 'text', 'batch', 'candidate_tags', 'adjacent_tags')}
-                             for u in candidates]
+    candidate_keys = ('id', 'field', 'text', 'batch', 'candidate_tags', 'adjacent_tags', 'performance_scope_warning')
+    merged['_candidates'] = [{k: u[k] for k in candidate_keys if k in u} for u in candidates]
     from .candidate_snapshots import save as save_candidates
     candidate_id = save_candidates(kb, paper_id, material_id, merged['_candidates'], all_excerpts,
                                   model=getattr(llm, 'name', 'unknown'), run_id=getattr(llm, 'rid', None),
@@ -312,6 +315,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     if structure_failures:
         # 结构损坏的原始片段留档：否则这类失败事后无法复盘
         coverage['structure_failures'] = structure_failures
+    if repair_attempts:
+        coverage['repair_attempts'] = repair_attempts
     if structure_failures:
         # 结构损坏的原始片段留档：否则这类失败事后无法复盘
         coverage['structure_failures'] = structure_failures
@@ -360,7 +365,8 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
     merged['_model'] = getattr(llm, 'name', 'unknown')
     if not isinstance(merged.get('field'), str) or citation_issues(merged.get('field') or '', all_excerpts):
         merged['field'] = ''
-    unique = {(c['term'], c['definition']): c for c in all_concepts}
+    unique = {(c['term'], c['definition'], tuple((s['kind'], s.get('quote'), s['text'])
+                                               for s in c.get('sections', []))): c for c in all_concepts}
     merged['concepts'] = list(unique.values())
     if concept_errors:
         merged['_concepts_error'] = '；'.join(concept_errors)
@@ -434,13 +440,15 @@ def _validate_fields(data: dict, excerpts: list[dict]):
 
 def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
                      scope: list[dict], unit_label: str, tracker=None, *,
-                     meter=None, available_tokens=None, failures: list | None = None):
+                     meter=None, available_tokens=None, failures: list | None = None,
+                     repairs: list | None = None):
     """跑一条指令，按闸门结果**有界修复**。
 
     返回 ``(data | None, issues, gates)``。``data is None`` 表示这条指令
     没有可用产出（例如输出被截断）—— 此时如实记未覆盖，不伪造空字段。
 
-    修复只针对「疑似漏读」（条数低于期望下限）。截断不自动细分：
+    修复针对条数偏低，以及字段引用已校验但正文缺引用的格式问题。
+    不在本地推断每条证据归属；重提结果仍逐项走相同校验。截断不自动细分：
     那需要重新规划指令，留到下一版；这里先保证不崩、不假通过。
     """
     from .gates import MAX_REPAIR_ROUNDS, GateReport, GateResult, count_claims, evaluate, repair_text
@@ -491,9 +499,13 @@ def _run_with_repair(llm, system: str, ctx: str, directive, fallback: str,
         score = (len(gates.failed) == 0, claims)
         if best is None or score >= best[0]:
             best = (score, data, issues, gates)
-        if not gates.needs_repair or directive is None or attempt >= MAX_REPAIR_ROUNDS:
+        retry = gates.needs_repair and directive is not None and attempt < MAX_REPAIR_ROUNDS
+        if gates.failed and repairs is not None:
+            repairs.append({'unit': unit_label, 'attempt': attempt+1,
+                            'gates': gates.to_dict(), 'retry': retry})
+        if not retry:
             break
-        text = repair_text(directive, claims)
+        text = repair_text(directive, claims, gates)
     return best[1], best[2], best[3]
 
 

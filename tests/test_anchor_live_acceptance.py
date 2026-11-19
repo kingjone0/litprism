@@ -102,7 +102,8 @@ def test_durable_pair_uses_same_sources_and_first_attempts_without_semantic_clai
             raise llm.requests.exceptions.ConnectTimeout('controlled first attempt failure')
         quote = {'source': 'P1', 'quote': 'alphatopic original source.'}
         if anchor:
-            catalog = __import__('json').loads(messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n')[1])
+            catalog, _ = __import__('json').JSONDecoder().raw_decode(
+                messages[-1]['content'].split('【试验定位锚点（程序生成，不是语义结论）】\n', 1)[1])
             a = next(x for x in catalog if x['source'] == 'P1')
             quote = {'source': 'P1', 'anchor_id': a['anchor_id']}
         answer = 'alphatopic original source [P1]'

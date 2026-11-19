@@ -31,10 +31,31 @@ from dataclasses import dataclass, field
 
 from ..config import Config, ContextConfig
 from ..refs import make_ref, safe_ref
-from .meter import Measurement, NodeCost
+from .meter import Measurement
 
 # 触发来源（与 invariants.FAILURE_CODES 之外的一套，表示"为什么压"）
 TRIGGERS = ("nudge", "pressure", "manual", "overflow")
+
+
+def dialogue_turns(messages):
+    """Group a question and all its replies, ignoring intervening checkpoints."""
+    turn = []
+    for message in messages:
+        if message.get('kind') == 'compact-checkpoint':
+            continue
+        role = message.get('role')
+        if role == 'assistant' and turn and turn[0]['role'] == 'user':
+            turn.append(message)
+            continue
+        if turn:
+            yield turn
+        turn = [message]
+    if turn:
+        yield turn
+
+
+def complete_turn(turn):
+    return len(turn) >= 2 and turn[0]['role'] == 'user' and turn[-1]['role'] == 'assistant'
 
 
 @dataclass
@@ -106,12 +127,14 @@ class Policy:
             if n.kind == "compact-checkpoint":
                 zones[n.seq] = "压缩检查点（它装着摘要本身）"
 
-        users = [m["seq"] for m in messages if m.get("role") == "user" and isinstance(m.get("seq"), int)]
+        users = [m["seq"] for m in messages if m.get("role") == "user"
+                 and m.get("kind") != "compact-checkpoint" and isinstance(m.get("seq"), int)]
         if users:
             zones[users[0]] = "第一条用户消息（研究意图，丢了整段会话失去锚）"
             zones[users[-1]] = "最后一条用户消息（当前指令）"
 
-        seqs = sorted(m["seq"] for m in messages if isinstance(m.get("seq"), int))
+        seqs = sorted(m["seq"] for m in messages
+                      if m.get('kind') != 'compact-checkpoint' and isinstance(m.get("seq"), int))
         for s in seqs[-self.cfg.recent_turns_protected :]:
             zones.setdefault(s, f"最近 {self.cfg.recent_turns_protected} 条消息（活跃工作集）")
 
@@ -121,6 +144,11 @@ class Policy:
                 s = m.get("seq")
                 if isinstance(s, int):
                     zones[s] = "当前轮的引用片段（正在被引用的证据）"
+
+        for turn in dialogue_turns(messages):
+            if complete_turn(turn) and any(m['seq'] in zones for m in turn):
+                for m in turn:
+                    zones.setdefault(m['seq'], '与受保护消息属于同一轮问答')
 
         # ---- LitPrism 特化 2：交付物生成中的源范围 ----
         # 生成中的综述/对比报告，其依据不能被折掉。由调用方通过 extra_protected 注入。
@@ -256,6 +284,8 @@ class Policy:
         messages: list[dict] | None = None,
         extra_protected: dict[int, str] | None = None,
         aggressive: bool = False,
+        retain_tokens: int | None = None,
+        eligible_refs: set[str] | None = None,
     ) -> SelectionResult:
         """选出可压缩区间。找不到就返回 ``ok=False``（静默 no-op）。
 
@@ -275,90 +305,42 @@ class Policy:
         if extra_protected:
             zones.update(extra_protected)
 
-        def compactable(n: NodeCost) -> bool:
-            # 三条硬约束：system 不折、checkpoint 不折、受保护区不折
-            if n.role == "system":
-                return False
-            if n.kind == "compact-checkpoint":
-                return False
-            if n.seq in zones:
-                return False
-            return True
-
-        # ---- 1. 从头部找第一个可压缩节点 ----
-        start = 0
-        while start < len(nodes) and not compactable(nodes[start]):
-            start += 1
-        if start >= len(nodes):
-            return SelectionResult(
-                ok=False,
-                noop_reason="没有可压缩的消息（全部受保护或为系统/摘要节点）",
-                protected_snapshot=zones,
-            )
-
-        # ---- 2. 连续可压缩段的上界 ----
-        run_end = start
-        while run_end < len(nodes) and compactable(nodes[run_end]):
-            run_end += 1
-
-        # ---- 3. 尾部保留：预算位置与受保护区起点取较早者 ----
-        retain = self.cfg.effective_retain_tokens
+        # Compute the tail budget on the actual visible normal messages. A
+        # checkpoint is already compacted and is not part of the raw tail.
+        normal = [n for n in nodes if n.kind != 'compact-checkpoint']
+        by_seq = {n.seq: n for n in normal}
+        retain = self.cfg.effective_retain_tokens if retain_tokens is None else retain_tokens
         if aggressive:
             retain = max(1, retain // 2)
-
         acc = 0
-        budget_from = len(nodes)
-        while budget_from > 0 and acc < retain:
-            budget_from -= 1
-            acc += nodes[budget_from].tokens
-
-        protected_from = len(nodes)
-        for i in range(len(nodes) - 1, -1, -1):
-            if nodes[i].protected or nodes[i].seq in zones:
-                protected_from = i
-            else:
+        keep = set()
+        for node in reversed(normal):
+            if acc >= retain:
                 break
+            keep.add(node.seq)
+            acc += node.tokens
 
-        keep_from = min(budget_from, protected_from)
-
-        # ---- 4. 安全切口：切口处必须是 user（新轮开始），避免孤儿提问 ----
-        while keep_from > start and keep_from < len(nodes) and nodes[keep_from].role != "user":
-            keep_from -= 1
-
-        if keep_from <= start:
-            # 区分两种 no-op：预算覆盖全部 vs 切口不安全。前者是正常状态，后者需要人看。
-            if budget_from <= start:
-                reason = (
-                    f"保留预算 {retain} token 已覆盖整个上下文，无需压缩"
-                    "（这是正常状态，不是错误）"
-                )
-            else:
-                reason = "找不到安全切口（继续回退会切到受保护区或切断问答配对）"
+        candidate = []
+        for turn in dialogue_turns(messages or [
+            {'seq': n.seq, 'role': n.role, 'ref': n.ref} for n in normal
+        ]):
+            if complete_turn(turn) and all(
+                m['seq'] in by_seq and m['seq'] not in zones and m['seq'] not in keep
+                and (eligible_refs is None or m['ref'] in eligible_refs) for m in turn
+            ):
+                candidate.extend(by_seq[m['seq']] for m in turn)
+            elif candidate:
+                break
+        if not candidate:
             return SelectionResult(
                 ok=False,
-                noop_reason=reason,
-                protected_snapshot=zones,
-            )
-
-        # ---- 5. 区间不得越过连续可压缩段 ----
-        end_exclusive = min(keep_from, run_end)
-        if end_exclusive <= start:
-            return SelectionResult(
-                ok=False,
-                noop_reason="可压缩段与保留段之间没有空间",
-                protected_snapshot=zones,
-            )
-
-        candidate = nodes[start:end_exclusive]
-        if len(candidate) < 2:
-            return SelectionResult(
-                ok=False,
-                noop_reason=f"候选区间只有 {len(candidate)} 条消息，压缩不划算",
+                noop_reason="保留预算或受保护区已覆盖可压缩的完整问答",
                 protected_snapshot=zones,
             )
 
         shadowed_tokens = sum(n.tokens for n in candidate)
-        retained_tokens = sum(n.tokens for n in nodes[end_exclusive:])
+        retained = [n for n in normal if n.seq > candidate[-1].seq]
+        retained_tokens = sum(n.tokens for n in retained)
 
         return SelectionResult(
             ok=True,
@@ -369,7 +351,7 @@ class Policy:
             retained_tokens=retained_tokens,
             reason=(
                 f"遮蔽 {len(candidate)} 条（{shadowed_tokens} token），"
-                f"保留 {len(nodes) - end_exclusive} 条（{retained_tokens} token）"
+                f"保留 {len(retained)} 条（{retained_tokens} token）"
             ),
             protected_snapshot=zones,
         )
