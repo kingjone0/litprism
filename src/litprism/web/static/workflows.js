@@ -232,7 +232,7 @@ async function loadAnalysisRuns(pid) {
         <p class="source-intro">${Object.entries(analysisStages).filter(([key]) => key !== 'concepts' || run.with_concepts).map(([key, label]) => `${label} ${run.spent[key]} 次`).join(' · ')}（已用调用次数）</p>
         ${(run.steps || []).some(s => s.request_settings?.max_tokens) ? `<details><summary>各次请求的实际输出额度</summary>${run.steps.filter(s => s.request_settings?.max_tokens).map(s => `<p class="source-intro">${esc(analysisStages[s.task] || s.task)} · 第 ${s.step} 步 / 尝试 ${s.attempt} · ${s.request_settings.output_mode === 'automatic' ? '自动分配' : '历史固定额度'} ${fmtNum(s.request_settings.max_tokens)} token${s.request_settings.estimated_input_tokens == null ? '' : ` · 输入估算 ${fmtNum(s.request_settings.estimated_input_tokens)}`}</p>`).join('')}</details>` : ''}
         <p class="source-intro">已报告用量：输入 ${run.usage.input} / 输出 ${run.usage.output} token；${run.usage.unknown_usage_calls} 次用量未知。${esc(run.stop_reason || '')}</p>
-        ${run.candidate_count ? `<p class="source-intro">已保留 ${fmtNum(run.candidate_count)} 条提取候选；机器复核未完成也可在候选列表核对原文并人工审核。</p>` : ''}
+        ${run.candidate_count ? `<p class="source-intro">已保留 ${fmtNum(run.candidate_count)} 条提取候选${run.candidate_incomplete ? `（提取进行中，已产出第 ${run.candidate_progress?.completed || '?'}/${run.candidate_progress?.total || '?'} 段候选）` : ''}；机器复核未完成也可在候选列表核对原文并人工审核。</p>` : ''}
       </div>`).join('') || '<p class="source-intro">尚无解读记录。使用上方“解读论文”开始。</p>'}</details>`;
     $('[data-refresh-runs]', box).onclick = () => loadAnalysisRuns(pid);
     $$('[data-resume-run]', box).forEach(button => button.onclick = async () => {
