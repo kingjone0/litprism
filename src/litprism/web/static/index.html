@@ -48,8 +48,8 @@ try {
         <button class="side-item" data-view="verify"><span data-icon="shield"></span><span class="label">真实性核验</span></button>
         <button class="side-item" data-view="recommend"><span data-icon="search"></span><span class="label">发现文献</span></button>
         <button class="side-item" data-view="deliverables"><span data-icon="document"></span><span class="label">研究产出</span></button>
-        <button class="side-item" data-view="knowledge"><span data-icon="library"></span><span class="label">来源与知识</span></button>
-        <button class="side-item" data-view="annotations"><span data-icon="document"></span><span class="label">阅读标注</span></button>
+        <button class="side-item" data-view="knowledge"><span data-icon="knowledge"></span><span class="label">来源与知识</span></button>
+        <button class="side-item" data-view="annotations"><span data-icon="annotate"></span><span class="label">阅读标注</span></button>
       </nav>
 
       <div class="side-scroll">
@@ -73,8 +73,8 @@ try {
       </div>
 
       <div class="side-footer">
-        <button class="side-item" data-view="memories"><span data-icon="chat"></span><span class="label">研究偏好</span></button>
-        <button class="side-item" data-view="trash"><span data-icon="document"></span><span class="label">文献回收站</span></button>
+        <button class="side-item" data-view="memories"><span data-icon="memories"></span><span class="label">研究偏好</span></button>
+        <button class="side-item" data-view="trash"><span data-icon="restore"></span><span class="label">文献回收站</span></button>
         <button class="side-item" data-view="skills"><span data-icon="skills"></span><span class="label">研究技能</span><span class="count" id="skillCount"></span></button>
         <button class="side-item" data-view="settings">
           <span data-icon="settings"></span><span class="label">设置</span>
@@ -244,7 +244,7 @@ try {
             </div>
           </div>
           <div class="search-box" style="margin-bottom:12px">
-            <span class="ico"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></span>
+            <span class="ico" data-icon="search"></span>
             <input id="skillSearch" placeholder="搜索 Skill 名称或路径" aria-label="搜索研究技能名称或路径">
           </div>
           <div id="skillCards"></div>
@@ -259,7 +259,7 @@ try {
             <div style="font-size:12px;color:var(--muted);line-height:1.7">
               每个 Skill 是一个子目录，内含 <code class="mono">skill.yaml</code> 与
               <code class="mono">prompt.md</code>。<br>
-              <span class="inline-note"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 2.5 20h19L12 4Z"/><path d="M12 10v4.5M12 17.4v.1"/></svg><span>Skill 仅支持<strong>声明式配置</strong>，目录内的可执行文件不会被加载或执行。</span></span>
+              <span class="inline-note"><span data-icon="alert"></span><span>Skill 仅支持<strong>声明式配置</strong>，目录内的可执行文件不会被加载或执行。</span></span>
             </div>
           </div></div>
         </section>

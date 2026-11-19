@@ -98,6 +98,12 @@ function icon(name) {
     trash: '<path d="M4 7h16M9.5 7V4.8h5V7"/><path d="M6.5 7 7.6 20h8.8L17.5 7"/><path d="M10.5 11v5M13.5 11v5"/>',
     note: '<path d="M5 3.5h9L19 8.5V20.5H5Z"/><path d="M14 3.5v5h5"/><path d="M8.5 13h7M8.5 16.5h4.5"/>',
     arrow: '<path d="M7 17 17 7"/><path d="M9 7h8v8"/>',
+    /* V1 语义补齐：消除导航图标复用（此前 library/document/search 各被多处共用） */
+    knowledge: '<ellipse cx="12" cy="5.5" rx="8" ry="2.5"/><path d="M4 5.5v6c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-6"/><path d="M4 11.5v6c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-6"/>',
+    annotate: '<path d="M4 20h16"/><path d="m6 16 9.5-9.5a2.1 2.1 0 0 1 3 3L9 19l-4 1 1-4Z"/>',
+    restore: '<path d="M3 5v5h5"/><path d="M3.5 10a8.5 8.5 0 1 1 2 6.5"/><path d="M9.5 11.5 12 14l3.5-4"/>',
+    memories: '<path d="M6 3.5h12V20.5l-6-4-6 4V3.5Z"/>',
+    compare: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/><path d="M7.5 9h2M14.5 9h2M7.5 15h2M14.5 15h2"/>',
   };
   return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.document}</svg>`;
 }
