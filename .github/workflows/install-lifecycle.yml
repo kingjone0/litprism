@@ -74,9 +74,37 @@ jobs:
 
           'keep-me' | Out-File (Join-Path $dataDir 'ci-retention.marker') -Encoding utf8
 
-          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
-          Get-Process litprism-sidecar -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Sleep -Seconds 4
+          $scProcessId = ($sc | Select-Object -First 1).ProcessId
+          $scPorts = @(Get-NetTCPConnection -OwningProcess $scProcessId -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty LocalPort)
+          "sidecar PID=$scProcessId  监听端口=$($scPorts -join ',')"
+          "SC_PORTS=$($scPorts -join ',')" | Out-File "$env:GITHUB_ENV" -Append -Encoding utf8
+
+      - name: 正常退出并核对进程回收
+        shell: pwsh
+        run: |
+          $app = Get-Process LitPrism -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { throw '应用进程不存在，无法验证正常退出' }
+
+          # 关主窗口（不是 Stop-Process），让外壳走自己的退出路径并回收 sidecar
+          if (-not $app.CloseMainWindow()) { throw '主窗口无法关闭，正常退出路径未走通' }
+          if (-not $app.WaitForExit(30000)) { throw '30 秒内应用进程未退出' }
+          "应用进程已正常退出"
+
+          $left = $null
+          for ($i = 0; $i -lt 20; $i++) {
+            $left = Get-Process litprism-sidecar -ErrorAction SilentlyContinue
+            if (-not $left) { break }
+            Start-Sleep -Seconds 1
+          }
+          if ($left) { throw "正常退出后 sidecar 仍残留: $($left.Id -join ',')" }
+          "sidecar 进程已回收"
+
+          foreach ($port in (@($env:SC_PORTS -split ',') | Where-Object { $_ })) {
+            $holder = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+            if ($holder) { throw "退出后端口 $port 仍被占用: $($holder.OwningProcess -join ',')" }
+          }
+          "监听端口已释放"
 
       - name: 静默卸载
         shell: pwsh

@@ -12,3 +12,11 @@ def test_default_release_tag_is_a_real_version():
     tag = match.group(1)
     assert re.fullmatch(r'v\d+\.\d+\.\d+', tag), f'默认 tag 仍是占位值：{tag}'
     assert '-ci.' not in tag, f'默认 tag 不能停留在预发布占位：{tag}'
+
+
+def test_graceful_exit_is_verified_not_force_killed():
+    text = WORKFLOW.read_text(encoding='utf-8')
+    assert '正常退出并核对进程回收' in text, '缺少正常退出验收步骤'
+    assert 'CloseMainWindow()' in text, '没有走主窗口关闭路径'
+    assert 'sidecar 进程已回收' in text, '没有断言 sidecar 回收'
+    assert 'Stop-Process -Id $app.Id -Force' not in text, '仍在用强制杀进程掩盖退出回收问题'
