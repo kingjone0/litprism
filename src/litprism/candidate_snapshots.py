@@ -12,7 +12,8 @@ from .materials import MaterialChanged
 from .semantics import payload_hash
 
 
-def save(kb, pid, material_id, candidates, excerpts, *, model, run_id=None, parent_hash=None):
+def save(kb, pid, material_id, candidates, excerpts, *, model, run_id=None, parent_hash=None,
+         incomplete: bool = False, progress: dict | None = None):
     if not candidates:
         return None
     from .knowledge import now
@@ -25,12 +26,22 @@ def save(kb, pid, material_id, candidates, excerpts, *, model, run_id=None, pare
         parent = (kb.get_analysis(pid) or {}).get('payload') or {}
         if parent_hash is not None and payload_hash(parent) != parent_hash:
             raise MaterialChanged('提取期间分析版本已变化，未发布本轮候选。')
+        if incomplete and progress:
+            completed = progress.get('completed', len(candidates))
+            total = progress.get('total', '?')
+            note = f"提取进行中（第 {completed}/{total} 批候选已就绪），机器复核尚未完成；可直接核对原文并人工审核。"
+        elif incomplete:
+            note = '提取进行中，机器复核尚未完成；可直接核对原文并人工审核。'
+        else:
+            note = '提取候选已保存，机器复核尚未完成；可以直接核对原文并人工审核。'
         payload = {'_stage': 'candidate', '_model': model, '_analysis_run_id': run_id,
                    '_parent_analysis_hash': payload_hash(parent), '_candidates': candidates,
-                   '_citations': citations, '_semantic_review': {
+                   '_citations': citations, '_incomplete': bool(incomplete),
+                   '_progress': progress or {},
+                   '_semantic_review': {
                        'status': 'not_run', 'passed': False, 'items': [], 'differences': [],
                        'supported': 0, 'pending': len(candidates),
-                       'note': '提取候选已保存，机器复核尚未完成；可以直接核对原文并人工审核。'}}
+                       'note': note}}
         identity = 'ac_'+payload_hash([pid, material_id, payload])
         con.execute('INSERT OR IGNORE INTO analysis_versions VALUES (?,?,?,?,?,?)',
                     (identity, pid, material_id, json.dumps(payload, ensure_ascii=False), model, now()))

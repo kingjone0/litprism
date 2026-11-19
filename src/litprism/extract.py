@@ -228,6 +228,19 @@ def analyze_paper(kb: KnowledgeBase, cfg: Config, llm, paper_id: str, *,
                                  for field, _ in _FIELDS], scope))
         if isinstance(data.get('field_notes'), str) and data['field_notes'].strip():
             batch_notes.append({'batch': index, 'text': data['field_notes'], 'status': 'unreviewed_model_note'})
+        # G06: 逐指令即时持久化候选快照（中间态，incomplete=True）
+        # 即使提取在后续批次中断，已完成批次的候选也可在界面立即查看并直接人工审核。
+        from .semantics import make_units
+        step_units = []
+        for b_idx, (b_fields, b_sources) in enumerate(semantic_inputs, 1):
+            step_units.extend(make_units(b_fields, b_sources, b_idx))
+        candidate_keys = ('id', 'field', 'text', 'batch', 'candidate_tags', 'adjacent_tags', 'performance_scope_warning')
+        step_candidates = [{k: u[k] for k in candidate_keys if k in u} for u in step_units]
+        from .candidate_snapshots import save as save_candidates
+        step_progress = {'completed': index, 'total': len(units), 'unit': unit_label}
+        save_candidates(kb, paper_id, material_id, step_candidates, all_excerpts,
+                        model=getattr(llm, 'name', 'unknown'), run_id=getattr(llm, 'rid', None),
+                        parent_hash=parent_hash, incomplete=True, progress=step_progress)
         if with_concepts and (shared_ctx is None or not full_terms_attempted):
             # Whole-paper directives share the exact terms prompt. Once attempted,
             # don't send it again at a different extraction step, even on failure.

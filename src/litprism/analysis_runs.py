@@ -202,12 +202,15 @@ class AnalysisRuns:
         latest = {c['step']: c for c in calls}
         from .candidate_snapshots import by_run
         candidate = by_run(self.kb, row['paper_id'], rid)
+        cand_payload = (candidate or {}).get('payload') or {}
         return {k: row[k] for k in ('id', 'paper_id', 'status', 'stage', 'stop_reason', 'created_at', 'updated_at')} | {
             'model': manifest['model'], 'with_concepts': manifest['with_concepts'],
             'semantic_review': manifest.get('semantic_review', True),
             'capability_missing': manifest.get('capability_missing'),
             'candidate_snapshot_id': (candidate or {}).get('id'),
-            'candidate_count': len(((candidate or {}).get('payload') or {}).get('_candidates') or []),
+            'candidate_count': len(cand_payload.get('_candidates') or []),
+            'candidate_incomplete': bool(cand_payload.get('_incomplete', False)),
+            'candidate_progress': cand_payload.get('_progress') or {},
             'budgets': limits, 'spent': spent, 'usage': usage,
             'retry_required': any(c['status'] != 'succeeded' for c in latest.values()),
             'steps': [{'step': c['step'], 'attempt': c['attempt'], 'task': c['task'], 'status': c['status'],

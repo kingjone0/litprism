@@ -835,8 +835,8 @@ async function loadPaperDetail(versionId = null) {
           </div></div>` : `
           <div class="card"><div class="card-body">
             <div class="empty"><div class="ico">🧩</div>
-              <div class="title">${candidateView._candidates?.length ? '正式解读尚未发布' : '尚未解读'}</div>
-              <div class="desc">${candidateView._candidates?.length ? '候选已保留，可在上方核对原文并人工审核。' : '先确认本次材料范围，再开始解读。'}</div>
+              <div class="title">${candidateView._candidates?.length ? (candidateView._incomplete ? '提取进行中 / 已产出部分候选' : '正式解读尚未发布') : '尚未解读'}</div>
+              <div class="desc">${candidateView._candidates?.length ? (candidateView._incomplete ? `已提取第 ${candidateView._progress?.completed || '?'}/${candidateView._progress?.total || '?'} 段候选，可在上方核对原文并人工审核。` : '候选已保留，可在上方核对原文并人工审核。') : '先确认本次材料范围，再开始解读。'}</div>
               <div class="empty-actions">${candidateView._candidates?.length ? '' : emptyCta('analyze', '解读这篇论文')}</div>
             </div>
           </div></div>`}

@@ -78,6 +78,8 @@ def register_semantics(app, kb):
                     'stage': payload.get('_stage', 'analysis'),
                     'material_id': analysis.get('material_id'), 'material_current': analysis.get('material_current'),
                     'sources': sources, 'candidates': payload.get('_candidates') or [],
+                    'incomplete': bool(payload.get('_incomplete', False)),
+                    'progress': payload.get('_progress') or {},
                     'manual': manual, 'recall': recall(machine, len(manual))}
 
     def write(pid, claim_id, req, run=False):
