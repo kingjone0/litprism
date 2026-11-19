@@ -9,6 +9,10 @@ on:
         description: '含安装包的 Release tag'
         required: true
         default: 'v0.1.1'
+      old_tag:
+        description: '跨版本升级对照用的旧版 tag'
+        required: true
+        default: 'v0.1.0'
 
 permissions:
   contents: read
@@ -146,21 +150,21 @@ jobs:
           "数据保留 OK: $((Get-Content $marker).Trim())"
 
       - name: 下载旧版安装包（升级对照）
-        if: ${{ inputs.release_tag != 'v0.1.0' }}
+        if: ${{ inputs.release_tag != inputs.old_tag }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\oldpkg" | Out-Null
-          gh release download v0.1.0 --repo "${{ github.repository }}" `
+          gh release download "${{ inputs.old_tag }}" --repo "${{ github.repository }}" `
             --pattern "LitPrism-Setup-*.exe" --dir "$env:RUNNER_TEMP\oldpkg"
           $old = Get-ChildItem "$env:RUNNER_TEMP\oldpkg\LitPrism-Setup-*.exe" | Select-Object -First 1
-          if (-not $old) { throw '没有找到 v0.1.0 安装包' }
+          if (-not $old) { throw "没有找到 ${{ inputs.old_tag }} 安装包" }
           Move-Item $old.FullName "$env:RUNNER_TEMP\oldpkg\LitPrism-Setup-old.exe" -Force
           "旧版安装包: $($old.Name) -> LitPrism-Setup-old.exe"
 
-      - name: 跨版本升级（v0.1.0 → 当前 tag）
-        if: ${{ inputs.release_tag != 'v0.1.0' }}
+      - name: 跨版本升级（旧版 → 当前 tag）
+        if: ${{ inputs.release_tag != inputs.old_tag }}
         shell: pwsh
         run: |
           $dir = "$env:LOCALAPPDATA\Programs\LitPrism"
@@ -172,7 +176,7 @@ jobs:
           $old = "$env:RUNNER_TEMP\oldpkg\LitPrism-Setup-old.exe"
           $p = Start-Process $old -ArgumentList '/S' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "安装旧版失败 $($p.ExitCode)" }
-          'upgrade-from-v0.1.0' | Out-File (Join-Path $env:DATA_DIR 'ci-upgrade.marker') -Encoding utf8
+          'upgrade-from-${{ inputs.old_tag }}' | Out-File (Join-Path $env:DATA_DIR 'ci-upgrade.marker') -Encoding utf8
           "旧版已装，写入升级标记"
 
           $new = (Get-ChildItem "$env:RUNNER_TEMP\pkg\LitPrism-Setup-*.exe").FullName
@@ -182,7 +186,7 @@ jobs:
 
           $marker = Join-Path $env:DATA_DIR 'ci-upgrade.marker'
           if (-not (Test-Path $marker)) { throw "升级后数据丢失: $marker" }
-          if ((Get-Content $marker).Trim() -ne 'upgrade-from-v0.1.0') { throw '升级后标记被改写' }
+          if ((Get-Content $marker).Trim() -ne 'upgrade-from-${{ inputs.old_tag }}') { throw '升级后标记被改写' }
           $sc = Get-Item (Join-Path $dir 'resources\litprism-sidecar.exe')
           if ($sc.Length -lt 100MB) { throw "升级后 sidecar 异常: $($sc.Length)" }
           "跨版本升级 OK：标记保留、sidecar 落位 $([math]::Round($sc.Length/1MB,1)) MB"

@@ -33,10 +33,15 @@ def test_desktop_app_supports_quit_flag():
 
 def test_cross_version_upgrade_step_exists():
     text = WORKFLOW.read_text(encoding='utf-8')
-    assert '跨版本升级（v0.1.0 → 当前 tag）' in text, '缺少跨版本升级步骤'
-    assert 'gh release download v0.1.0' in text, '没有下载旧版作为对照'
+    assert '跨版本升级（旧版 → 当前 tag）' in text, '缺少跨版本升级步骤'
+    assert 'gh release download "${{ inputs.old_tag }}"' in text, '没有下载旧版作为对照'
     assert 'ci-upgrade.marker' in text, '没有断言升级后数据保留'
-    assert "inputs.release_tag != 'v0.1.0'" in text, '用旧 tag 触发时不应跑升级对照'
+    assert 'inputs.release_tag != inputs.old_tag' in text, '新旧 tag 相同触发时不应跑升级对照'
+    assert "old_tag:\n        description: '跨版本升级对照用的旧版 tag'" in text, '旧版基线必须可参数化'
+    defaults = re.findall(r"^\s+default:\s*'([^']+)'\s*$", text, re.M)
+    assert len(defaults) >= 2, 'release_tag 与 old_tag 都要有默认值'
+    assert all(re.fullmatch(r'v\d+\.\d+\.\d+', d) for d in defaults), \
+        f'默认 tag 仍是占位值：{defaults}'
 
 
 def test_reinstall_has_bounded_retry():
