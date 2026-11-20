@@ -952,6 +952,7 @@ async function loadPaperDetail(versionId = null) {
 
     // ---- 重命名 / 删除 ----
     $('#btnRename').onclick = () => {
+      $('.overflow-menu[open]')?.removeAttribute('open');
       const cur = p.display_title || p.title || '';
       const name = prompt('新的显示名称（只影响界面显示，不改原始题录标题）', cur);
       if (name === null) return;
@@ -964,6 +965,7 @@ async function loadPaperDetail(versionId = null) {
       }).catch(e => toast(e.message, true));
     };
     $('#btnDelete').onclick = () => {
+      $('.overflow-menu[open]')?.removeAttribute('open');
       if (!confirm('移入回收站？该论文将不再出现在检索与问答中。')) return;
       api(`/api/paper/${encodeURIComponent(S.activePaper)}`, { method: 'DELETE' })
         .then(async () => { toast('已移入回收站'); S.activePaper = null; await refreshLibrary(); openView('library', {discardReview:true}); })
@@ -1119,7 +1121,7 @@ async function loadAllAnnotations() {
       box.innerHTML = emptyState({ icon: 'annotate', title: '还没有任何标注',
         desc: '打开一篇论文的原文页，选中一段话即可标注。',
         action: emptyCta('view:library', '去知识库') });
-      $('[data-empty-action="view:library"]', box).onclick = () => openView('library');
+      // 导航由 document 级 empty-action 委托处理，不再手动 onclick（避免双重触发）
       return;
     }
     box.innerHTML = `<p class="muted" style="margin-bottom:10px">共 ${items.length} 条标注</p>` + items.map(a => {
@@ -1189,7 +1191,8 @@ async function refreshAnnotations(pid) {
     if (tab) tab.textContent = `标注 (${items.length})`;
     if (!items.length) {
       box.innerHTML = emptyState({ icon: 'annotate', title: '还没有标注',
-        desc: '切到原文页选中一段话，点标注按钮记下你的理解；之后会在这里汇总。' });
+        desc: '回到一篇论文的原文页，选中一段话即可记录你的理解；之后会在这里汇总。',
+        action: emptyCta('view:library', '去知识库') });
       return;
     }
     box.innerHTML = `<div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:4px">

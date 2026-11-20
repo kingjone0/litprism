@@ -481,6 +481,7 @@ const path = require('node:path');
     // 文献软删除后可以恢复原文。
     await page.locator('.workspace-nav [data-view=library]').click();
     await page.locator('#paperList [data-paper]').first().click();
+    await page.locator('.overflow-menu summary').click();
     await page.locator('#btnDelete').click();
     await expect(page.locator('#paperList .list-item')).toHaveCount(1);
     await expect(page.locator('#btnCompareSelected')).toBeDisabled();
