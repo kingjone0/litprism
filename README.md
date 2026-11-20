@@ -41,6 +41,39 @@
 | **多篇对比** | 选中若干论文，就方法、数据、结论做横向对照，差异处标注各自出处 |
 | **人工审核** | 机器复核只作为线索；确认、修订、撤销都由你决定，过程留痕可查 |
 | **数据管理** | 一键备份与迁移、文献回收站、研究偏好、质量面板 |
+| **界面主题** | `paper` / `paper-dark` / `minimal` / `glass` 四套主题，在设置 → 通用 → 主题中切换 |
+
+### 功能图解
+
+<div align="center">
+  <img src="docs/assets/readme/feature-discover.png" alt="发现与核验：候选池" width="88%">
+  <p><sub><b>发现与核验</b>：检索结果先进入候选池，逐条核对；arXiv 与 DOI 可一键取开放全文，订阅文献下载后导入并自动关联。</sub></p>
+</div>
+
+<div align="center">
+  <img src="docs/assets/readme/ui-reader.png" alt="全文阅读：章节与原文对照" width="88%">
+  <p><sub><b>全文阅读</b>：按章节导航，正文与引用片段同屏对照；标注、术语与原文在同一个工作台。</sub></p>
+</div>
+
+<div align="center">
+  <img src="docs/assets/readme/feature-analysis.png" alt="结构化解读：六字段与来源定位" width="88%">
+  <p><sub><b>结构化解读</b>：研究问题、方法、实验与结论逐条生成，每条陈述都能点击出处回到原句。</sub></p>
+</div>
+
+<div align="center">
+  <img src="docs/assets/readme/feature-annotation.png" alt="阅读标注：跨论文汇总与回跳原文" width="88%">
+  <p><sub><b>阅读标注</b>：选中原文写下自己的理解，跨论文统一汇总，点击即回跳到对应段落。</sub></p>
+</div>
+
+<div align="center">
+  <img src="docs/assets/readme/feature-chat.png" alt="带来源问答：回答与引用编号" width="88%">
+  <p><sub><b>带来源问答</b>：回答带可点击的引用编号与模型信息，原文证据就在右侧，方便逐条核对。</sub></p>
+</div>
+
+<div align="center">
+  <img src="docs/assets/readme/feature-backup.png" alt="数据管理：备份与恢复" width="88%">
+  <p><sub><b>数据管理</b>：一键备份、校验、恢复到新目录；文献、标注与审核记录都随备份带走。</sub></p>
+</div>
 
 ---
 
@@ -48,7 +81,7 @@
 
 <div align="center">
   <img src="docs/assets/readme/ui-library.png" alt="知识库：按核验状态管理文献" width="100%">
-  <p><sub>知识库：每篇文献都标明核验状态与材料完整度</sub></p>
+  <p><sub>知识库：每篇文献都标明核验状态与材料完整度；界面提供 paper / paper-dark / minimal / glass 四套主题</sub></p>
 </div>
 
 <div align="center">
