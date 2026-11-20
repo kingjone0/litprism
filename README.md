@@ -175,7 +175,7 @@ npm install; npm start       # Electron 桌面外壳
 - 桌面外壳为 Electron + 本地 Python sidecar，数据保存在本机；题录核验走 Crossref / OpenAlex / arXiv，全文只取开放副本，不绕过付费墙、不使用账户凭据。
 - 核验区分 `not_found`（确实查不到）与 `unchecked`（没查成），避免把真论文误判为编造；每条结论必须绑定原文块与页码。
 - 非 arXiv 全文来源按 Unpaywall → OpenAlex → Semantic Scholar → Europe PMC 顺序查询，只认直链 PDF；找到的来源、许可与获取时间写入候选记录。
-- 截至 v0.1.2 的验证：1692 条测试通过（2 跳过）、N10 体验套件 56/56、桌面端 31/31、云端安装生命周期 10 步全通过（含跨版本升级）。
+- v1.0.0 验证：1692 条测试通过（2 跳过）、N10 体验套件 56/56、桌面端 31/31、云端安装生命周期 10 步全通过（v0.1.2 → v1.0.0 跨版本升级）。
 - 真实模型（deepseek-v4.1-flash）下端到端跑通：arXiv 与非 arXiv OA 论文的核验、全文、解读、人工补录、标注、带出处问答、备份恢复。
 
 ### 已知边界
