@@ -1,7 +1,7 @@
 {
   "name": "litprism-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "文献棱镜 LitPrism 桌面外壳（Electron）；界面由 sidecar 提供，没有单独的前端打包步骤",
   "scripts": {
     "start": "electron desktop-electron/main.js",
